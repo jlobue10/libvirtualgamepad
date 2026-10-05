@@ -343,12 +343,11 @@ Done on the author's desktop (Windows 11 Pro 26300):
   dry run verified against the fork branch. It needs the driver prerelease first.
 
 Left:
-1. Tag the driver fork: `git tag --no-sign v0.1.0-beta.101 origin/feat/steam-controller-profile && git push origin v0.1.0-beta.101`
-   (a **lightweight** tag, `--no-sign` because this machine signs tags by default; `publish-release.ps1` refuses annotated ones and requires the repository's **immutable releases** setting, enabled on the fork on 2026-10-05 after v0.1.0-beta.100 published mutable and could not be reused; `release-windows.yml` publishes the prerelease. `build-release-package.ps1` also requires the tagged commit to carry **exactly one tag**, which is why the tag goes on the branch head rather than on e6611a2, where beta.100 already sits; the driver code is identical).
-2. `python tools/capture/Update-VibepolloDriverPins.py --tag v0.1.0-beta.101` (drop `--dry-run`), then
-   `gh workflow run ci.yml -R jlobue10/Vibepollo --ref feat/steam-controller-profile` and download the
-   `unsigned-installer-Windows` artifact (`tester-windows-installer.yml` needs the SignPath secrets the
-   fork does not have).
+1. Done 2026-10-05 22:05: `v0.1.0-beta.101` on ce39de4 published immutably (DriverVer `10/05/2026,0.1.0.68`,
+   archive sha256 4a717c63…043f1). Lessons folded into the text above: lightweight, unsigned, one tag
+   per commit, immutable releases on.
+2. Done 22:17: `Update-VibepolloDriverPins.py --tag v0.1.0-beta.101` committed f78995a on the Vibepollo
+   fork; `ci.yml` dispatched (run 37381558783) for the `unsigned-installer-Windows` artifact.
 3. §7.5 test rig: a Hyper-V Windows 11 VM `SC26-RIG` exists on the author's desktop (built 2026-10-05
    under `C:\VMs\sc26-rig`: unattended install, test signing on, PowerShell Direct as `tester`; the
    scripts there provision it, update the driver from a downloaded test-signed package and run
