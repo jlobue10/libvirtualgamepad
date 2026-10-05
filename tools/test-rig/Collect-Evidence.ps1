@@ -38,6 +38,6 @@ if (Test-Path $VibepolloLog) {
 }
 $zip = "$OutDir.zip"
 # Windows ships bsdtar; Compress-Archive's module does not load on every machine.
-& "$env:windir\System32	ar.exe" -a -c -f $zip -C $OutDir .
+& (Join-Path $env:windir 'System32\tar.exe') -a -c -f $zip -C $OutDir .
 "evidence: $zip"
 Get-ChildItem $OutDir | Select-Object Name, Length | Format-Table -AutoSize
