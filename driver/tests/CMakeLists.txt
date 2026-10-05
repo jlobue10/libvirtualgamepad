@@ -34,6 +34,10 @@ if(WIN32)
     target_compile_features(probe_ds5_usb PRIVATE cxx_std_20)
     target_include_directories(probe_ds5_usb PRIVATE ../../include)
     target_link_libraries(probe_ds5_usb PRIVATE setupapi hid)
+    add_executable(probe_sc26_usb probe_sc26_usb.cpp ../../client/client.cpp)
+    target_compile_features(probe_sc26_usb PRIVATE cxx_std_20)
+    target_include_directories(probe_sc26_usb PRIVATE ../../include)
+    target_link_libraries(probe_sc26_usb PRIVATE setupapi hid)
     # Deliberately not a CTest: creates a controller on the installed driver.
 endif()
 

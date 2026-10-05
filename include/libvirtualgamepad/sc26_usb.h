@@ -675,15 +675,13 @@ struct feature_state {
   std::uint8_t last_unknown_command {};
   std::uint32_t unknown_commands {};
 
-  void reset() noexcept {
-    const attributes keep = attrs;
-    const auto serial = unit_serial;
-    const auto board = board_serial;
-    *this = feature_state {};
-    attrs = keep;
-    unit_serial = serial;
-    board_serial = board;
-  }
+  // Restores every default. The driver keeps this struct in zero-initialised
+  // WDF context memory where no constructor ever ran, so nothing from the
+  // previous contents may be preserved here: an earlier version kept the
+  // attributes and serials and thereby kept zeros, and Steam read an all-zero
+  // attribute list and an empty serial from the first test rig. Callers that
+  // customise the serial do so after reset().
+  void reset() noexcept { *this = feature_state {}; }
 };
 
 inline void put_le16(std::uint8_t *p, const std::uint16_t v) noexcept {

@@ -157,6 +157,23 @@ int main() {
     check(d.input_voltage_mv == 0 && d.current_ma == 0, "discharging report has no input figures");
   }
 
+  // The driver keeps the state in zero-initialised WDF memory: reset() has to
+  // produce the defaults from all-zero contents, not preserve them. (The first
+  // test rig returned all-zero attributes and an empty serial because it did.)
+  {
+    alignas(feature_state) unsigned char raw[sizeof(feature_state)] {};
+    auto *fs = reinterpret_cast<feature_state *>(raw);
+    fs->reset();
+    check(fs->attrs.product_id == product_id && fs->attrs.firmware_build_time == captured_firmware_build_time &&
+          fs->attrs.connection_interval_us == 4000, "reset from zeroed memory restores the attribute defaults");
+    check(std::strlen(fs->unit_serial.data()) > 0 && std::strlen(fs->board_serial.data()) > 0,
+          "reset from zeroed memory restores the serials");
+    std::uint8_t cmd[64] {1, cmd_get_attributes_values, 0};
+    std::uint8_t reply[64] {};
+    check(set_feature(cmd, sizeof(cmd), *fs) && get_feature(reply, sizeof(reply), *fs) == 64 &&
+          ule32(reply + 4) == product_id, "attributes after a zeroed-memory reset carry the product id");
+  }
+
   // Control channel: set then get, like the firmware.
   {
     feature_state fs {};
