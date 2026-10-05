@@ -172,11 +172,28 @@ This section is self-contained on purpose: the Linux session's memory does not t
   git clone -b feat/steam-controller-profile --recurse-submodules https://github.com/jlobue10/Vibepollo
   cd libvirtualgamepad; git remote add upstream https://github.com/Nonary/libvirtualgamepad; gh repo set-default jlobue10/libvirtualgamepad
   ```
-- Read this file top to bottom, then `git log --oneline -8` in both forks. Current state is §"Status".
+- Read this file top to bottom, then `git log --oneline -8` in both forks. Current state is §"Status"
+  and §7.7 (what the first Windows session already did).
+- Silent installs work: `winget install --source winget WiresharkFoundation.Wireshark` and
+  `winget install --source winget desowin.USBPcap`. The silent Wireshark install skips Npcap; that
+  is fine, the capture script below drives `USBPcapCMD.exe` directly and only needs `tshark.exe`
+  to read the files. **Reboot after installing USBPcap**: the class upper filter is registered at
+  install time but attaches to the root hubs only at boot, so `\\.\USBPcap1..N` do not exist
+  until then (the capture script checks and says so).
 - The Moonlight client side (Galaxy XR fork) lives in `jlobue10/moonlight-android`,
   `docs/HANDOFF.md`; it already reports `LI_CTYPE_STEAM` with two touchpads, motion and battery.
 
 ### 7.2 Capture 1: the controller's descriptors (plug-in capture)
+Preferred: elevated PowerShell in the repo root, controller unplugged, then
+`.\tools\capture\Capture-SteamController.ps1 -Phase Plugin` and plug the controller in when told.
+It captures every root hub, keeps the one that saw the Valve device descriptor, and writes all the
+files listed in steps 4–6 plus `captures/sc26-plugin-summary.txt` (idProduct, bcdDevice,
+interface classes, descriptor lengths). Its descriptor extraction has not yet run against a real
+capture (no controller was available in the session that wrote it); if a
+`sc26-report-descriptor-<n>.hex` is missing or looks wrong, fall back to the manual steps below
+on `captures/sc26-plugin.pcapng`, which it saves in any case.
+
+Manual path:
 1. Wireshark → Capture → pick the **USBPcap** interface the controller will land on (if unsure,
    start one capture per USBPcap root hub; the right one shows traffic when you plug in).
 2. Start capturing, **then** plug the controller in over USB-C. Wait 10 s. Stop.
@@ -192,6 +209,17 @@ This section is self-contained on purpose: the Linux session's memory does not t
    → `captures/sc26-plugin.json` (the JSON is what the next session parses; keep both).
 
 ### 7.3 Capture 2: Steam's handshake and traffic
+Preferred: controller plugged in, Steam quit, then
+`.\tools\capture\Capture-SteamController.ps1 -Phase Steam` (elevated). It reuses the hub from
+phase 1, injects the already-connected device's descriptors so the controller can be filtered,
+waits for Enter after you have exercised the controller and unplugged it, and writes the pcapng,
+the JSON (zipped if it would exceed 90 MB), `captures/sc26-steam-control.tsv` (every
+SET_REPORT/GET_REPORT with wValue, wIndex and payload), `captures/sc26-steam-interrupt.tsv`
+(time, endpoint, payload of every interrupt transfer) and `captures/sc26-steam-summary.txt`
+(counts per bRequest and per endpoint/report id). The TSVs are the easy parse target; the JSON
+is the complete one.
+
+Manual path:
 1. Quit Steam completely. Start a new USBPcap capture on the same interface, controller plugged in.
 2. Start Steam → Settings → Controller (let it detect/identify the controller; if it offers a
    firmware update, **decline** for now and note it). Open Big Picture, navigate, press every
@@ -256,3 +284,21 @@ Commit the `captures/` folder to the fork branch (`git add captures; git commit`
 - Upstreaming order: driver PR first (profile + tests + evidence per PROFILE_CONTRACT.md §"Adding a
   profile", including the Windows enumeration evidence and Steam compatibility result), then the
   Vibepollo PR once the driver release carries the profile.
+
+### 7.7 Windows session 2026-10-05: what is done, what is left
+Done on the author's desktop (Windows 11 Pro 26300):
+- Git 2.54, GitHub CLI 2.96 (`gh auth status` = jlobue10), Wireshark 4.6.8 and USBPcap 1.5.4 installed
+  via winget; `upstream` remote added and `gh repo set-default jlobue10/libvirtualgamepad` run in the
+  driver clone; `jlobue10/Vibepollo` `feat/steam-controller-profile` cloned with submodules next to it.
+- `tools/capture/Get-SteamControllerHid.ps1` parse-checks clean and runs (it correctly reported
+  "no VID_28DE device" with nothing plugged in).
+- `tools/capture/Capture-SteamController.ps1` added (see §7.2/§7.3). Verified: parses, refuses to run
+  non-elevated, refuses to run before the USBPcap filter is attached, and its Ctrl+C stop helper
+  cleanly ends a child console process (tested against `ping -t`). Not yet verified: the tshark
+  extraction on a real capture.
+
+Left (needs the controller in hand):
+1. Reboot (USBPcap filter attaches at boot). Confirm with the script's first line "USBPcap root hubs: ...".
+2. `-Phase Plugin`, then `-Phase Steam` (§7.2, §7.3). Both in an elevated PowerShell in the repo root.
+3. Review `captures/`, `git add captures; git commit; git push`.
+4. Continue at §7.4 (swap descriptor, flip the gate, CI package) and §7.5 (test rig).
