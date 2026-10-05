@@ -346,8 +346,12 @@ Left:
 1. Done 2026-10-05 22:05: `v0.1.0-beta.101` on ce39de4 published immutably (DriverVer `10/05/2026,0.1.0.68`,
    archive sha256 4a717c63…043f1). Lessons folded into the text above: lightweight, unsigned, one tag
    per commit, immutable releases on.
-2. Done 22:17: `Update-VibepolloDriverPins.py --tag v0.1.0-beta.101` committed f78995a on the Vibepollo
-   fork; `ci.yml` dispatched (run 37381558783) for the `unsigned-installer-Windows` artifact.
+2. Done 22:50: `Update-VibepolloDriverPins.py --tag v0.1.0-beta.101` committed f78995a + 20ac844 (verifier
+   scripts must also accept the fork as producer) on the Vibepollo fork; `ci.yml` run 37381766579 built
+   `VibepolloSetup.exe` (artifact of that name, uploaded raw: fetch it through the artifacts API, not
+   `gh run download`; sha256 in the `release-provenance` artifact). The Arch Linux job of that run fails
+   for an unrelated reason. The installer is in the desktop's kit
+   `C:\VMs\sc26-rig\kit\sc26-test-kit-e6611a2.zip` (41 MB) next to the driver package and the probe.
 3. §7.5 test rig: a Hyper-V Windows 11 VM `SC26-RIG` exists on the author's desktop (built 2026-10-05
    under `C:\VMs\sc26-rig`: unattended install, test signing on, PowerShell Direct as `tester`; the
    scripts there provision it, update the driver from a downloaded test-signed package and run
