@@ -157,3 +157,102 @@ timeout). v1 maps 0x80 → `generic_rumble` (speed L/R → low/high) and 0x81 �
 Steam firmware-update prompts or refusals (mitigated by echoing the real controller's build
 times), Steam updates changing the handshake, no documentation of Steam's checks (only the
 capture), test signing vs. Secure Boot/anti-cheat, and upstream acceptance (profile contract §35–48).
+
+## 7. Continuing on Windows (handoff for the capture and test phase)
+
+This section is self-contained on purpose: the Linux session's memory does not travel.
+
+### 7.1 Machine setup
+- Install Git, GitHub CLI (`winget install Git.Git GitHub.cli`), Wireshark **with USBPcap**
+  (tick USBPcap in the Wireshark installer; reboot), and Claude Code. `gh auth login` as
+  `jlobue10`.
+- Clone the two forks side by side (Vibepollo expects `../libvirtualgamepad` or the submodule):
+  ```powershell
+  git clone -b feat/steam-controller-profile https://github.com/jlobue10/libvirtualgamepad
+  git clone -b feat/steam-controller-profile --recurse-submodules https://github.com/jlobue10/Vibepollo
+  cd libvirtualgamepad; git remote add upstream https://github.com/Nonary/libvirtualgamepad; gh repo set-default jlobue10/libvirtualgamepad
+  ```
+- Read this file top to bottom, then `git log --oneline -8` in both forks. Current state is §"Status".
+- The Moonlight client side (Galaxy XR fork) lives in `jlobue10/moonlight-android`,
+  `docs/HANDOFF.md`; it already reports `LI_CTYPE_STEAM` with two touchpads, motion and battery.
+
+### 7.2 Capture 1: the controller's descriptors (plug-in capture)
+1. Wireshark → Capture → pick the **USBPcap** interface the controller will land on (if unsure,
+   start one capture per USBPcap root hub; the right one shows traffic when you plug in).
+2. Start capturing, **then** plug the controller in over USB-C. Wait 10 s. Stop.
+3. Filter `usb.idVendor == 0x28de`. Note `idProduct` (expect 0x1302) and `bcdDevice` in the
+   GET DESCRIPTOR Response DEVICE; note interface count and each interface's class/subclass.
+4. Find every `GET DESCRIPTOR Response HID Report` frame. For each: expand the HID Report
+   Descriptor, right-click → Copy → ...as Hex Stream. Save them as
+   `captures/sc26-report-descriptor-<n>.hex` (one per interface/collection; the one with a
+   vendor usage page and feature report items is the controller interface).
+5. Also run `tools/capture/Get-SteamControllerHid.ps1 | Tee-Object captures/steam-controller-hid.txt`
+   (lists Windows' HID children with usage page/usage and `REV_xxxx` = bcdDevice).
+6. File → Save As `captures/sc26-plugin.pcapng`. Then File → Export Packet Dissections → As JSON
+   → `captures/sc26-plugin.json` (the JSON is what the next session parses; keep both).
+
+### 7.3 Capture 2: Steam's handshake and traffic
+1. Quit Steam completely. Start a new USBPcap capture on the same interface, controller plugged in.
+2. Start Steam → Settings → Controller (let it detect/identify the controller; if it offers a
+   firmware update, **decline** for now and note it). Open Big Picture, navigate, press every
+   button, touch both pads, move both sticks, pull triggers, click grips; trigger rumble (a
+   controller test or any haptic feedback). Then disconnect the controller. Stop the capture.
+3. Save `captures/sc26-steam.pcapng` and export JSON `captures/sc26-steam.json`.
+4. Useful display filters: `usb.idVendor == 0x28de && usb.transfer_type == 0x02` shows the
+   control transfers; `usb.setup.bRequest == 0x09` are SET_REPORT (commands Steam writes),
+   `usb.setup.bRequest == 0x01` are GET_REPORT (replies Steam reads). Interrupt transfers
+   (`usb.transfer_type == 0x01`) carry the 0x42/0x43 input reports and Steam's 0x80–0x85 haptic
+   output reports.
+5. What to extract (next session does this from the JSON): the ordered list of feature-report
+   commands Steam sends and the controller's replies (attribute values, serial format, settings
+   ids/values Steam writes, anything not in `sc26_usb::command`), the input report ids seen, the
+   exact haptic output reports (rumble resend interval, pulse parameters).
+
+Commit the `captures/` folder to the fork branch (`git add captures; git commit`) so it travels.
+
+### 7.4 Enabling the profile from the captures
+1. `include/libvirtualgamepad/sc26_usb.h`: replace `report_descriptor[]` with the controller
+   interface's hex (comment: source = own hardware dump, date, firmware), set
+   `report_descriptor_is_provisional = false`, set `version` = bcdDevice, fill `attributes`
+   defaults (firmware/bootloader build times, board revision, capabilities) and the serial
+   format from the replies, add any missing command ids to `set_feature`.
+2. If the real descriptor's report sizes differ from the structs, fix the structs/sizes, the
+   `offsetof` pins and `driver/tests/test_sc26_usb.cpp` together. Run the tests:
+   `cmake -S driver/tests -B build/tests && cmake --build build/tests --config Release && ctest --test-dir build/tests -C Release`.
+3. Push; `test-driver.yml` runs on push. Then `gh workflow run test-signed-package.yml --ref feat/steam-controller-profile`
+   and download the artifact: `gh run download <run-id> -D artifacts/`.
+
+### 7.5 Test rig
+- Test signing: elevated `bcdedit /set testsigning on` + reboot. **Requires Secure Boot off**;
+  some anti-cheat refuses to run while it is on. A Windows VM with Steam + Vibepollo is the safer
+  first rig; a stream from it to the headset verifies detection, glyphs, pads, grips, motion, haptics.
+- Install the test package (elevated PowerShell, inside the downloaded package folder):
+  `.\tools\trust-test-certificate.ps1 -PackageDir .` then
+  `.\tools\VibeshineVhfGamepadDeviceSetup.exe install --inf .\driver\VibeshineVhfGamepad.inf`
+  (exit 3010 = reboot). `status` and `remove` exist too. An existing Vibepollo 2.0.0 driver is
+  replaced; `remove` + reinstalling the 2.0.0 installer restores it.
+- Vibepollo build with the new mapping: the fork's `ci-windows.yml` downloads a *released* driver
+  package by tag with pinned hashes from `Nonary/libvirtualgamepad`. To build the fork: tag the
+  driver fork `v0.1.0-beta.<N>` (N well above upstream, e.g. 100) → `release-windows.yml`
+  publishes a prerelease with the ZIP, `.sha256`, `.release-lock.json`; then in Vibepollo's
+  `ci-windows.yml` change both `-Repository` to `jlobue10/libvirtualgamepad` and the `VHF_TAG`,
+  `VHF_ARCHIVE_SHA256`, `VHF_DRIVER_VER`, `VHF_SOURCE_REVISION` values (and
+  `SUNSHINE_VHF_GAMEPAD_SOURCE_REVISION` checked by
+  `packaging/windows/virtual_gamepad_driver/tests/test_release_contract.cmake`), commit, and
+  dispatch `ci-windows.yml` (it has `workflow_dispatch`). Install the resulting installer, set
+  gamepad = `vhf_steam`, stream from the headset.
+- Vibepollo logs: `%ProgramFiles%\Vibepollo\config\sunshine.log`; look for
+  "will use the Vibepollo virtual gamepad driver" and the profile description
+  "a Steam Controller (2026)". Unknown feature commands are counted in the driver
+  (`feature_state.unknown_commands`) but not yet surfaced; add a `raw_hid_report_feedback`
+  event if Steam misbehaves and the capture does not explain it.
+
+### 7.6 Working notes
+- `gh` in the driver clone targets Nonary's repo through the `upstream` remote unless
+  `gh repo set-default jlobue10/libvirtualgamepad` was run.
+- The driver tests build with plain MSVC/CMake (no WDK). The driver itself needs MSBuild + WDK
+  10.0.26100; CI has them, so prefer CI builds over a local toolchain.
+- Never publish the LocalTest certificate or package as a release input (README).
+- Upstreaming order: driver PR first (profile + tests + evidence per PROFILE_CONTRACT.md §"Adding a
+  profile", including the Windows enumeration evidence and Steam compatibility result), then the
+  Vibepollo PR once the driver release carries the profile.
