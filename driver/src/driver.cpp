@@ -18,6 +18,7 @@
 
 #include "libvirtualgamepad/protocol.h"
 #include "dualsense.h"
+#include "steam_controller.h"
 #include "dualshock4.h"
 #include "pid_ff.h"
 #include "profile.h"
@@ -79,6 +80,7 @@ struct controller_slot {
   lvg::driver::ds4_state ds4;
   lvg::driver::ds5_state ds5;
   lvg::driver::switch_state switch_pro;
+  lvg::driver::sc26_state sc26;
   // Paces input reports so reads do not always complete instantly, which would
   // leave a polling application spinning.
   lvg::driver::report_pump pump;
@@ -127,6 +129,7 @@ EVT_WDF_TIMER evt_pid_tick;
 // to decide whether to register the feature-report callbacks.
 [[nodiscard]] bool is_playstation(lvg::profile profile) noexcept;
 [[nodiscard]] bool is_xbox(lvg::profile profile) noexcept;
+[[nodiscard]] bool is_steam_controller(lvg::profile profile) noexcept;
 
 // Base for each controller's container identity. The low byte is replaced with
 // the controller index so every slot is its own physical device to Windows.
@@ -342,6 +345,10 @@ void destroy_owned_controller(
   slot.ds5.reset();
   slot.ds5.features.address[0] = static_cast<std::uint8_t>(request.controller_id);
   slot.switch_pro.reset();
+  slot.sc26.reset();
+  // Per-slot serial so two virtual Steam Controllers never collide in Steam.
+  slot.sc26.features.unit_serial[9] = static_cast<char>('0' + (request.controller_id / 10) % 10);
+  slot.sc26.features.unit_serial[10] = static_cast<char>('0' + request.controller_id % 10);
   slot.pump.reset();
   unlock_context(context);
 
@@ -404,10 +411,12 @@ void destroy_owned_controller(
     config.HardwareIDs = const_cast<PWSTR>(definition->hardware_ids);
     config.HardwareIDsLength = static_cast<USHORT>(definition->hardware_ids_bytes);
   }
-  if (definition->force_feedback || is_playstation(definition->id)) {
+  if (definition->force_feedback || is_playstation(definition->id) ||
+      is_steam_controller(definition->id)) {
     // DirectInput discovers effect capacity through feature reports, and a
     // PlayStation controller is only recognized as one by hosts that can read
-    // its calibration, pairing, and firmware features.
+    // its calibration, pairing, and firmware features. Steam configures its own
+    // controller entirely through feature reports.
     config.EvtVhfAsyncOperationGetFeature = evt_vhf_get_feature;
     config.EvtVhfAsyncOperationSetFeature = evt_vhf_set_feature;
   }
@@ -559,6 +568,13 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
   return profile == lvg::profile::xbox_series || profile == lvg::profile::xbox_one;
 }
 
+// Folds touch, motion and battery like the PlayStation pads, but battery also
+// travels in its own report and the control channel is a stateful
+// command/reply exchange over feature reports.
+[[nodiscard]] bool is_steam_controller(const lvg::profile profile) noexcept {
+  return profile == lvg::profile::steam_controller;
+}
+
 // Rebuilds and submits a PlayStation input report from the accumulated state.
 // The caller owns the lifetime gate and must not hold state_lock.
 [[nodiscard]] NTSTATUS submit_playstation_report(
@@ -609,6 +625,22 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
   device_context *const context,
   controller_slot &slot,
   const lvg::driver::report_kind kind = lvg::driver::report_kind::continuous) noexcept {
+  if (is_steam_controller(slot.selected_profile)) {
+    lock_context(context);
+    if (context->stopping || slot.state != slot_state::active || slot.vhf == nullptr) {
+      unlock_context(context);
+      return STATUS_DEVICE_NOT_READY;
+    }
+    if (!slot.have_last_input) {
+      unlock_context(context);
+      return STATUS_SUCCESS;
+    }
+    const lvg::driver::sc26_input_report report =
+      lvg::driver::encode_sc26_input(slot.last_input, &slot.sc26);
+    unlock_context(context);
+    return pump_report(context, slot, &report, sizeof(report),
+                       lvg::driver::k_sc26_input_report_id, kind);
+  }
   if (slot.selected_profile != lvg::profile::switch_pro) {
     return submit_playstation_report(context, slot, kind);
   }
@@ -654,9 +686,10 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
   if (!usable) {
     return STATUS_DEVICE_NOT_READY;
   }
-  if (!is_playstation(profile) && profile != lvg::profile::switch_pro) {
-    // Only the PlayStation and Switch Pro profiles have motion sensors and a
-    // battery to report against.
+  if (!is_playstation(profile) && profile != lvg::profile::switch_pro &&
+      !is_steam_controller(profile)) {
+    // Only the PlayStation, Switch Pro and Steam Controller profiles have
+    // motion sensors and a battery to report against.
     return STATUS_NOT_SUPPORTED;
   }
 
@@ -682,7 +715,9 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
                          ? lvg::driver::apply_ds4_touch(request, &slot->ds4)
                          : slot->selected_profile == lvg::profile::dualsense
                              ? lvg::driver::apply_ds5_touch(request, &slot->ds5)
-                             : false;
+                             : is_steam_controller(slot->selected_profile)
+                                 ? lvg::driver::apply_sc26_touch(request, &slot->sc26)
+                                 : false;
   unlock_context(context);
 
   if (!applied) {
@@ -717,7 +752,9 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
       ? lvg::driver::apply_ds4_motion(request, &slot->ds4)
       : slot->selected_profile == lvg::profile::dualsense
           ? lvg::driver::apply_ds5_motion(request, &slot->ds5)
-          : lvg::driver::apply_switch_motion(request, &slot->switch_pro);
+          : is_steam_controller(slot->selected_profile)
+              ? lvg::driver::apply_sc26_motion(request, &slot->sc26)
+              : lvg::driver::apply_switch_motion(request, &slot->switch_pro);
   unlock_context(context);
 
   if (!applied) {
@@ -748,12 +785,27 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
       ? lvg::driver::apply_ds4_battery(request, &slot->ds4)
       : slot->selected_profile == lvg::profile::dualsense
           ? lvg::driver::apply_ds5_battery(request, &slot->ds5)
-          : lvg::driver::apply_switch_battery(request, &slot->switch_pro);
+          : is_steam_controller(slot->selected_profile)
+              ? lvg::driver::apply_sc26_battery(request, &slot->sc26)
+              : lvg::driver::apply_switch_battery(request, &slot->switch_pro);
+  const bool steam = is_steam_controller(slot->selected_profile);
+  const lvg::driver::sc26_battery_report battery_report =
+    steam ? lvg::driver::encode_sc26_battery(slot->sc26) : lvg::driver::sc26_battery_report {};
   unlock_context(context);
 
   if (!applied) {
     unlock_lifetime(context);
     return STATUS_INVALID_PARAMETER;
+  }
+
+  if (steam) {
+    // The Steam Controller carries battery in its own report rather than in
+    // the state report, as a transition so it is not dropped by pacing.
+    status = pump_report(context, *slot, &battery_report, sizeof(battery_report),
+                         lvg::driver::k_sc26_battery_report_id,
+                         lvg::driver::report_kind::transition);
+    unlock_lifetime(context);
+    return status;
   }
 
   status = submit_profile_report(context, *slot);
@@ -809,6 +861,21 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
       pump_report(context, slot, ps_data, ps_length, ps_report_id, ps_kind);
     unlock_lifetime(context);
     return ps_status;
+  }
+
+  if (is_steam_controller(slot.selected_profile)) {
+    slot.last_input = request;
+    slot.have_last_input = true;
+    const lvg::driver::sc26_input_report sc26_report =
+      lvg::driver::encode_sc26_input(request, &slot.sc26);
+    const auto sc26_kind =
+      slot.pump.classify(request.buttons, request.left_trigger, request.right_trigger);
+    unlock_context(context);
+    const NTSTATUS sc26_status =
+      pump_report(context, slot, &sc26_report, sizeof(sc26_report),
+                  lvg::driver::k_sc26_input_report_id, sc26_kind);
+    unlock_lifetime(context);
+    return sc26_status;
   }
 
   if (slot.selected_profile == lvg::profile::switch_pro) {
@@ -1037,6 +1104,38 @@ void evt_vhf_write_report(
   bool arm_tick = false;
 
   if (slot != nullptr && slot->parent != nullptr && transfer != nullptr &&
+      is_steam_controller(slot->selected_profile)) {
+    auto *const context = slot->parent;
+    lock_context(context);
+    if (context->stopping || slot->state != slot_state::active) {
+      status = STATUS_DEVICE_NOT_READY;
+    } else {
+      lvg::feedback_event event {};
+      if (transfer->reportBuffer != nullptr &&
+          lvg::driver::apply_sc26_output(transfer->reportBuffer, transfer->reportBufferLen,
+                                         slot->controller_id, &slot->sc26, &event)) {
+        slot->feedback = event;
+        slot->feedback_pending = true;  // Coalesce to the current actuator state.
+        status = STATUS_SUCCESS;
+      } else if (transfer->reportBuffer != nullptr && transfer->reportBufferLen > 0 &&
+                 transfer->reportBuffer[0] >= lvg::sc26_usb::haptic_rumble_id &&
+                 transfer->reportBuffer[0] <= lvg::sc26_usb::haptic_script_id) {
+        // Haptic command, LFO, sweep or script: nothing to render on a client
+        // actuator, but refusing them would make Steam log write failures.
+        status = STATUS_SUCCESS;
+      } else {
+        status = STATUS_INVALID_PARAMETER;
+      }
+    }
+    unlock_context(context);
+
+    if (operation_handle != nullptr) {
+      VhfAsyncOperationComplete(operation_handle, status);
+    }
+    return;
+  }
+
+  if (slot != nullptr && slot->parent != nullptr && transfer != nullptr &&
       slot->selected_profile == lvg::profile::switch_pro) {
     using namespace lvg::driver;
 
@@ -1236,6 +1335,27 @@ void evt_vhf_get_feature(
   NTSTATUS status = STATUS_INVALID_DEVICE_REQUEST;
 
   if (slot != nullptr && slot->parent != nullptr && transfer != nullptr &&
+      is_steam_controller(slot->selected_profile) && transfer->reportBuffer != nullptr) {
+    auto *const context = slot->parent;
+    lock_context(context);
+    if (context->stopping || slot->state != slot_state::active) {
+      status = STATUS_DEVICE_NOT_READY;
+    } else {
+      const std::size_t written = fill_sc26_feature(
+        transfer->reportId, transfer->reportBuffer, transfer->reportBufferLen, slot->sc26);
+      status = written != 0 ? STATUS_SUCCESS
+             : transfer->reportId == k_sc26_features_report_id ? STATUS_BUFFER_TOO_SMALL
+                                                                : STATUS_INVALID_DEVICE_REQUEST;
+    }
+    unlock_context(context);
+
+    if (operation_handle != nullptr) {
+      VhfAsyncOperationComplete(operation_handle, status);
+    }
+    return;
+  }
+
+  if (slot != nullptr && slot->parent != nullptr && transfer != nullptr &&
       is_playstation(slot->selected_profile) && transfer->reportBuffer != nullptr) {
     auto *const context = slot->parent;
     lock_context(context);
@@ -1316,6 +1436,22 @@ void evt_vhf_set_feature(
 
   auto *const slot = static_cast<controller_slot *>(vhf_client_context);
   NTSTATUS status = STATUS_INVALID_DEVICE_REQUEST;
+
+  if (slot != nullptr && slot->parent != nullptr && transfer != nullptr &&
+      is_steam_controller(slot->selected_profile)) {
+    auto *const context = slot->parent;
+    lock_context(context);
+    if (context->stopping || slot->state != slot_state::active) {
+      status = STATUS_DEVICE_NOT_READY;
+    } else {
+      const bool accepted = set_sc26_feature(transfer->reportId, transfer->reportBuffer,
+                                             transfer->reportBufferLen, &slot->sc26);
+      status = accepted ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
+    }
+    unlock_context(context);
+    if (operation_handle != nullptr) VhfAsyncOperationComplete(operation_handle, status);
+    return;
+  }
 
   if (slot != nullptr && slot->parent != nullptr && transfer != nullptr &&
       is_playstation(slot->selected_profile)) {
@@ -1450,6 +1586,13 @@ void evt_vhf_get_input_report(
           std::memcpy(buffer, &report, sizeof(report));
           length = sizeof(report);
           report_id = k_xbox_one_input_report_id;
+          break;
+        }
+        case lvg::profile::steam_controller: {
+          const sc26_input_report report = encode_sc26_input(slot->last_input, &slot->sc26);
+          std::memcpy(buffer, &report, sizeof(report));
+          length = sizeof(report);
+          report_id = k_sc26_input_report_id;
           break;
         }
         default: {

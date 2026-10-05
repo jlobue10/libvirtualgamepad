@@ -2,6 +2,7 @@
 // Native PnP IDs must agree with HID attributes so GameInput and HIDAPI can
 // identify the same controller. Does not load or interact with any driver.
 #include "profile.h"
+#include "libvirtualgamepad/sc26_usb.h"
 
 #include <cstdio>
 #include <cwchar>
@@ -24,8 +25,12 @@ int main() {
     {profile::switch_pro, "Switch Pro", false},
     {profile::xbox_one, "Xbox One", true},
     {profile::xbox_series, "Xbox Series", true},
+    {profile::steam_controller, "Steam Controller", false},
   };
   for (const auto &entry : profiles) {
+    if (entry.id == profile::steam_controller && lvg::sc26_usb::report_descriptor_is_provisional) {
+      continue;  // Refused until the real descriptor lands; identity checked then.
+    }
     const auto *definition = find_profile(entry.id);
     const std::string name = entry.name;
     check(definition != nullptr, name + " is implemented");

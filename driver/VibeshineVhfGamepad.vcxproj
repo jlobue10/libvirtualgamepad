@@ -100,17 +100,20 @@
     <ClCompile Include="src\pid_ff.cpp" />
     <ClCompile Include="src\profile.cpp" />
     <ClCompile Include="src\report_pump.cpp" />
+    <ClCompile Include="src\steam_controller.cpp" />
     <ClCompile Include="src\switch_pro.cpp" />
     <ClCompile Include="src\xbox_one.cpp" />
     <ClCompile Include="src\xbox_series.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\include\libvirtualgamepad\protocol.h" />
+    <ClInclude Include="..\include\libvirtualgamepad\sc26_usb.h" />
     <ClInclude Include="src\dualsense.h" />
     <ClInclude Include="src\dualshock4.h" />
     <ClInclude Include="src\pid_ff.h" />
     <ClInclude Include="src\profile.h" />
     <ClInclude Include="src\report_pump.h" />
+    <ClInclude Include="src\steam_controller.h" />
     <ClInclude Include="src\switch_pro.h" />
     <ClInclude Include="src\xbox_one.h" />
     <ClInclude Include="src\xbox_series.h" />

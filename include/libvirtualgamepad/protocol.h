@@ -47,6 +47,10 @@ enum class profile : std::uint16_t {
   // for development, but the public driver refuses it pending an accepted
   // VID/PID allocation.
   generic_pid = 8,
+  // Valve Steam Controller (2026, wired). HID-native like the PlayStation pads:
+  // Steam opens the vendor collection itself and drives its feature-report
+  // control channel, so the identity travels with the real report contract.
+  steam_controller = 9,
 };
 
 enum button_mask : std::uint32_t {

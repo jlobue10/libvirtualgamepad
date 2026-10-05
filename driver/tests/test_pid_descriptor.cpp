@@ -15,6 +15,7 @@
 #include "dualsense.h"
 #include "dualshock4.h"
 #include "pid_ff.h"
+#include "steam_controller.h"
 #include "profile.h"
 #include "report_pump.h"
 #include "switch_pro.h"
@@ -898,6 +899,9 @@ int main() {
       {profile::xbox_360, false, "xbox_360"},
       {profile::xbox_one, true, "xbox_one"},
       {profile::switch_pro, true, "switch_pro"},
+      // Enabled by replacing the provisional descriptor in sc26_usb.h with the
+      // real controller's; until then the profile must be refused.
+      {profile::steam_controller, !lvg::sc26_usb::report_descriptor_is_provisional, "steam_controller"},
     };
 
     profile_mask_t expected_mask = 0;
@@ -913,11 +917,12 @@ int main() {
         expected_mask |= profile_bit(e.id);
       }
     }
-    constexpr profile_mask_t k_public_profile_mask = 0x7Cu;
+    constexpr profile_mask_t k_public_profile_mask =
+      lvg::sc26_usb::report_descriptor_is_provisional ? 0x7Cu : 0x17Cu;
     check(expected_mask == k_public_profile_mask,
-          "the implemented profiles produce the exact public mask 0x7C");
+          "the implemented profiles produce the exact public mask");
     check(available_profiles() == k_public_profile_mask,
-          "the advertised profile mask is exactly 0x7C");
+          "the advertised profile mask matches the implemented profiles");
     check((available_profiles() & profile_bit(profile::generic_hid)) == 0,
           "generic_hid is absent from the advertised profile mask");
     check((available_profiles() & profile_bit(profile::generic_pid)) == 0,

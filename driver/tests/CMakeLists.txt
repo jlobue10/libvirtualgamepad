@@ -11,9 +11,15 @@ target_compile_features(test_ds5_usb PRIVATE cxx_std_20)
 target_include_directories(test_ds5_usb PRIVATE ../../include)
 add_test(NAME ds5_usb_contract COMMAND test_ds5_usb)
 
+add_executable(test_sc26_usb test_sc26_usb.cpp)
+target_compile_features(test_sc26_usb PRIVATE cxx_std_20)
+target_include_directories(test_sc26_usb PRIVATE ../../include)
+add_test(NAME sc26_usb_contract COMMAND test_sc26_usb)
+
 add_executable(test_pid_descriptor test_pid_descriptor.cpp
     ../src/pid_ff.cpp ../src/profile.cpp ../src/report_pump.cpp
     ../src/dualshock4.cpp ../src/dualsense.cpp ../src/switch_pro.cpp
+    ../src/steam_controller.cpp
     ../src/xbox_one.cpp ../src/xbox_series.cpp)
 target_compile_features(test_pid_descriptor PRIVATE cxx_std_20)
 target_include_directories(test_pid_descriptor PRIVATE ../src ../../include)

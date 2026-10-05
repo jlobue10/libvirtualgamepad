@@ -1,0 +1,209 @@
+// Copyright (c) 2026 Chase Payne
+// SPDX-License-Identifier: MIT
+
+#include "steam_controller.h"
+
+#include <cstring>
+
+namespace lvg::driver {
+namespace sc = lvg::sc26_usb;
+
+void sc26_state::reset() noexcept {
+  device.reset();
+  features.reset();
+  rumble = {};
+}
+
+const std::uint8_t *sc26_descriptor(std::size_t *const size) noexcept {
+  if (size != nullptr) {
+    *size = sc::report_descriptor_size;
+  }
+  return sc::report_descriptor;
+}
+
+std::uint32_t sc26_buttons(const std::uint32_t buttons, const sc26_state &state) noexcept {
+  struct pair { std::uint32_t from; std::uint32_t to; };
+  // Paddle order follows the Moonlight Android Steam Controller driver, which
+  // sends R4 as paddle 1, L4 as paddle 2, R5 as paddle 3 and L5 as paddle 4.
+  constexpr pair k_map[] = {
+    {button_mask::south, sc::btn_a},
+    {button_mask::east, sc::btn_b},
+    {button_mask::west, sc::btn_x},
+    {button_mask::north, sc::btn_y},
+    {button_mask::dpad_up, sc::btn_dpad_up},
+    {button_mask::dpad_down, sc::btn_dpad_down},
+    {button_mask::dpad_left, sc::btn_dpad_left},
+    {button_mask::dpad_right, sc::btn_dpad_right},
+    {button_mask::start, sc::btn_menu},
+    {button_mask::back, sc::btn_view},
+    {button_mask::left_stick, sc::btn_l3},
+    {button_mask::right_stick, sc::btn_r3},
+    {button_mask::left_shoulder, sc::btn_l},
+    {button_mask::right_shoulder, sc::btn_r},
+    {button_mask::home, sc::btn_steam},
+    {button_mask::misc, sc::btn_qam},
+    {button_mask::paddle_1, sc::btn_r4},
+    {button_mask::paddle_2, sc::btn_l4},
+    {button_mask::paddle_3, sc::btn_r5},
+    {button_mask::paddle_4, sc::btn_l5},
+  };
+  std::uint32_t out = 0;
+  for (const pair &p : k_map) {
+    if ((buttons & p.from) != 0) {
+      out |= p.to;
+    }
+  }
+  if ((buttons & button_mask::touchpad) != 0) {
+    // One pad-click flag on the wire; give it to the pad being touched, or the
+    // right pad when neither is.
+    if (state.device.pad_touched[0] && !state.device.pad_touched[1]) {
+      out |= sc::btn_left_pad_click;
+    } else {
+      out |= sc::btn_right_pad_click;
+    }
+  }
+  return out;
+}
+
+sc26_input_report encode_sc26_input(
+  const input_state_request &input,
+  sc26_state *const state) noexcept {
+  if (state == nullptr) {
+    sc26_state scratch {};
+    scratch.reset();
+    return sc::encode_input(sc26_buttons(input.buttons, scratch), input.left_x, input.left_y,
+                            input.right_x, input.right_y, input.left_trigger,
+                            input.right_trigger, scratch.device);
+  }
+  return sc::encode_input(sc26_buttons(input.buttons, *state), input.left_x, input.left_y,
+                          input.right_x, input.right_y, input.left_trigger, input.right_trigger,
+                          state->device);
+}
+
+sc26_battery_report encode_sc26_battery(const sc26_state &state) noexcept {
+  return sc::encode_battery(state.device);
+}
+
+bool apply_sc26_touch(const touch_state_request &touch, sc26_state *const state) noexcept {
+  if (state == nullptr) {
+    return false;
+  }
+  auto &st = state->device;
+  const auto event = static_cast<touch_event>(touch.event_type);
+  if (event == touch_event::cancel_all) {
+    st.pad_touched[0] = st.pad_touched[1] = false;
+    return true;
+  }
+  if (touch.contact_index >= 2) {
+    return false;
+  }
+  const std::uint8_t pad = touch.contact_index;
+  switch (event) {
+    case touch_event::down:
+    case touch_event::move:
+    case touch_event::hover:
+      st.pad_touched[pad] = true;
+      st.pad_x[pad] = touch.x;
+      st.pad_y[pad] = touch.y;
+      st.pad_pressure[pad] = touch.pressure;
+      return true;
+    case touch_event::up:
+    case touch_event::cancel:
+      st.pad_touched[pad] = false;
+      st.pad_pressure[pad] = 0;
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool apply_sc26_motion(const motion_state_request &motion, sc26_state *const state) noexcept {
+  if (state == nullptr) {
+    return false;
+  }
+  switch (static_cast<motion_kind>(motion.motion_type)) {
+    case motion_kind::accelerometer:
+      sc::apply_accel_milli(state->device, motion.x_milli, motion.y_milli, motion.z_milli);
+      ++state->device.imu_timestamp;
+      return true;
+    case motion_kind::gyroscope:
+      sc::apply_gyro_milli(state->device, motion.x_milli, motion.y_milli, motion.z_milli);
+      ++state->device.imu_timestamp;
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool apply_sc26_battery(const battery_state_request &battery, sc26_state *const state) noexcept {
+  if (state == nullptr) {
+    return false;
+  }
+  auto &st = state->device;
+  st.battery_percent = battery.percent > 100 ? 100 : battery.percent;
+  switch (static_cast<lvg::battery_state>(battery.flags)) {
+    case lvg::battery_state::charging:
+      st.charge_state = sc::charge_charging;
+      break;
+    case lvg::battery_state::full:
+      st.charge_state = sc::charge_done;
+      st.battery_percent = 100;
+      break;
+    case lvg::battery_state::discharging:
+    case lvg::battery_state::not_charging:
+    case lvg::battery_state::unknown:
+    case lvg::battery_state::not_present:
+    default:
+      st.charge_state = sc::charge_discharging;
+      break;
+  }
+  return true;
+}
+
+bool apply_sc26_output(
+  const std::uint8_t *const data,
+  const std::size_t size,
+  const std::uint32_t controller_id,
+  sc26_state *const state,
+  feedback_event *const event) noexcept {
+  if (state == nullptr || event == nullptr) {
+    return false;
+  }
+  if (!sc::decode_haptic_output(data, size, state->rumble)) {
+    return false;
+  }
+  *event = {};
+  event->header.size = sizeof(*event);
+  event->header.version = k_protocol_version;
+  event->controller_id = controller_id;
+  // Rumble-only: a haptic report says nothing about a light.
+  event->type = feedback_type::generic_rumble;
+  const generic_rumble_rgb_feedback payload {state->rumble.left, state->rumble.right, 0, 0, 0, 0};
+  event->payload_size = sizeof(payload);
+  std::memcpy(event->payload, &payload, sizeof(payload));
+  return true;
+}
+
+bool set_sc26_feature(
+  const std::uint8_t report_id,
+  const std::uint8_t *const buffer,
+  const std::size_t size,
+  sc26_state *const state) noexcept {
+  if (state == nullptr || report_id != k_sc26_features_report_id) {
+    return false;
+  }
+  return sc::set_feature(buffer, size, state->features);
+}
+
+std::size_t fill_sc26_feature(
+  const std::uint8_t report_id,
+  std::uint8_t *const buffer,
+  const std::size_t capacity,
+  const sc26_state &state) noexcept {
+  if (report_id != k_sc26_features_report_id) {
+    return 0;
+  }
+  return sc::get_feature(buffer, capacity, state.features);
+}
+
+}  // namespace lvg::driver
