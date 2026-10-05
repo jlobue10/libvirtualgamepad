@@ -37,6 +37,7 @@ if (Test-Path $VibepolloLog) {
     Copy-Item $VibepolloLog (Join-Path $OutDir 'sunshine.log')
 }
 $zip = "$OutDir.zip"
-Compress-Archive -Path "$OutDir\*" -DestinationPath $zip -Force
+# Windows ships bsdtar; Compress-Archive's module does not load on every machine.
+& "$env:windir\System32	ar.exe" -a -c -f $zip -C $OutDir .
 "evidence: $zip"
 Get-ChildItem $OutDir | Select-Object Name, Length | Format-Table -AutoSize
