@@ -1,0 +1,63 @@
+name: Test-signed package (development only)
+
+# Builds the driver on the hosted runner and signs it with a throwaway
+# self-signed certificate so a developer's test host (Secure Boot off, test
+# signing on) can install it without Visual Studio or the WDK. The artifact is
+# never a release input: the certificate is created on the runner and shipped
+# alongside the package for tools/trust-test-certificate.ps1.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - name: Check out the source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve hosted MSBuild
+        id: msbuild
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $instancePath = & $vswhere -latest -products '*' -requires Microsoft.Component.MSBuild -property installationPath
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($instancePath)) { throw 'No MSBuild instance found.' }
+          $msbuild = Join-Path $instancePath 'MSBuild/Current/Bin/MSBuild.exe'
+          if (-not (Test-Path -LiteralPath $msbuild -PathType Leaf)) { throw "MSBuild not found at '$msbuild'." }
+          "path=$msbuild" | Out-File -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Build and locally sign the package
+        env:
+          MSBUILD_PATH: ${{ steps.msbuild.outputs.path }}
+        run: |
+          # DriverVer from the commit date and revision count, as build-driver.ps1 derives it
+          # on a clean tree; made explicit so a dirty checkout can never block the build.
+          $date = (git log -1 --format=%cd --date=format:%m/%d/%Y).Trim()
+          $revision = (git rev-list --count HEAD).Trim()
+          $driverVer = "$date,0.1.0.$revision"
+          ./tools/build-driver.ps1 `
+            -Configuration Release `
+            -Platform x64 `
+            -SigningMode LocalTest `
+            -DriverVer $driverVer `
+            -PackageDir ./artifacts/test-signed `
+            -MSBuildPath $env:MSBUILD_PATH
+          Get-ChildItem -Recurse ./artifacts/test-signed | Select-Object -ExpandProperty FullName
+
+      - name: Upload the test-signed package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: vhf-gamepad-test-signed-x64-${{ github.sha }}
+          path: artifacts/test-signed/*
+          if-no-files-found: error
+          compression-level: 0
