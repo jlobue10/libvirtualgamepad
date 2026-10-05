@@ -354,5 +354,6 @@ Left:
    scripts there provision it, update the driver from a downloaded test-signed package and run
    `probe_sc26_usb` in it). The probe passes on commit e6611a2 (`docs/SC26_USB_COMPATIBILITY.md`,
    evidence section). Steam (unlogged-in client) recognised the virtual controller as a Steam Controller and drove it
-   (`docs/SC26_USB_COMPATIBILITY.md`, `captures/rig/`). Remaining there: Settings → Controller with a
-   logged-in account, then the fork installer with `gamepad = vhf_steam` and a stream.
+   (`docs/SC26_USB_COMPATIBILITY.md`, `captures/rig/`). The VM is shut down (restartable); the Steam-login check
+   there was skipped in favour of a physical Windows 11 host using the `tools/test-rig/` kit, where the
+   fork installer, `gamepad = vhf_steam` and the Moonlight stream will be exercised.

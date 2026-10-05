@@ -155,7 +155,8 @@ Interrupt traffic in the same capture:
   appeared in the logs. Steam logs the HID strings as "Manufacturer: Microsoft,
   Product: HID VHF Driver, serial 1.0", which are VHF's and not configurable;
   it identified the controller regardless. Settings → Controller with a
-  logged-in account is still to be exercised.
+  logged-in account was not exercised in the VM; it moves to the physical test
+  host (`tools/test-rig/`), together with the Vibepollo stream.
 - Virtual device enumeration on the rig: `captures/rig/virtual-device-hid-children.txt`
   (Windows lists the three collections plus VHF's parent node); probe output:
   `captures/rig/probe_sc26_usb-output.txt`.
