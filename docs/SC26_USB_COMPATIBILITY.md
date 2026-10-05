@@ -123,6 +123,21 @@ Interrupt traffic in the same capture:
   now served and the advertised mask is 0x17C; `test_profile_identity.cpp`
   checks the PnP ID agrees with the HID VID/PID.
 - Real Windows HID enumeration evidence for the real unit:
-  `captures/steam-controller-hid.txt`. Enumeration of the virtual device and
-  the Steam compatibility result on the test rig (`STEAM_CONTROLLER_PROFILE.md`
-  §7.5) are still to be recorded here.
+  `captures/steam-controller-hid.txt`.
+- Virtual device on the test rig (Hyper-V Windows 11 Pro 26300 VM, test signing
+  on, test-signed package from commit e6611a2, 2026-10-05): `probe_sc26_usb`
+  passed every check. Windows produced the same three HID children as the real
+  unit, `HID\VID_28DE&PID_1302&COL01..03` with version 0x0307: Mouse (input 6),
+  Keyboard (input 9) and the vendor collection FF00/0001 with input 54, output
+  64, feature 64 report lengths, opened read/write. GET_ATTRIBUTES_VALUES
+  returned `1=0x1302 2=0 10=0x68D2F92E 4=0x6A4D85E3 9=0x4A 11=0xFA0`,
+  GET_STRING_ATTRIBUTE tag 1 returned `LVGSC260007` (slot 7) in the 20-byte
+  frame, GET_DEVICE_INFO 0 returned 41 bytes, the 0x42 report arrived at 54
+  bytes with the submitted buttons, stick and trigger, the 0x81 pulse became a
+  `generic_rumble` event with left = 65535, and 0x82 was accepted. The first
+  rig run exposed and fixed a real defect: `feature_state::reset()` preserved
+  the zeroed WDF memory, so attributes and serial were all zero (commit
+  e6611a2). One known difference: VHF has no way to set the HID serial-number
+  string, so `HidD_GetSerialNumberString` returns "1.0" where the real unit
+  returns its USB serial; Steam reads the serial through the feature report.
+- Steam's reaction on the rig: pending the interactive Steam login.

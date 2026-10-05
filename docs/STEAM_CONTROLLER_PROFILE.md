@@ -349,7 +349,9 @@ Left:
    `gh workflow run ci.yml -R jlobue10/Vibepollo --ref feat/steam-controller-profile` and download the
    `unsigned-installer-Windows` artifact (`tester-windows-installer.yml` needs the SignPath secrets the
    fork does not have).
-3. §7.5 test rig: install the test-signed driver package (`artifacts/`), then the fork installer
-   (its own driver step is best-effort and will not replace the test-signed driver), set
-   `gamepad = vhf_steam`, stream, and record the virtual device's enumeration and Steam's reaction in
-   `docs/SC26_USB_COMPATIBILITY.md`.
+3. §7.5 test rig: a Hyper-V Windows 11 VM `SC26-RIG` exists on the author's desktop (built 2026-10-05
+   under `C:\VMs\sc26-rig`: unattended install, test signing on, PowerShell Direct as `tester`; the
+   scripts there provision it, update the driver from a downloaded test-signed package and run
+   `probe_sc26_usb` in it). The probe passes on commit e6611a2 (`docs/SC26_USB_COMPATIBILITY.md`,
+   evidence section). Remaining there: Steam's reaction (needs an interactive Steam login in the
+   VM), then the fork installer with `gamepad = vhf_steam` and a stream.
