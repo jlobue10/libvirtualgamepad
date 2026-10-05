@@ -30,6 +30,9 @@ FILES = [
     '.github/workflows/ci-windows.yml',
     'cmake/packaging/windows_virtual_gamepad_contract.cmake',
     'src_assets/windows/drivers/vhf-gamepad/install.ps1',
+    # These two carry no pins but hard-code the producer repository name.
+    'scripts/download_libvirtualgamepad_release.ps1',
+    'packaging/windows/virtual_gamepad_driver/refresh_driver_package.ps1',
 ]
 
 
@@ -94,8 +97,9 @@ def main():
     old_tag, old_sha, old_rev, old_ver = current_pins(contents[FILES[1]])
     old_repo = re.search(r'set\(SUNSHINE_VHF_GAMEPAD_REPOSITORY "([^"]+)"', contents[FILES[1]]).group(1)
     print(f'old pins: {old_repo} {old_tag} sha {old_sha[:12]} rev {old_rev[:12]} ver {old_ver}')
-    if old_rev == new['rev'] and old_sha == new['sha']:
-        sys.exit('already pinned to this release')
+    already_pinned = old_rev == new['rev'] and old_sha == new['sha']
+    if already_pinned:
+        print('pins already match this release; only repository-name changes will be committed')
 
     tree_entries = []
     for path in FILES:
@@ -103,11 +107,12 @@ def main():
         # Replace the full tag and the bare version (asset file names: libvirtualgamepad-0.1.0-beta.N-...).
         updated = (text.replace(old_sha, new['sha']).replace(old_rev, new['rev'])
                    .replace(old_ver, new['ver']).replace(old_tag, new['tag'])
-                   .replace(old_tag[1:], new['tag'][1:]).replace(old_repo, args.repository))
+                   .replace(old_tag[1:], new['tag'][1:]).replace(old_repo, args.repository)
+                   .replace(UPSTREAM_DRIVER_REPO, args.repository))
         counts = {k: updated.count(v) for k, v in
                   (('tag', new['tag']), ('sha', new['sha']), ('rev', new['rev']), ('ver', new['ver']),
                    ('repository', args.repository))}
-        if old_rev in updated or old_sha in updated or old_tag in updated:
+        if not already_pinned and (old_rev in updated or old_sha in updated or old_tag in updated):
             sys.exit(f'{path}: an old pin survived')
         print(f'  {path}: {old_tag} -> {new["tag"]}, occurrences {counts}')
         if path.endswith('install.ps1') and new['asset'] not in updated:
@@ -116,7 +121,10 @@ def main():
             print('    (unchanged)')
             continue
         tree_entries.append({'path': path, 'mode': '100644', 'type': 'blob', 'content': updated})
-    tree_entries.append({'path': GITLINK_PATH, 'mode': '160000', 'type': 'commit', 'sha': new['rev']})
+    if not already_pinned:
+        tree_entries.append({'path': GITLINK_PATH, 'mode': '160000', 'type': 'commit', 'sha': new['rev']})
+    if not tree_entries:
+        sys.exit('nothing to change')
 
     message = (f"packaging: pin the VHF gamepad driver to {args.repository} {new['tag']}\n\n"
                f"Fork prerelease carrying the Steam Controller (2026) profile, for the test rig in\n"
