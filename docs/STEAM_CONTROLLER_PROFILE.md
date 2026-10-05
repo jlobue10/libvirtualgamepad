@@ -6,21 +6,19 @@ as the real thing instead of a DualSense. Developed in the `jlobue10/libvirtualg
 tested on the author's host in test-signing mode, then offered upstream as PRs here and in
 Vibepollo.
 
-Status (2026-10-05): **implemented behind the real-descriptor gate.** `include/libvirtualgamepad/sc26_usb.h`
-(portable contract + encoders + feature responder + haptic decoder), `driver/src/steam_controller.{h,cpp}`
-(adapter) and the `driver.cpp` routing are in; `find_profile()` keeps refusing `profile::steam_controller`
-while `sc26_usb::report_descriptor_is_provisional` is true, so the public mask is still 0x7C and nothing
-changes for existing users. Tests pass on the fork's Windows CI (`test-driver.yml`) and the WDK build
-succeeds (`test-signed-package.yml`, manual). Vibepollo mapping: fork branch
-`jlobue10/Vibepollo` `feat/steam-controller-profile` (`vhf_steam`, `LI_CTYPE_STEAM` → profile,
-touchpad index carried to the driver, docs/web UI), submodule pointed at this branch.
+Status (2026-10-05, evening): **profile enabled.** The real wired unit was captured (§7.2/§7.3,
+`captures/`), and `include/libvirtualgamepad/sc26_usb.h` now carries its 372-byte report descriptor,
+bcdDevice 0x0307, the attribute values Steam read from it, the corrected string-attribute tags and
+replies for every command Steam sent (`report_descriptor_is_provisional = false`, public mask 0x17C).
+`driver/tests/test_sc26_usb.cpp` replays the captured Steam handshake against the responder. What the
+unit presents and what Steam did with it is written up in `docs/SC26_USB_COMPATIBILITY.md`. Vibepollo
+mapping: fork branch `jlobue10/Vibepollo` `feat/steam-controller-profile` (`vhf_steam`,
+`LI_CTYPE_STEAM` → profile, touchpad index carried to the driver, docs/web UI), submodule pointed at
+this branch.
 
-**To enable the profile:** replace `report_descriptor[]` in `sc26_usb.h` with the dump of a real wired
-unit, set `report_descriptor_is_provisional = false`, fix `version` (bcdDevice) and fill
-`attributes` defaults (firmware/bootloader build times, board revision) from the Steam handshake
-capture, then adjust `test_sc26_usb.cpp` if the real descriptor declares different report sizes.
-Then build the test-signed package from CI, install it on the test host, and run Vibepollo from the
-fork with `gamepad = vhf_steam`.
+**Next:** build the test-signed package from CI (§7.4 step 3), install it on the test host (§7.5), and
+run Vibepollo from the fork with `gamepad = vhf_steam`; record the virtual device's enumeration and
+Steam's reaction in `docs/SC26_USB_COMPATIBILITY.md`.
 
 ## 1. What has to exist (driver side)
 
@@ -37,10 +35,10 @@ Mirrors the DualSense profile (`driver/src/dualsense.{h,cpp}`, `include/libvirtu
 | Input submit | `driver.cpp` `submit_input_state` | new branch → `encode_sc26_input()` → `pump_report(..., 0x42, kind)` |
 | Touch / motion / battery | `driver.cpp` `begin_state_update`, `submit_touch_state`, `submit_motion_state`, `submit_battery_state`, `submit_profile_report` | new branches; battery also emits report 0x43 |
 | GetInputReport | `driver.cpp` `evt_vhf_get_input_report` | new case |
-| Output reports | `driver.cpp` `evt_vhf_write_report` | new branch for ids 0x80–0x85 → feedback events |
+| Output reports | `driver.cpp` `evt_vhf_write_report` | new branch for ids 0x80–0x89 (`sc26_usb::is_output_report`) → feedback events for 0x80/0x81, accepted otherwise |
 | Build | `driver/VibeshineVhfGamepad.vcxproj` ClCompile/ClInclude; `driver/tests/CMakeLists.txt` (`test_pid_descriptor` sources, new `test_sc26_usb`) | |
 | Tests | `driver/tests/test_sc26_usb.cpp` (descriptor walk, sizes, literal-offset decode, malformed output), `test_pid_descriptor.cpp` (refusal/mask table), `probe_sc26_usb.cpp` (manual, Windows) | per `docs/PROFILE_CONTRACT.md` |
-| Docs | `docs/SC26_USB_COMPATIBILITY.md` (what Steam checked, evidence), capability table, provenance | |
+| Docs | `docs/SC26_USB_COMPATIBILITY.md` (what Steam checked, evidence), capability table, provenance | written 2026-10-05 from the captures |
 
 Protocol version stays 2 unless the touch request needs a pad index (see §3 — it does not).
 
@@ -52,11 +50,15 @@ Nothing below is taken from Valve firmware or Steam binaries.
 
 ### Identity
 - VID `0x28DE`. Wired controller PID `0x1302`; BLE `0x1303`; puck dongles `0x1304` (Proteus) / `0x1305` (Nereid).
-- The wired controller exposes **one unified HID interface**. Windows splits its top-level
-  collections into separate HID devices; Steam opens the vendor collection. Which collections
-  exist (vendor + keyboard + mouse for lizard mode?) and their usages are **unknown until the
-  descriptor dump** (§4). The puck's pogo-pin interface is `FF00/0002`; the controller collection
-  is something else.
+- The wired controller exposes **one unified HID interface** (class 03/00/00) whose 372-byte
+  report descriptor has three top-level collections (captured 2026-10-05,
+  `captures/sc26-report-descriptor-1.hex`): Generic Desktop **Mouse** (report 0x40, 6 bytes),
+  Generic Desktop **Keyboard** (0x41, 9 bytes) for lizard mode, and the **vendor collection**
+  `FF00/0001` Steam opens, which declares inputs 0x42 (54), 0x43 (15), 0x44 (6), 0x45 (46),
+  0x79 (2), 0x7B (13), outputs 0x80 (10), 0x81 (8), 0x82 (4), 0x83 (10), 0x84 (9), 0x85 (4),
+  0x86 (4), 0x87/0x88/0x89 (64) and features 0x01 and 0x02 (64). Windows binds them as three HID
+  children (`Col01` mouhid, `Col02` kbdhid, `Col03` vendor). bcdDevice is 0x0307. The puck's
+  pogo-pin interface is `FF00/0002`.
 
 ### Input report `0x42` (54 bytes including the id) — `TritonMTUFull_t`
 | offset | field |
@@ -73,7 +75,11 @@ Nothing below is taken from Valve firmware or Steam binaries.
 | 40,42,44 | gyro X, Y, Z (s16) |
 | 46..53 | gyro quaternion W,X,Y,Z (s16) |
 
-BLE variant `0x45` is the same without the quaternion (46 bytes); `0x47` is a timestamped variant.
+Confirmed on the wire (29 953 reports at ~250 Hz): the sequence byte steps by one, the
+timestamp at 30 steps ~3.8 ms, accel Z at 38 reads ~16 384 at rest, and the quaternion at 46 is a
+constant identity (32767, 0, 0, 0) on firmware 0x6A4D85E3, so the virtual device's identity
+quaternion matches. BLE variant `0x45` is the same without the quaternion (46 bytes); `0x47` is a
+timestamped variant.
 The virtual device sends `0x42` only. Scale factors for accel/gyro: take from SDL
 (`HIDAPI_DriverSteamTriton_HandleGenericState`, sensor section) during implementation.
 
@@ -104,18 +110,30 @@ Attributes (`tag u8, value u32`): `UNIQUE_ID 0, PRODUCT_ID 1, CAPABILITIES 2, FI
 FIRMWARE_BUILD_TIME 4, RADIO_FIRMWARE_BUILD_TIME 5, RADIO_DEVICE_ID0/1 6/7, DONGLE_FIRMWARE_BUILD_TIME 8,
 BOARD_REVISION 9, BOOTLOADER_BUILD_TIME 10, CONNECTION_INTERVAL_IN_US 11, ...`.
 The responder keeps the last command and answers the next GetFeature with its reply, like the
-firmware. Values (build times, board revision, serial) are copied from the owner's controller
-(§4) so Steam does not offer a firmware update. **What Steam actually sends on connect is the
-main unknown and needs the USB capture in §4.** Unknown commands are acknowledged and surfaced
-to the host as `raw_hid_report_feedback` so the capture gaps can be closed iteratively.
+firmware. Build times and board revision are the author's unit's (firmware 0x6A4D85E3, bootloader
+0x68D2F92E, board revision 0x4A), which Steam accepted without offering an update; serials are
+synthetic. **What Steam sends on connect is now known** (`captures/sc26-steam-handshake.txt`,
+summarised in `docs/SC26_USB_COMPATIBILITY.md`): GET_ATTRIBUTES (six tags, fixed order),
+GET_STRING_ATTRIBUTE with tag 1 (unit serial) and tag 0 (board serial; the request is
+`[0xAE][0x15 = length][tag]`, so the old "0x15 = unit serial" reading was wrong), CLEAR_DIGITAL_MAPPINGS,
+SET_SETTINGS_VALUES for ids 7, 8, 9, 24, 34, 35, 45, 46, 48, 49, 50, 52, 53, 82, 84, 85, then
+three commands absent from the public sources that Steam only writes (`0xC1` 16 bytes, `0xDC` `01 02`,
+`0xE2` `01 20`), `0xF2` device info (sub ids 0..2, replies 41/34/9 bytes) and `0xED` keyed queries
+(`esb/bond`, `esb/bond_2`, `user/wireless_transport`); on exit SET_DEFAULT_DIGITAL_MAPPINGS and
+LOAD_DEFAULT_SETTINGS. The responder answers all of them in the captured shapes. Unknown commands are
+still acknowledged and counted.
 
 ### Output reports — haptics (10 bytes incl. id)
 `0x80 HAPTIC_RUMBLE {type u8, intensity u16, left{speed u16, gain s8}, right{speed u16, gain s8}}`,
 `0x81 HAPTIC_PULSE {side u8, on_us u16, off_us u16, repeat u16}`, `0x82 HAPTIC_CMD`, `0x83 LFO`,
-`0x84 LOG_SWEEP`, `0x85 SCRIPT`. Steam re-sends 0x80 every ≤50 ms while rumbling (firmware safety
-timeout). v1 maps 0x80 → `generic_rumble` (speed L/R → low/high) and 0x81 → a short
-`generic_rumble` burst; the Moonlight client turns rumble back into pad pulse trains. A dedicated
-`feedback_type::steam_haptic` can follow once the basics work.
+`0x84 LOG_SWEEP`, `0x85 SCRIPT`. The real descriptor sizes them 10 / 8 / 4 / 10 / 9 / 4 bytes
+(plus 0x86: 4 and 0x87–0x89: 64). Steam re-sends 0x80 every ≤50 ms while rumbling (firmware safety
+timeout). In the capture Steam's UI used only 0x81 (`81 <side> 90 01 00 00 01 00`: 400 µs on,
+repeat 1, then an all-zero stop) and 0x82 (`82 <side> 02 F2` / `01 FD`); the unit answered each with
+an input report 0x44. v1 maps 0x80 → `generic_rumble` (speed L/R → low/high) and 0x81 → a
+`generic_rumble` magnitude from the duty cycle; 0x82–0x89 are accepted and dropped. The Moonlight
+client turns rumble back into pad pulse trains. A dedicated `feedback_type::steam_haptic` can follow
+once the basics work.
 
 ## 3. Vibepollo side (fork `jlobue10/Vibepollo`, branch `fork/2.0.0`)
 - `vhf_profile_e::steam_controller`; `vhf_gamepad::offers(client, lvg::profile::steam_controller)`.
@@ -216,8 +234,13 @@ waits for Enter after you have exercised the controller and unplugged it, and wr
 the JSON (zipped if it would exceed 90 MB), `captures/sc26-steam-control.tsv` (every
 SET_REPORT/GET_REPORT with wValue, wIndex and payload), `captures/sc26-steam-interrupt.tsv`
 (time, endpoint, payload of every interrupt transfer) and `captures/sc26-steam-summary.txt`
-(counts per bRequest and per endpoint/report id). The TSVs are the easy parse target; the JSON
-is the complete one.
+(counts per bRequest and per endpoint/report id), and `tools/capture/Decode-Sc26Handshake.py`
+turns the control TSV into the ordered command/reply list (`captures/sc26-steam-handshake.txt`).
+The TSVs are the easy parse target; the JSON is the complete one. Both phases also take
+`-FromPcap <raw.pcap>` to re-run the post-processing on a raw hub capture a failed run left in
+`%TEMP%\sc26-capture-*` (no elevation needed). Note for readers of the TSVs: Wireshark exposes
+HID interrupt payloads as `usbhid.data` and HID class setup fields as `usbhid.setup.*`; the data of
+a GET_REPORT response is exposed by no field at all, so the script reads it from the raw frame.
 
 Manual path:
 1. Quit Steam completely. Start a new USBPcap capture on the same interface, controller plugged in.
@@ -239,6 +262,8 @@ Manual path:
 Commit the `captures/` folder to the fork branch (`git add captures; git commit`) so it travels.
 
 ### 7.4 Enabling the profile from the captures
+Steps 1 and 2 were done on 2026-10-05 (see the status at the top and `docs/SC26_USB_COMPATIBILITY.md`);
+step 3 is next.
 1. `include/libvirtualgamepad/sc26_usb.h`: replace `report_descriptor[]` with the controller
    interface's hex (comment: source = own hardware dump, date, firmware), set
    `report_descriptor_is_provisional = false`, set `version` = bcdDevice, fill `attributes`
@@ -294,11 +319,20 @@ Done on the author's desktop (Windows 11 Pro 26300):
   "no VID_28DE device" with nothing plugged in).
 - `tools/capture/Capture-SteamController.ps1` added (see §7.2/§7.3). Verified: parses, refuses to run
   non-elevated, refuses to run before the USBPcap filter is attached, and its Ctrl+C stop helper
-  cleanly ends a child console process (tested against `ping -t`). Not yet verified: the tshark
-  extraction on a real capture.
+  cleanly ends a child console process (tested against `ping -t`).
+- Later the same day, after the reboot: both captures taken (`captures/`). Two live runs recorded but
+  wrote no artifacts (the first because a rerun in the same window hit USBPcapCMD's refusal to
+  overwrite its output file; the Steam run's reason was not recorded); both were recovered with the
+  new `-FromPcap` mode. The tshark extraction was fixed against the real capture (`usbhid.data`,
+  `usbhid.setup.*`, raw-frame GET_REPORT payloads) and verified.
+- §7.4 steps 1–2 done: real descriptor, bcdDevice, attribute defaults, corrected string-attribute
+  tags, replies for `0xC1/0xDC/0xE2/0xED/0xF2`, per-report output sizes (`report_size()`,
+  `is_output_report()` 0x80–0x89), gate flipped, tests updated with a replay of the captured
+  handshake. `test_sc26_usb`, `test_pid_descriptor` and `test_profile_identity` pass locally
+  (g++ 16, MSYS2) with the mask at 0x17C.
 
-Left (needs the controller in hand):
-1. Reboot (USBPcap filter attaches at boot). Confirm with the script's first line "USBPcap root hubs: ...".
-2. `-Phase Plugin`, then `-Phase Steam` (§7.2, §7.3). Both in an elevated PowerShell in the repo root.
-3. Review `captures/`, `git add captures; git commit; git push`.
-4. Continue at §7.4 (swap descriptor, flip the gate, CI package) and §7.5 (test rig).
+Left:
+1. Push; `test-driver.yml` runs on push. `gh workflow run test-signed-package.yml --ref feat/steam-controller-profile`,
+   download the artifact (§7.4 step 3).
+2. §7.5 test rig: install the package, run Vibepollo from the fork with `gamepad = vhf_steam`, record
+   the virtual device's enumeration and Steam's reaction in `docs/SC26_USB_COMPATIBILITY.md`.

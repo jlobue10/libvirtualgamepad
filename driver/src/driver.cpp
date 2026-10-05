@@ -1118,10 +1118,11 @@ void evt_vhf_write_report(
         slot->feedback_pending = true;  // Coalesce to the current actuator state.
         status = STATUS_SUCCESS;
       } else if (transfer->reportBuffer != nullptr && transfer->reportBufferLen > 0 &&
-                 transfer->reportBuffer[0] >= lvg::sc26_usb::haptic_rumble_id &&
-                 transfer->reportBuffer[0] <= lvg::sc26_usb::haptic_script_id) {
-        // Haptic command, LFO, sweep or script: nothing to render on a client
-        // actuator, but refusing them would make Steam log write failures.
+                 lvg::sc26_usb::is_output_report(transfer->reportBuffer[0])) {
+        // Haptic command (Steam sends 0x82 with every UI click), LFO, sweep,
+        // script or one of the 0x86..0x89 reports the real descriptor declares:
+        // nothing to render on a client actuator, but refusing them would make
+        // Steam log write failures.
         status = STATUS_SUCCESS;
       } else {
         status = STATUS_INVALID_PARAMETER;

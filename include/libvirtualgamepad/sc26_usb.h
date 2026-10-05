@@ -13,6 +13,9 @@
 //     controller_structs.h / controller_constants.h (button bits, state layout,
 //     haptic output reports, settings/attribute ids, sensor and axis scaling)
 //   - Linux drivers/hid/hid-ids.h and SDL usb_ids.h (vendor and product ids)
+//   - The author's own wired unit, captured with USBPcap on 2026-10-05
+//     (captures/: report descriptor, bcdDevice, attribute values, the
+//     feature-report conversation Steam holds with it, report sizes/rates)
 #pragma once
 #include <array>
 #include <cstddef>
@@ -24,26 +27,70 @@ namespace lvg::sc26_usb {
 inline constexpr std::uint16_t vendor_id = 0x28DE;
 inline constexpr std::uint16_t product_id = 0x1302;   // Wired 2026 controller.
 inline constexpr std::uint16_t product_id_ble = 0x1303;
-// bcdDevice of the real unit. Provisional until the owner's descriptor dump.
-inline constexpr std::uint16_t version = 0x0100;
+// bcdDevice of the author's unit (USB device descriptor, captures/sc26-plugin-summary.txt;
+// Windows shows it as REV_0307 in captures/steam-controller-hid.txt).
+inline constexpr std::uint16_t version = 0x0307;
 
-// Report ids.
+// Report ids, as the real descriptor declares them (captures/sc26-report-descriptor-1.hex).
+// The lizard-mode mouse (0x40) and keyboard (0x41) live in their own top-level
+// collections; everything else is in the vendor collection Steam opens.
+inline constexpr std::uint8_t mouse_report_id = 0x40;     // 6 bytes, lizard mode; all-zero when off.
+inline constexpr std::uint8_t keyboard_report_id = 0x41;  // 9 bytes, lizard mode; all-zero when off.
 inline constexpr std::uint8_t features_report_id = 0x01;  // Control channel.
-inline constexpr std::uint8_t input_report_id = 0x42;     // Wired state (with quaternion).
-inline constexpr std::uint8_t battery_report_id = 0x43;
-inline constexpr std::uint8_t input_report_id_ble = 0x45; // BLE state, no quaternion.
-inline constexpr std::uint8_t wireless_report_id = 0x79;
+inline constexpr std::uint8_t features_report_id_2 = 0x02; // Second 64-byte feature report; Steam never touched it.
+inline constexpr std::uint8_t input_report_id = 0x42;     // Wired state (with quaternion), ~250 Hz.
+inline constexpr std::uint8_t battery_report_id = 0x43;   // Every ~3.5 s on the real unit.
+inline constexpr std::uint8_t haptic_ack_report_id = 0x44; // 6 bytes; the unit sends one after each haptic output report.
+inline constexpr std::uint8_t input_report_id_ble = 0x45; // BLE state, no quaternion (46 bytes).
+inline constexpr std::uint8_t wireless_report_id = 0x79;  // 2 bytes.
+inline constexpr std::uint8_t report_id_7b = 0x7B;        // 13 bytes; not seen on the wire.
 inline constexpr std::uint8_t haptic_rumble_id = 0x80;
 inline constexpr std::uint8_t haptic_pulse_id = 0x81;
 inline constexpr std::uint8_t haptic_command_id = 0x82;
 inline constexpr std::uint8_t haptic_lfo_id = 0x83;
 inline constexpr std::uint8_t haptic_sweep_id = 0x84;
 inline constexpr std::uint8_t haptic_script_id = 0x85;
+inline constexpr std::uint8_t output_report_id_86 = 0x86;  // 4 bytes; purpose unknown, not seen.
+inline constexpr std::uint8_t output_report_id_87 = 0x87;  // 64 bytes; purpose unknown, not seen.
+inline constexpr std::uint8_t output_report_id_88 = 0x88;  // 64 bytes; purpose unknown, not seen.
+inline constexpr std::uint8_t output_report_id_89 = 0x89;  // 64 bytes; purpose unknown, not seen.
+inline constexpr std::uint8_t output_report_first_id = haptic_rumble_id;
+inline constexpr std::uint8_t output_report_last_id = output_report_id_89;
 
 inline constexpr std::size_t input_report_size = 54;    // hid-steam: REPORT_ID_INPUT size 54
 inline constexpr std::size_t battery_report_size = 15;  // hid-steam: REPORT_ID_BATTERY size 15
 inline constexpr std::size_t feature_report_size = 64;  // id + 63 bytes (HID_FEATURE_REPORT_BYTES)
-inline constexpr std::size_t haptic_report_size = 10;   // id + 9 (HID_RUMBLE_OUTPUT_REPORT_BYTES)
+inline constexpr std::size_t haptic_report_size = 10;   // 0x80 rumble: id + 9 (HID_RUMBLE_OUTPUT_REPORT_BYTES)
+inline constexpr std::size_t haptic_pulse_report_size = 8;    // 0x81, as the descriptor declares it
+inline constexpr std::size_t haptic_command_report_size = 4;  // 0x82
+
+// Wire size (including the id) of every report the real descriptor declares; 0 for
+// ids it does not. The driver accepts output reports of any of these ids.
+[[nodiscard]] constexpr std::size_t report_size(const std::uint8_t id) noexcept {
+  switch (id) {
+    case features_report_id: case features_report_id_2: return feature_report_size;
+    case mouse_report_id: return 6;
+    case keyboard_report_id: return 9;
+    case input_report_id: return input_report_size;
+    case battery_report_id: return battery_report_size;
+    case haptic_ack_report_id: return 6;
+    case input_report_id_ble: return 46;
+    case wireless_report_id: return 2;
+    case report_id_7b: return 13;
+    case haptic_rumble_id: return haptic_report_size;
+    case haptic_pulse_id: return haptic_pulse_report_size;
+    case haptic_command_id: return haptic_command_report_size;
+    case haptic_lfo_id: return 10;
+    case haptic_sweep_id: return 9;
+    case haptic_script_id: return 4;
+    case output_report_id_86: return 4;
+    case output_report_id_87: case output_report_id_88: case output_report_id_89: return 64;
+    default: return 0;
+  }
+}
+[[nodiscard]] constexpr bool is_output_report(const std::uint8_t id) noexcept {
+  return id >= output_report_first_id && id <= output_report_last_id;
+}
 
 // Button bits of the u32 at offset 2 (SDL TritonButtons).
 enum button : std::uint32_t {
@@ -91,6 +138,15 @@ enum command : std::uint8_t {
   cmd_load_default_settings = 0x8E,
   cmd_trigger_haptic_pulse = 0x8F,
   cmd_get_string_attribute = 0xAE,
+  // Seen in the Steam capture (captures/sc26-steam-handshake.txt) but in none of
+  // the public sources. Steam writes the first three and never reads a reply;
+  // it reads replies to the last two, so the responder answers them in the
+  // shapes the real unit used.
+  cmd_write_c1 = 0xC1,  // 16 bytes: ff ff ff ff 03 09 05 ff ff ff ff ff ff ff ff ff
+  cmd_write_dc = 0xDC,  // 2 bytes: 01 02
+  cmd_write_e2 = 0xE2,  // 2 bytes: 01 20
+  cmd_get_keyed_value = 0xED,  // payload = ASCII key ("esb/bond", "esb/bond_2", "user/wireless_transport")
+  cmd_get_device_info = 0xF2,  // payload = sub id 0..2; reply echoes it (see set_feature)
 };
 
 enum attribute : std::uint8_t {
@@ -107,8 +163,13 @@ enum attribute : std::uint8_t {
   attr_bootloader_build_time = 10,
   attr_connection_interval_us = 11,
 };
-inline constexpr std::uint8_t string_attr_board_serial = 0x14;
-inline constexpr std::uint8_t string_attr_unit_serial = 0x15;
+// GET_STRING_ATTRIBUTE request is [0xAE][0x15][tag]: 0x15 is the *length* Steam
+// asks for (tag + 20 chars), not a tag. The capture shows tag 0 = board serial
+// ("MXA..."), tag 1 = unit serial ("FXA...", the USB iSerialNumber); the reply
+// is always 20 bytes: [tag][string, NUL padded].
+inline constexpr std::uint8_t string_attr_board_serial = 0x00;
+inline constexpr std::uint8_t string_attr_unit_serial = 0x01;
+inline constexpr std::uint8_t string_attr_reply_length = 20;
 
 inline constexpr std::uint8_t setting_lizard_mode = 9;
 inline constexpr std::uint8_t setting_imu_mode = 48;
@@ -190,12 +251,19 @@ struct haptic_rumble_report {  // 0x80
   std::int8_t right_gain;
 };
 
-struct haptic_pulse_report {  // 0x81
+struct haptic_pulse_report {  // 0x81, 8 bytes. Steam's UI click: side, on 400 us, off 0, repeat 1.
   std::uint8_t report_id;
   std::uint8_t side;  // firmware: 1 = left, 0 = right
   std::uint16_t on_us;
   std::uint16_t off_us;
   std::uint16_t repeat;
+};
+
+struct haptic_command_report {  // 0x82, 4 bytes. Seen: [side][02][f2], [side][01][fd].
+  std::uint8_t report_id;
+  std::uint8_t side;
+  std::uint8_t command;
+  std::uint8_t argument;
 };
 
 #pragma pack(pop)
@@ -204,7 +272,11 @@ static_assert(sizeof(input_report) == input_report_size);
 static_assert(sizeof(battery_report) == battery_report_size);
 static_assert(sizeof(feature_report) == feature_report_size);
 static_assert(sizeof(haptic_rumble_report) == haptic_report_size);
-static_assert(sizeof(haptic_pulse_report) == 8);
+static_assert(sizeof(haptic_pulse_report) == haptic_pulse_report_size);
+static_assert(sizeof(haptic_command_report) == haptic_command_report_size);
+static_assert(report_size(haptic_rumble_id) == sizeof(haptic_rumble_report));
+static_assert(report_size(haptic_pulse_id) == sizeof(haptic_pulse_report));
+static_assert(report_size(haptic_command_id) == sizeof(haptic_command_report));
 // Pinned to hid-steam's Ibex tables (byte index into the report incl. id).
 static_assert(offsetof(input_report, buttons) == 2);
 static_assert(offsetof(input_report, left_trigger) == 6);
@@ -224,40 +296,199 @@ static_assert(offsetof(input_report, gyro_x) == 40);
 static_assert(offsetof(input_report, gyro_z) == 44);
 static_assert(offsetof(input_report, quat_w) == 46);
 
-// PROVISIONAL report descriptor. Shape only: one vendor-defined collection with
-// the input, battery, feature and haptic reports above at their wire sizes.
-// It is replaced by the owner's dump of a real wired controller before the
-// profile is enabled (PROFILE_CONTRACT: descriptors from permitted sources),
-// and the tests pin the real one's report sizes to the structs above.
+// Report descriptor of the author's wired unit, captured on 2026-10-05 from the
+// GET DESCRIPTOR (HID Report) response at plug-in (captures/sc26-report-descriptor-1.hex,
+// captures/sc26-plugin.pcapng; firmware build time 0x6A4D85E3, bcdDevice 0x0307).
+// Three top-level collections: the lizard-mode mouse (report 0x40) and keyboard
+// (0x41) Windows binds to mouhid/kbdhid, and the vendor collection (usage page
+// 0xFF00, usage 1) Steam opens, which carries the state, battery, haptic and
+// feature reports. Windows enumerates them as three HID children
+// (captures/steam-controller-hid.txt). 372 bytes.
 inline constexpr std::uint8_t report_descriptor[] = {
-  0x06, 0xff, 0xff,        // Usage Page (Vendor 0xFFFF)
-  0x09, 0x01,              // Usage (1)
-  0xa1, 0x01,              // Collection (Application)
-  0x15, 0x00,              //   Logical Minimum (0)
-  0x26, 0xff, 0x00,        //   Logical Maximum (255)
-  0x75, 0x08,              //   Report Size (8)
-  0x85, 0x42,              //   Report ID (0x42)
-  0x09, 0x02,              //   Usage (2)
-  0x95, 0x35,              //   Report Count (53)
-  0x81, 0x02,              //   Input (Data,Var,Abs)
-  0x85, 0x43,              //   Report ID (0x43)
-  0x09, 0x03,              //   Usage (3)
-  0x95, 0x0e,              //   Report Count (14)
-  0x81, 0x02,              //   Input
-  0x85, 0x01,              //   Report ID (1)
-  0x09, 0x04,              //   Usage (4)
-  0x95, 0x3f,              //   Report Count (63)
-  0xb1, 0x02,              //   Feature (Data,Var,Abs)
-  0x85, 0x80, 0x09, 0x05, 0x95, 0x09, 0x91, 0x02,  // Output 0x80, 9 bytes
-  0x85, 0x81, 0x09, 0x06, 0x95, 0x09, 0x91, 0x02,  // Output 0x81
-  0x85, 0x82, 0x09, 0x07, 0x95, 0x09, 0x91, 0x02,  // Output 0x82
-  0x85, 0x83, 0x09, 0x08, 0x95, 0x09, 0x91, 0x02,  // Output 0x83
-  0x85, 0x84, 0x09, 0x09, 0x95, 0x09, 0x91, 0x02,  // Output 0x84
-  0x85, 0x85, 0x09, 0x0a, 0x95, 0x09, 0x91, 0x02,  // Output 0x85
-  0xc0,                    // End Collection
+  0x05, 0x01,                   // Usage Page (Generic Desktop)
+  0x09, 0x02,                   // Usage (0x02)
+  0xa1, 0x01,                   // Collection (Application)
+  0x85, 0x40,                   //   Report ID (0x40)
+  0x09, 0x01,                   //   Usage (0x01)
+  0xa1, 0x00,                   //   Collection (Physical)
+  0x05, 0x09,                   //     Usage Page (Button)
+  0x19, 0x01,                   //     Usage Minimum (0x01)
+  0x29, 0x02,                   //     Usage Maximum (0x02)
+  0x15, 0x00,                   //     Logical Minimum (0)
+  0x25, 0x01,                   //     Logical Maximum (1)
+  0x75, 0x01,                   //     Report Size (1)
+  0x95, 0x02,                   //     Report Count (2)
+  0x81, 0x02,                   //     Input (Data,Var,Abs)
+  0x75, 0x06,                   //     Report Size (6)
+  0x95, 0x01,                   //     Report Count (1)
+  0x81, 0x01,                   //     Input (Const,Array,Abs)
+  0x05, 0x01,                   //     Usage Page (Generic Desktop)
+  0x09, 0x30,                   //     Usage (0x30)
+  0x09, 0x31,                   //     Usage (0x31)
+  0x15, 0x81,                   //     Logical Minimum (129)
+  0x25, 0x7f,                   //     Logical Maximum (127)
+  0x75, 0x08,                   //     Report Size (8)
+  0x95, 0x02,                   //     Report Count (2)
+  0x81, 0x06,                   //     Input (Data,Var,Rel)
+  0x95, 0x01,                   //     Report Count (1)
+  0x09, 0x38,                   //     Usage (0x38)
+  0x81, 0x06,                   //     Input (Data,Var,Rel)
+  0x05, 0x0c,                   //     Usage Page (Consumer)
+  0x0a, 0x38, 0x02,             //     Usage (0x238)
+  0x95, 0x01,                   //     Report Count (1)
+  0x81, 0x06,                   //     Input (Data,Var,Rel)
+  0xc0,                         //   End Collection (0)
+  0xc0,                         // End Collection (0)
+  0x05, 0x01,                   // Usage Page (Generic Desktop)
+  0x09, 0x06,                   // Usage (0x06)
+  0xa1, 0x01,                   // Collection (Application)
+  0x85, 0x41,                   //   Report ID (0x41)
+  0x05, 0x07,                   //   Usage Page (Keyboard)
+  0x19, 0xe0,                   //   Usage Minimum (0xe0)
+  0x29, 0xe7,                   //   Usage Maximum (0xe7)
+  0x15, 0x00,                   //   Logical Minimum (0)
+  0x25, 0x01,                   //   Logical Maximum (1)
+  0x75, 0x01,                   //   Report Size (1)
+  0x95, 0x08,                   //   Report Count (8)
+  0x81, 0x02,                   //   Input (Data,Var,Abs)
+  0x81, 0x01,                   //   Input (Const,Array,Abs)
+  0x19, 0x00,                   //   Usage Minimum (0x00)
+  0x29, 0x65,                   //   Usage Maximum (0x65)
+  0x15, 0x00,                   //   Logical Minimum (0)
+  0x25, 0x65,                   //   Logical Maximum (101)
+  0x75, 0x08,                   //   Report Size (8)
+  0x95, 0x06,                   //   Report Count (6)
+  0x81, 0x00,                   //   Input (Data,Array,Abs)
+  0xc0,                         // End Collection (0)
+  0x06, 0x00, 0xff,             // Usage Page (Vendor 0xFF00)
+  0x09, 0x01,                   // Usage (0x01)
+  0xa1, 0x01,                   // Collection (Application)
+  0x85, 0x42,                   //   Report ID (0x42)
+  0x15, 0x00,                   //   Logical Minimum (0)
+  0x26, 0xff, 0x00,             //   Logical Maximum (255)
+  0x75, 0x08,                   //   Report Size (8)
+  0x95, 0x35,                   //   Report Count (53)
+  0x09, 0x42,                   //   Usage (0x42)
+  0x81, 0x02,                   //   Input (Data,Var,Abs)
+  0x85, 0x44,                   //   Report ID (0x44)
+  0x15, 0x00,                   //   Logical Minimum (0)
+  0x26, 0xff, 0x00,             //   Logical Maximum (255)
+  0x75, 0x08,                   //   Report Size (8)
+  0x95, 0x05,                   //   Report Count (5)
+  0x09, 0x44,                   //   Usage (0x44)
+  0x81, 0x02,                   //   Input (Data,Var,Abs)
+  0x85, 0x79,                   //   Report ID (0x79)
+  0x15, 0x00,                   //   Logical Minimum (0)
+  0x26, 0xff, 0x00,             //   Logical Maximum (255)
+  0x75, 0x08,                   //   Report Size (8)
+  0x95, 0x01,                   //   Report Count (1)
+  0x09, 0x79,                   //   Usage (0x79)
+  0x81, 0x02,                   //   Input (Data,Var,Abs)
+  0x85, 0x43,                   //   Report ID (0x43)
+  0x15, 0x00,                   //   Logical Minimum (0)
+  0x26, 0xff, 0x00,             //   Logical Maximum (255)
+  0x75, 0x08,                   //   Report Size (8)
+  0x95, 0x0e,                   //   Report Count (14)
+  0x09, 0x43,                   //   Usage (0x43)
+  0x81, 0x02,                   //   Input (Data,Var,Abs)
+  0x85, 0x7b,                   //   Report ID (0x7b)
+  0x15, 0x00,                   //   Logical Minimum (0)
+  0x26, 0xff, 0x00,             //   Logical Maximum (255)
+  0x75, 0x08,                   //   Report Size (8)
+  0x95, 0x0c,                   //   Report Count (12)
+  0x09, 0x7b,                   //   Usage (0x7b)
+  0x81, 0x02,                   //   Input (Data,Var,Abs)
+  0x85, 0x45,                   //   Report ID (0x45)
+  0x15, 0x00,                   //   Logical Minimum (0)
+  0x26, 0xff, 0x00,             //   Logical Maximum (255)
+  0x75, 0x08,                   //   Report Size (8)
+  0x95, 0x2d,                   //   Report Count (45)
+  0x09, 0x45,                   //   Usage (0x45)
+  0x81, 0x02,                   //   Input (Data,Var,Abs)
+  0x85, 0x80,                   //   Report ID (0x80)
+  0x15, 0x00,                   //   Logical Minimum (0)
+  0x26, 0xff, 0x00,             //   Logical Maximum (255)
+  0x75, 0x08,                   //   Report Size (8)
+  0x95, 0x09,                   //   Report Count (9)
+  0x09, 0x80,                   //   Usage (0x80)
+  0x91, 0x02,                   //   Output (Data,Var,Abs)
+  0x85, 0x81,                   //   Report ID (0x81)
+  0x15, 0x00,                   //   Logical Minimum (0)
+  0x26, 0xff, 0x00,             //   Logical Maximum (255)
+  0x75, 0x08,                   //   Report Size (8)
+  0x95, 0x07,                   //   Report Count (7)
+  0x09, 0x81,                   //   Usage (0x81)
+  0x91, 0x02,                   //   Output (Data,Var,Abs)
+  0x85, 0x82,                   //   Report ID (0x82)
+  0x15, 0x00,                   //   Logical Minimum (0)
+  0x26, 0xff, 0x00,             //   Logical Maximum (255)
+  0x75, 0x08,                   //   Report Size (8)
+  0x95, 0x03,                   //   Report Count (3)
+  0x09, 0x82,                   //   Usage (0x82)
+  0x91, 0x02,                   //   Output (Data,Var,Abs)
+  0x85, 0x83,                   //   Report ID (0x83)
+  0x15, 0x00,                   //   Logical Minimum (0)
+  0x26, 0xff, 0x00,             //   Logical Maximum (255)
+  0x75, 0x08,                   //   Report Size (8)
+  0x95, 0x09,                   //   Report Count (9)
+  0x09, 0x83,                   //   Usage (0x83)
+  0x91, 0x02,                   //   Output (Data,Var,Abs)
+  0x85, 0x84,                   //   Report ID (0x84)
+  0x15, 0x00,                   //   Logical Minimum (0)
+  0x26, 0xff, 0x00,             //   Logical Maximum (255)
+  0x75, 0x08,                   //   Report Size (8)
+  0x95, 0x08,                   //   Report Count (8)
+  0x09, 0x84,                   //   Usage (0x84)
+  0x91, 0x02,                   //   Output (Data,Var,Abs)
+  0x85, 0x85,                   //   Report ID (0x85)
+  0x15, 0x00,                   //   Logical Minimum (0)
+  0x26, 0xff, 0x00,             //   Logical Maximum (255)
+  0x75, 0x08,                   //   Report Size (8)
+  0x95, 0x03,                   //   Report Count (3)
+  0x09, 0x85,                   //   Usage (0x85)
+  0x91, 0x02,                   //   Output (Data,Var,Abs)
+  0x85, 0x86,                   //   Report ID (0x86)
+  0x15, 0x00,                   //   Logical Minimum (0)
+  0x26, 0xff, 0x00,             //   Logical Maximum (255)
+  0x75, 0x08,                   //   Report Size (8)
+  0x95, 0x03,                   //   Report Count (3)
+  0x09, 0x86,                   //   Usage (0x86)
+  0x91, 0x02,                   //   Output (Data,Var,Abs)
+  0x85, 0x87,                   //   Report ID (0x87)
+  0x15, 0x00,                   //   Logical Minimum (0)
+  0x26, 0xff, 0x00,             //   Logical Maximum (255)
+  0x75, 0x08,                   //   Report Size (8)
+  0x95, 0x3f,                   //   Report Count (63)
+  0x09, 0x87,                   //   Usage (0x87)
+  0x91, 0x02,                   //   Output (Data,Var,Abs)
+  0x85, 0x89,                   //   Report ID (0x89)
+  0x15, 0x00,                   //   Logical Minimum (0)
+  0x26, 0xff, 0x00,             //   Logical Maximum (255)
+  0x75, 0x08,                   //   Report Size (8)
+  0x95, 0x3f,                   //   Report Count (63)
+  0x09, 0x89,                   //   Usage (0x89)
+  0x91, 0x02,                   //   Output (Data,Var,Abs)
+  0x85, 0x88,                   //   Report ID (0x88)
+  0x15, 0x00,                   //   Logical Minimum (0)
+  0x26, 0xff, 0x00,             //   Logical Maximum (255)
+  0x75, 0x08,                   //   Report Size (8)
+  0x95, 0x3f,                   //   Report Count (63)
+  0x09, 0x88,                   //   Usage (0x88)
+  0x91, 0x02,                   //   Output (Data,Var,Abs)
+  0x85, 0x01,                   //   Report ID (0x01)
+  0x95, 0x3f,                   //   Report Count (63)
+  0x09, 0x01,                   //   Usage (0x01)
+  0xb1, 0x02,                   //   Feature (Data,Var,Abs)
+  0x85, 0x02,                   //   Report ID (0x02)
+  0x95, 0x3f,                   //   Report Count (63)
+  0x09, 0x01,                   //   Usage (0x01)
+  0xb1, 0x02,                   //   Feature (Data,Var,Abs)
+  0xc0,                         // End Collection (0)
 };
 inline constexpr std::size_t report_descriptor_size = sizeof(report_descriptor);
-inline constexpr bool report_descriptor_is_provisional = true;
+static_assert(report_descriptor_size == 372);
+// The descriptor above is the real unit's, so find_profile() may hand out the profile.
+inline constexpr bool report_descriptor_is_provisional = false;
 
 // ---- Input encoding ------------------------------------------------------
 
@@ -389,28 +620,52 @@ inline void apply_gyro_milli(state &st, const std::int32_t x, const std::int32_t
   r.report_id = battery_report_id;
   r.charge_state = st.charge_state;
   r.battery_level = st.battery_percent > 100 ? 100 : st.battery_percent;
-  // Plausible pack figures; nothing on the host side acts on them.
-  r.battery_voltage_mv = static_cast<std::uint16_t>(3500 + (r.battery_level * 7));
-  r.system_voltage_mv = 3300;
+  // Pack figures shaped like the author's unit on USB at 100 %: 4122 mV cell,
+  // 4160 mV system, 4980 mV input, 157 mA, 239 mA input, temperature 0x76ED.
+  // Nothing on the host side acts on them.
+  const bool on_usb = st.charge_state == charge_charging || st.charge_state == charge_done;
+  r.battery_voltage_mv = static_cast<std::uint16_t>(3500 + (r.battery_level * 6));
+  r.system_voltage_mv = 4160;
+  r.input_voltage_mv = on_usb ? 4980 : 0;
+  r.current_ma = on_usb ? 157 : 0;
+  r.input_current_ma = on_usb ? 239 : 0;
+  r.temperature = 0x76ED;
   return r;
 }
 
 // ---- Feature-report control channel ---------------------------------------
 
+// Values the author's unit returned to GET_ATTRIBUTES_VALUES on 2026-10-05
+// (captures/sc26-steam-handshake.txt): firmware built 2026-07-05, bootloader
+// 2025-09-23, board revision 74. Steam saw these on a unit it did not ask to
+// update. The reply carries exactly these six tags in this order; the unit sent
+// no UNIQUE_ID.
+inline constexpr std::uint32_t captured_firmware_build_time = 0x6A4D85E3;
+inline constexpr std::uint32_t captured_bootloader_build_time = 0x68D2F92E;
+inline constexpr std::uint32_t captured_board_revision = 0x4A;
+inline constexpr std::uint32_t captured_capabilities = 0;
+inline constexpr std::uint32_t captured_connection_interval_us = 4000;
+// 12-character build id the unit returned in GET_DEVICE_INFO 0 next to the
+// firmware build time; a hash-shaped placeholder here, not the unit's.
+inline constexpr char device_info_build_id[] = "000000000000";
+
 struct attributes {
-  std::uint32_t unique_id {};
+  std::uint32_t unique_id {};  // Not reported by the firmware; kept for callers.
   // Qualified: the member name would otherwise shadow the namespace constant.
   std::uint32_t product_id {lvg::sc26_usb::product_id};
-  std::uint32_t capabilities {};
-  std::uint32_t firmware_build_time {};   // Copy from a real unit (owner capture).
-  std::uint32_t board_revision {};
-  std::uint32_t bootloader_build_time {};
-  std::uint32_t connection_interval_us {4000};
+  std::uint32_t capabilities {captured_capabilities};
+  std::uint32_t firmware_build_time {captured_firmware_build_time};
+  std::uint32_t board_revision {captured_board_revision};
+  std::uint32_t bootloader_build_time {captured_bootloader_build_time};
+  std::uint32_t connection_interval_us {captured_connection_interval_us};
 };
 
 struct feature_state {
   attributes attrs {};
+  // Real units: unit serial "FXA" + 10 digits, board serial "MXA" + 10 chars.
+  // Synthetic here; never a real unit's.
   std::array<char, 16> unit_serial {"LVGSC260000"};
+  std::array<char, 16> board_serial {"LVGSC26BOARD0"};
   std::uint16_t settings[setting_count] {};
   bool lizard_mode {true};
   std::uint8_t imu_mode {};
@@ -423,9 +678,11 @@ struct feature_state {
   void reset() noexcept {
     const attributes keep = attrs;
     const auto serial = unit_serial;
+    const auto board = board_serial;
     *this = feature_state {};
     attrs = keep;
     unit_serial = serial;
+    board_serial = board;
   }
 };
 
@@ -507,13 +764,13 @@ inline void put_le32(std::uint8_t *p, const std::uint32_t v) noexcept {
       return true;
     }
     case cmd_get_attributes_values: {
+      // Same tags, same order, as the real unit's 30-byte reply.
       const struct { std::uint8_t tag; std::uint32_t value; } list[] = {
-        {attr_unique_id, fs.attrs.unique_id},
         {attr_product_id, fs.attrs.product_id},
         {attr_capabilities, fs.attrs.capabilities},
+        {attr_bootloader_build_time, fs.attrs.bootloader_build_time},
         {attr_firmware_build_time, fs.attrs.firmware_build_time},
         {attr_board_revision, fs.attrs.board_revision},
-        {attr_bootloader_build_time, fs.attrs.bootloader_build_time},
         {attr_connection_interval_us, fs.attrs.connection_interval_us},
       };
       std::size_t n = 0;
@@ -527,17 +784,58 @@ inline void put_le32(std::uint8_t *p, const std::uint32_t v) noexcept {
       return true;
     }
     case cmd_get_string_attribute: {
-      // Request: [len][tag]; reply: [tag][string]. hid-steam expects the tag at
-      // payload[0] and the serial right after it.
+      // Request: [0x15][tag]; reply: always 20 bytes, [tag][string, NUL padded],
+      // as the real unit answers (hid-steam reads the serial right after the tag).
       const std::uint8_t tag = length >= 1 ? payload[0] : string_attr_unit_serial;
       out[0] = tag;
-      const char *text = fs.unit_serial.data();
+      const char *text = tag == string_attr_board_serial ? fs.board_serial.data() : fs.unit_serial.data();
       std::size_t n = 0;
-      while (text[n] != '\0' && n + 1 < out_capacity - 1 && n < fs.unit_serial.size()) {
+      while (text[n] != '\0' && n + 1 < string_attr_reply_length && n < fs.unit_serial.size()) {
         out[1 + n] = static_cast<std::uint8_t>(text[n]);
         ++n;
       }
-      fs.reply[2] = static_cast<std::uint8_t>(1 + n);
+      fs.reply[2] = string_attr_reply_length;
+      return true;
+    }
+    case cmd_write_c1:
+    case cmd_write_dc:
+    case cmd_write_e2:
+      // Steam writes these once per connect and reads nothing back.
+      return true;
+    case cmd_get_keyed_value: {
+      // Payload is an ASCII key. The unit answered "esb/bond" with one byte (0:
+      // no bonded puck), "esb/bond_2" with a 24-byte record and
+      // "user/wireless_transport" with nothing. A wired-only virtual unit has
+      // no bond, so every key but the first gets an empty reply.
+      constexpr char k_bond[] = "esb/bond";
+      if (length == sizeof(k_bond) && std::memcmp(payload, k_bond, sizeof(k_bond)) == 0) {
+        out[0] = 0;
+        fs.reply[2] = 1;
+      }
+      return true;
+    }
+    case cmd_get_device_info: {
+      // Sub id 0: [00][firmware build time u32][board revision u32][build id,
+      // 16 bytes NUL padded][unit serial, 16 bytes NUL padded] (41 bytes).
+      // Sub id 1: [01] + 33 zero bytes. Sub id 2: [02][u16 counter][01][5 zero bytes].
+      const std::uint8_t sub = length >= 1 ? payload[0] : 0;
+      out[0] = sub;
+      if (sub == 0) {
+        put_le32(out + 1, fs.attrs.firmware_build_time);
+        put_le32(out + 5, fs.attrs.board_revision);
+        for (std::size_t i = 0; i < 16 && device_info_build_id[i] != '\0'; ++i) {
+          out[9 + i] = static_cast<std::uint8_t>(device_info_build_id[i]);
+        }
+        for (std::size_t i = 0; i < 16 && i < fs.unit_serial.size() && fs.unit_serial[i] != '\0'; ++i) {
+          out[25 + i] = static_cast<std::uint8_t>(fs.unit_serial[i]);
+        }
+        fs.reply[2] = 41;
+      } else if (sub == 1) {
+        fs.reply[2] = 34;
+      } else {
+        out[3] = 1;
+        fs.reply[2] = 9;
+      }
       return true;
     }
     case cmd_trigger_haptic_pulse:
@@ -586,7 +884,7 @@ struct rumble {
     return true;
   }
   if (data[0] == haptic_pulse_id) {
-    if (size < sizeof(haptic_pulse_report)) return false;
+    if (size < haptic_pulse_report_size) return false;
     const std::uint16_t on_us = get_le16(data + 2);
     const std::uint16_t off_us = get_le16(data + 4);
     const std::uint16_t repeat = get_le16(data + 6);

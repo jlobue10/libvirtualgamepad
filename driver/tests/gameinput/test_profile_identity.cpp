@@ -60,6 +60,6 @@ int main() {
             name + " native HID ID has no XInput filter marker");
     }
   }
-  if (!failures) std::printf("PASS: all five native profile identities\n");
+  if (!failures) std::printf("PASS: all six native profile identities\n");
   return failures ? 1 : 0;
 }
