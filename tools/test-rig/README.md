@@ -67,9 +67,9 @@ All in an elevated PowerShell, from the kit folder.
 
 ## Vibepollo fork build (done from the development machine, not here)
 
-1. Tag the driver fork: `git tag v0.1.0-beta.100 e6611a2; git push origin v0.1.0-beta.100`
-   (a **lightweight** tag; `publish-release.ps1` refuses annotated ones. `release-windows.yml` publishes the prerelease).
-2. `python tools/capture/Update-VibepolloDriverPins.py --tag v0.1.0-beta.100` rewrites the
+1. Tag the driver fork: `git tag --no-sign v0.1.0-beta.101 e6611a2; git push origin v0.1.0-beta.101`
+   (a **lightweight** tag; `publish-release.ps1` refuses annotated ones and needs the repository's immutable-releases setting on. `release-windows.yml` publishes the prerelease).
+2. `python tools/capture/Update-VibepolloDriverPins.py --tag v0.1.0-beta.101` rewrites the
    Vibepollo fork's seven driver pins and submodule gitlink through the GitHub API.
 3. `gh workflow run ci.yml -R jlobue10/Vibepollo --ref feat/steam-controller-profile`, then
    download the `unsigned-installer-Windows` artifact and copy it into this kit.

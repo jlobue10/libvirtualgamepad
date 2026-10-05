@@ -9,8 +9,8 @@ fork branch through the GitHub API, updates the `third-party/libvirtualgamepad` 
 the release commit, and commits in one go. Nothing is cloned locally (the local Vibepollo
 clone is unusable, see section 7.7).
 
-    python tools/capture/Update-VibepolloDriverPins.py --tag v0.1.0-beta.100 [--dry-run]
-    python tools/capture/Update-VibepolloDriverPins.py --tag v0.1.0-beta.100 --lock path/to.release-lock.json
+    python tools/capture/Update-VibepolloDriverPins.py --tag v0.1.0-beta.101 [--dry-run]
+    python tools/capture/Update-VibepolloDriverPins.py --tag v0.1.0-beta.101 --lock path/to.release-lock.json
 
 Requires `gh` authenticated for both repositories.
 """
@@ -59,7 +59,7 @@ def current_pins(cmake_text):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--tag', required=True, help='driver fork release tag, e.g. v0.1.0-beta.100')
+    ap.add_argument('--tag', required=True, help='driver fork release tag, e.g. v0.1.0-beta.101')
     ap.add_argument('--lock', help='local release-lock.json (default: download from the release)')
     ap.add_argument('--repository', default=DRIVER_REPO, help='producer repository to pin')
     ap.add_argument('--dry-run', action='store_true', help='show the changes, commit nothing')
