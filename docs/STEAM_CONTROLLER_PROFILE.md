@@ -343,8 +343,8 @@ Done on the author's desktop (Windows 11 Pro 26300):
   dry run verified against the fork branch. It needs the driver prerelease first.
 
 Left:
-1. Tag the driver fork: `git tag --no-sign v0.1.0-beta.101 e6611a2 && git push origin v0.1.0-beta.101`
-   (a **lightweight** tag, `--no-sign` because this machine signs tags by default; `publish-release.ps1` refuses annotated ones and requires the repository's **immutable releases** setting, enabled on the fork on 2026-10-05 after v0.1.0-beta.100 published mutable and could not be reused; `release-windows.yml` publishes the prerelease; DriverVer `10/05/2026,0.1.0.58`, archive sha256 differs per build).
+1. Tag the driver fork: `git tag --no-sign v0.1.0-beta.101 origin/feat/steam-controller-profile && git push origin v0.1.0-beta.101`
+   (a **lightweight** tag, `--no-sign` because this machine signs tags by default; `publish-release.ps1` refuses annotated ones and requires the repository's **immutable releases** setting, enabled on the fork on 2026-10-05 after v0.1.0-beta.100 published mutable and could not be reused; `release-windows.yml` publishes the prerelease. `build-release-package.ps1` also requires the tagged commit to carry **exactly one tag**, which is why the tag goes on the branch head rather than on e6611a2, where beta.100 already sits; the driver code is identical).
 2. `python tools/capture/Update-VibepolloDriverPins.py --tag v0.1.0-beta.101` (drop `--dry-run`), then
    `gh workflow run ci.yml -R jlobue10/Vibepollo --ref feat/steam-controller-profile` and download the
    `unsigned-installer-Windows` artifact (`tester-windows-installer.yml` needs the SignPath secrets the
