@@ -1,0 +1,12 @@
+===== HID children present (all)
+
+Status FriendlyName                           InstanceId                                          
+------ ------------                           ----------                                          
+OK     HID Keyboard Device                    HID\VID_28DE&PID_1302&COL02\2&3812F5C0&0&0001       
+OK     HID-compliant vendor-defined device    HID\VID_28DE&PID_1302&COL03\2&3812F5C0&0&0002       
+OK     Virtual HID Framework (VHF) HID device HID\VID_28DE&PID_1302\1&2510CED4&0&VIBESHINEGAMEPAD7
+OK     HID-compliant mouse                    HID\VID_28DE&PID_1302&COL01\2&3812F5C0&0&0000       
+
+
+
+

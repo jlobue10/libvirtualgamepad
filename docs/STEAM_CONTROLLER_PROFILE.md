@@ -353,5 +353,6 @@ Left:
    under `C:\VMs\sc26-rig`: unattended install, test signing on, PowerShell Direct as `tester`; the
    scripts there provision it, update the driver from a downloaded test-signed package and run
    `probe_sc26_usb` in it). The probe passes on commit e6611a2 (`docs/SC26_USB_COMPATIBILITY.md`,
-   evidence section). Remaining there: Steam's reaction (needs an interactive Steam login in the
-   VM), then the fork installer with `gamepad = vhf_steam` and a stream.
+   evidence section). Steam (unlogged-in client) recognised the virtual controller as a Steam Controller and drove it
+   (`docs/SC26_USB_COMPATIBILITY.md`, `captures/rig/`). Remaining there: Settings → Controller with a
+   logged-in account, then the fork installer with `gamepad = vhf_steam` and a stream.

@@ -140,4 +140,22 @@ Interrupt traffic in the same capture:
   e6611a2). One known difference: VHF has no way to set the HID serial-number
   string, so `HidD_GetSerialNumberString` returns "1.0" where the real unit
   returns its USB serial; Steam reads the serial through the feature report.
-- Steam's reaction on the rig: pending the interactive Steam login.
+- Steam's reaction on the rig (Steam client 1788652215, 2026-10-05, before any
+  account login; `captures/rig/steam-controller-logs.txt`): `controller.txt`
+  logs "Local Device Found type: 28de 1302" on the Col03 path, "Controller uses
+  V1 HID protocol via USB", "Steam controller device opened for index 0",
+  "Steam Controller reserving XInput slot 0", "Controller Info: HWID: 74,
+  FWTimestamp: 0x6A4D85E3" and the serial `LVGSC260007` read through the
+  feature report; `controller_ui.txt` reports Type 10, ProductID 4866,
+  Capabilities 00000000416dbfff, Firmware Version 1783465443 and loads
+  `controller_base/basicui_neptune.vdf` for it. Steam created its "Steam
+  Virtual Gamepad" binding (`config.vdf`) and began sending 0x81 haptic pulse
+  pairs to the device every ~3 s, which the driver turned into `generic_rumble`
+  events (142 in four minutes, `probe --hold`). No firmware-update prompt
+  appeared in the logs. Steam logs the HID strings as "Manufacturer: Microsoft,
+  Product: HID VHF Driver, serial 1.0", which are VHF's and not configurable;
+  it identified the controller regardless. Settings → Controller with a
+  logged-in account is still to be exercised.
+- Virtual device enumeration on the rig: `captures/rig/virtual-device-hid-children.txt`
+  (Windows lists the three collections plus VHF's parent node); probe output:
+  `captures/rig/probe_sc26_usb-output.txt`.
