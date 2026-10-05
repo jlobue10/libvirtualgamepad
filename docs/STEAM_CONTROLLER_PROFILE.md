@@ -331,8 +331,25 @@ Done on the author's desktop (Windows 11 Pro 26300):
   handshake. `test_sc26_usb`, `test_pid_descriptor` and `test_profile_identity` pass locally
   (g++ 16, MSYS2) with the mask at 0x17C.
 
+- §7.4 step 3 done: `test-driver.yml` green on the push, `test-signed-package.yml` run 37344823201
+  green, artifact downloaded to `artifacts/` (gitignored).
+- Test-rig state of the author's desktop: Secure Boot **on**, test signing **off**, no VHF driver
+  installed, Vibepollo not installed, Steam installed, Hyper-V running (256 GB RAM, no Windows ISO on
+  disk). So the choice in §7.5 is: Secure Boot off + `bcdedit /set testsigning on` + reboot on the
+  desktop, or a Hyper-V Windows 11 VM (Steam + Vibepollo in the VM, Moonlight client on the network).
+- Vibepollo fork build prepared but not started: `tools/capture/Update-VibepolloDriverPins.py` rewrites
+  the seven pins (ci-windows.yml ×3 blocks and the `-Repository` arguments, the CMake contract,
+  install.ps1, the submodule gitlink) through the GitHub API from a release's `release-lock.json`;
+  dry run verified against the fork branch. It needs the driver prerelease first.
+
 Left:
-1. Push; `test-driver.yml` runs on push. `gh workflow run test-signed-package.yml --ref feat/steam-controller-profile`,
-   download the artifact (§7.4 step 3).
-2. §7.5 test rig: install the package, run Vibepollo from the fork with `gamepad = vhf_steam`, record
-   the virtual device's enumeration and Steam's reaction in `docs/SC26_USB_COMPATIBILITY.md`.
+1. Tag the driver fork: `git tag -a v0.1.0-beta.100 2ebe3e9 -m "..." && git push origin v0.1.0-beta.100`
+   (`release-windows.yml` publishes the prerelease; expected DriverVer `10/05/2026,0.1.0.56`).
+2. `python tools/capture/Update-VibepolloDriverPins.py --tag v0.1.0-beta.100` (drop `--dry-run`), then
+   `gh workflow run ci.yml -R jlobue10/Vibepollo --ref feat/steam-controller-profile` and download the
+   `unsigned-installer-Windows` artifact (`tester-windows-installer.yml` needs the SignPath secrets the
+   fork does not have).
+3. §7.5 test rig: install the test-signed driver package (`artifacts/`), then the fork installer
+   (its own driver step is best-effort and will not replace the test-signed driver), set
+   `gamepad = vhf_steam`, stream, and record the virtual device's enumeration and Steam's reaction in
+   `docs/SC26_USB_COMPATIBILITY.md`.
