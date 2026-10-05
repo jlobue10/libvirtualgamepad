@@ -34,6 +34,8 @@
 .EXAMPLE
   .\tools\capture\Capture-SteamController.ps1 -Phase Plugin
   .\tools\capture\Capture-SteamController.ps1 -Phase Steam
+  .\tools\capture\Capture-SteamController.ps1 -Phase Plugin -FromPcap $env:TEMP\sc26-capture-31480\USBPcap2.pcap
+  .\tools\capture\Capture-SteamController.ps1 -Phase Steam -FromPcap $env:TEMP\sc26-capture-20261005-092734-31480\USBPcap2-steam.pcap
 #>
 [CmdletBinding()]
 param(
@@ -46,7 +48,11 @@ param(
     [string] $UsbPcapCmd = 'C:\Program Files\USBPcap\USBPcapCMD.exe',
     [string] $TShark = 'C:\Program Files\Wireshark\tshark.exe',
     # Seconds to keep recording after the controller enumerates (Plugin phase).
-    [int] $SettleSeconds = 10
+    [int] $SettleSeconds = 10,
+    # Skip the live capture and post-process this raw hub capture instead (e.g. the
+    # %TEMP%\sc26-capture-*\USBPcap2*.pcap left by a run that failed after recording). Needs no
+    # elevation, no controller, no Steam.
+    [string] $FromPcap
 )
 
 $ErrorActionPreference = 'Stop'
@@ -107,9 +113,12 @@ function Start-UsbCapture {
     param([string] $Interface, [string] $OutFile, [switch] $InjectDescriptors)
     $args = @('-d', $Interface, '-o', $OutFile, '-A')
     if ($InjectDescriptors) { $args += '--inject-descriptors' }
+    # USBPcapCMD opens -o with CREATE_NEW: an existing file makes it print "Thread started with
+    # invalid write handle!" and exit 0 without capturing anything.
+    Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
     $p = Start-Process -FilePath $UsbPcapCmd -ArgumentList $args -PassThru -WindowStyle Minimized
     Start-Sleep -Milliseconds 500
-    if ($p.HasExited) { throw "USBPcapCMD exited immediately for $Interface (exit $($p.ExitCode)). Is this an elevated shell, and has the machine been rebooted since USBPcap was installed?" }
+    if ($p.HasExited) { throw "USBPcapCMD exited immediately for $Interface (exit $($p.ExitCode)). Is this an elevated shell, has the machine been rebooted since USBPcap was installed, and is $OutFile absent (USBPcapCMD never overwrites)?" }
     return $p
 }
 
@@ -189,7 +198,7 @@ function Write-PluginArtifacts {
         '-e', 'usbhid.descriptor.hid.wDescriptorLength', '-E', 'separator=|', '-E', 'occurrence=a')
     foreach ($row in @($cfg)) {
         $f = "$row" -split '\|'
-        if ($f.Count -ge 5) {
+        if ($f.Count -ge 5 -and $f[1]) {
             $summary.Add("bNumInterfaces: $($f[0])")
             $summary.Add("interfaces    : numbers=$($f[1]) classes=$($f[2]) subclasses=$($f[3]) protocols=$($f[4]) hidReportLengths=$($f[5])")
         }
@@ -227,44 +236,82 @@ function Write-SteamArtifacts {
     Write-Information "Wrote $Pcapng"
 
     $control = Join-Path $OutputDir 'sc26-steam-control.tsv'
-    "frame`ttime`tdir`tbRequest`twValue`twIndex`twLength`tsetup_report_type`tsetup_report_id`tpayload" | Set-Content $control -Encoding utf8
-    Invoke-TShark @('-r', $Pcapng, '-Y', 'usb.transfer_type == 0x02', '-T', 'fields',
-        '-e', 'frame.number', '-e', 'frame.time_relative', '-e', 'usb.irp_info.direction', '-e', 'usb.setup.bRequest', '-e', 'usb.setup.wValue', '-e', 'usb.setup.wIndex', '-e', 'usb.setup.wLength',
-        '-e', 'usbhid.setup.ReportType', '-e', 'usbhid.setup.ReportID', '-e', 'usb.data_fragment', '-E', 'separator=/t') | Add-Content $control -Encoding utf8
+    # Class (HID) requests get their setup fields from the usbhid dissector, standard ones from usb;
+    # the data of a GET_REPORT response is exposed by neither, so it is read from the raw frame.
+    $ctrlLines = New-Object System.Collections.Generic.List[string]
+    $ctrlLines.Add("frame`ttime`tdir`tbmRequestType`tbRequest`twValue`twIndex`twLength`tsetup_report_type`tsetup_report_id`tdata_len`tpayload")
+    $rows = Invoke-TShark @('-r', $Pcapng, '-Y', 'usb.transfer_type == 0x02', '-T', 'fields',
+        '-e', 'frame.number', '-e', 'frame.time_relative', '-e', 'usb.irp_info.direction', '-e', 'usb.bmRequestType',
+        '-e', 'usb.setup.bRequest', '-e', 'usbhid.setup.bRequest', '-e', 'usb.setup.wValue', '-e', 'usb.setup.wIndex', '-e', 'usbhid.setup.wIndex',
+        '-e', 'usb.setup.wLength', '-e', 'usbhid.setup.wLength', '-e', 'usbhid.setup.ReportType', '-e', 'usbhid.setup.ReportID',
+        '-e', 'usb.data_len', '-e', 'usb.data_fragment', '-E', 'separator=/t')
+    foreach ($row in @($rows)) {
+        $f = "$row" -split "`t"
+        if ($f.Count -lt 15 -or -not $f[0]) { continue }
+        $bRequest = if ($f[4]) { $f[4] } else { $f[5] }
+        $wIndex = if ($f[7]) { $f[7] } else { $f[8] }
+        $wLength = if ($f[9]) { $f[9] } else { $f[10] }
+        $payload = $f[14]
+        if (-not $payload -and $f[13] -and [int] $f[13] -gt 0) { $payload = Get-FramePayloadHex -Pcap $Pcapng -FrameNumber ([int] $f[0]) }
+        $ctrlLines.Add(($f[0], $f[1], $f[2], $f[3], $bRequest, $f[6], $wIndex, $wLength, $f[11], $f[12], $f[13], $payload) -join "`t")
+    }
+    $ctrlLines | Set-Content $control -Encoding utf8
 
     $interrupt = Join-Path $OutputDir 'sc26-steam-interrupt.tsv'
-    "frame`ttime`tendpoint`tdir`tpayload" | Set-Content $interrupt -Encoding utf8
-    Invoke-TShark @('-r', $Pcapng, '-Y', 'usb.transfer_type == 0x01 && usb.capdata', '-T', 'fields',
-        '-e', 'frame.number', '-e', 'frame.time_relative', '-e', 'usb.endpoint_address', '-e', 'usb.irp_info.direction', '-e', 'usb.capdata', '-E', 'separator=/t') | Add-Content $interrupt -Encoding utf8
+    # usbhid claims HID interrupt payloads (usbhid.data); usb.capdata is only set when it does not.
+    "frame`ttime`tendpoint`tdir`tpayload`tpayload_raw" | Set-Content $interrupt -Encoding utf8
+    Invoke-TShark @('-r', $Pcapng, '-Y', 'usb.transfer_type == 0x01 && usb.data_len > 0', '-T', 'fields',
+        '-e', 'frame.number', '-e', 'frame.time_relative', '-e', 'usb.endpoint_address', '-e', 'usb.irp_info.direction', '-e', 'usbhid.data', '-e', 'usb.capdata', '-E', 'separator=/t') | Add-Content $interrupt -Encoding utf8
 
     $summary = New-Object System.Collections.Generic.List[string]
     $summary.Add("Steam handshake/traffic capture, $(Get-Date -Format s)")
     $ctrlRows = Get-Content $control | Select-Object -Skip 1
-    $summary.Add("control transfers : $($ctrlRows.Count)  (SET_REPORT bRequest=0x09, GET_REPORT bRequest=0x01)")
-    $byReq = $ctrlRows | ForEach-Object { ($_ -split "`t")[3] } | Where-Object { $_ } | Group-Object | Sort-Object Name
-    foreach ($g in $byReq) { $summary.Add("  bRequest $($g.Name): $($g.Count)") }
+    $summary.Add("control transfers : $($ctrlRows.Count)  (bmRequestType/bRequest: 0x21/9 = SET_REPORT, 0xa1/1 = GET_REPORT, 0x80/6 = GET_DESCRIPTOR, 0x00/9 = SET_CONFIGURATION)")
+    $byReq = $ctrlRows | ForEach-Object { $f = $_ -split "`t"; if ($f[4]) { "$($f[3])/$($f[4]) dir=$($f[2])" } } | Where-Object { $_ } | Group-Object | Sort-Object Name
+    foreach ($g in $byReq) { $summary.Add("  $($g.Name): $($g.Count)") }
     $intRows = Get-Content $interrupt | Select-Object -Skip 1
     $summary.Add("interrupt transfers: $($intRows.Count)")
-    $byEpId = $intRows | ForEach-Object { $f = $_ -split "`t"; "$($f[2]) dir=$($f[3]) report_id=0x$($f[4].Substring(0, [math]::Min(2, $f[4].Length)))" } | Group-Object | Sort-Object Name
+    $byEpId = $intRows | ForEach-Object {
+        $f = $_ -split "`t"; $payload = if ($f[4]) { $f[4] } else { $f[5] }
+        "$($f[2]) dir=$($f[3]) report_id=0x$($payload.Substring(0, [math]::Min(2, $payload.Length))) len=$($payload.Length / 2)" } | Group-Object | Sort-Object Name
     foreach ($g in $byEpId) { $summary.Add("  $($g.Name): $($g.Count)") }
     $summary | Set-Content -Path (Join-Path $OutputDir 'sc26-steam-summary.txt') -Encoding utf8
     $summary | ForEach-Object { Write-Information "  $_" }
 }
 
 # ------------------------------------------------------------------------------------------------
-if (-not (Test-IsElevated)) { throw 'Run this from an elevated PowerShell: USBPcapCMD needs administrator rights.' }
+if (-not $FromPcap -and -not (Test-IsElevated)) { throw 'Run this from an elevated PowerShell: USBPcapCMD needs administrator rights.' }
 foreach ($exe in $UsbPcapCmd, $TShark) { if (-not (Test-Path $exe)) { throw "Missing $exe" } }
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 $OutputDir = (Resolve-Path $OutputDir).Path
 $interfaces = Get-UsbPcapInterfaces
-if ($interfaces.Count -eq 0) { throw 'No \\.\USBPcapN control devices exist. Reboot after installing USBPcap (the root-hub filter attaches at boot), then retry.' }
-Write-Information "USBPcap root hubs: $($interfaces -join ', ')"
+if ($interfaces.Count -eq 0 -and -not $FromPcap) { throw 'No \\.\USBPcapN control devices exist. Reboot after installing USBPcap (the root-hub filter attaches at boot), then retry.' }
+if ($interfaces.Count -gt 0) { Write-Information "USBPcap root hubs: $($interfaces -join ', ')" }
 $interfaceFile = Join-Path $OutputDir 'usbpcap-interface.txt'
-$tmp = Join-Path $env:TEMP "sc26-capture-$PID"
+# Unique per run, not per shell: USBPcapCMD refuses to overwrite an existing output file.
+$tmp = Join-Path $env:TEMP "sc26-capture-$(Get-Date -Format yyyyMMdd-HHmmss)-$PID"
 New-Item -ItemType Directory -Force -Path $tmp | Out-Null
 
 switch ($Phase) {
     'Plugin' {
+      if ($FromPcap) {
+        $raw = (Resolve-Path -LiteralPath $FromPcap).Path
+        if (-not (Find-ControllerAddress -Pcap $raw)) { throw "$raw contains no VID_$VendorId device descriptor." }
+        Write-Information "Reprocessing $raw"
+        if ((Split-Path -Leaf $raw) -match '^(USBPcap\d+)') {
+            "\\.\$($Matches[1])" | Set-Content $interfaceFile -Encoding ascii -NoNewline
+        } else { Write-Warning "Cannot tell the hub from the file name; -Phase Steam will capture every hub." }
+        Write-PluginArtifacts -Pcap $raw -Pcapng (Join-Path $OutputDir 'sc26-plugin.pcapng')
+        Export-Json -Pcap (Join-Path $OutputDir 'sc26-plugin.pcapng') -JsonPath (Join-Path $OutputDir 'sc26-plugin.json')
+        $hidScript = Join-Path $PSScriptRoot 'Get-SteamControllerHid.ps1'
+        if (Test-ControllerPresent) {
+            & $hidScript -VendorId $VendorId | Tee-Object -FilePath (Join-Path $OutputDir 'steam-controller-hid.txt') | Out-Null
+            Write-Information "Wrote $(Join-Path $OutputDir 'steam-controller-hid.txt')"
+        } else {
+            Write-Warning "Controller not connected: plug it in and run `"$hidScript | Tee-Object $(Join-Path $OutputDir 'steam-controller-hid.txt')`" for the HID inventory."
+        }
+        break
+      }
         if (Test-ControllerPresent) {
             Write-Warning "A VID_$VendorId device is already connected. Unplug it now; the descriptors are only requested at plug-in."
             while (Test-ControllerPresent) { Start-Sleep -Seconds 1 }
@@ -303,6 +350,13 @@ switch ($Phase) {
         Write-Information "Wrote $(Join-Path $OutputDir 'steam-controller-hid.txt')"
     }
     'Steam' {
+      if ($FromPcap) {
+        $raw = (Resolve-Path -LiteralPath $FromPcap).Path
+        Write-Information "Reprocessing $raw"
+        Write-SteamArtifacts -Pcap $raw -Pcapng (Join-Path $OutputDir 'sc26-steam.pcapng')
+        Export-Json -Pcap (Join-Path $OutputDir 'sc26-steam.pcapng') -JsonPath (Join-Path $OutputDir 'sc26-steam.json')
+        break
+      }
         if (-not (Test-ControllerPresent)) { throw "No VID_$VendorId device connected. Plug the controller in over USB-C first." }
         while (Get-Process -Name steam -ErrorAction SilentlyContinue) {
             Write-Host 'Steam is running. Quit it completely (Steam -> Exit), waiting...' -ForegroundColor Yellow
@@ -337,4 +391,5 @@ switch ($Phase) {
 }
 
 Write-Host ''
-Write-Host "Done. Raw hub captures are in $tmp. Review $OutputDir, then: git add captures; git commit -m 'captures: Steam Controller (2026) $($Phase.ToLower()) capture'" -ForegroundColor Green
+$rawNote = if ($FromPcap) { '' } else { "Raw hub captures are in $tmp. " }
+Write-Host "Done. ${rawNote}Review $OutputDir, then: git add captures; git commit -m 'captures: Steam Controller (2026) $($Phase.ToLower()) capture'" -ForegroundColor Green

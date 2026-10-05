@@ -1,0 +1,60 @@
+==============================================================================
+Name        : HID-compliant mouse
+Instance ID : HID\VID_28DE&PID_1302&COL01\A&39C4DE96&0&0000
+Class       : Mouse  Status: OK  Service: mouhid
+Hardware IDs:
+  HID\VID_28DE&PID_1302&REV_0307&Col01
+  HID\VID_28DE&PID_1302&Col01
+  HID\VID_28DE&UP:0001_U:0002
+  HID_DEVICE_SYSTEM_MOUSE
+  HID_DEVICE_UP:0001_U:0002
+  HID_DEVICE
+Compatible IDs:
+  
+Collection  : usage page 0x0001 usage 0x0002
+==============================================================================
+Name        : HID Keyboard Device
+Instance ID : HID\VID_28DE&PID_1302&COL02\A&39C4DE96&0&0001
+Class       : Keyboard  Status: OK  Service: kbdhid
+Hardware IDs:
+  HID\VID_28DE&PID_1302&REV_0307&Col02
+  HID\VID_28DE&PID_1302&Col02
+  HID\VID_28DE&UP:0001_U:0006
+  HID_DEVICE_SYSTEM_KEYBOARD
+  HID_DEVICE_UP:0001_U:0006
+  HID_DEVICE
+Compatible IDs:
+  
+Collection  : usage page 0x0001 usage 0x0006
+==============================================================================
+Name        : HID-compliant vendor-defined device
+Instance ID : HID\VID_28DE&PID_1302&COL03\A&39C4DE96&0&0002
+Class       : HIDClass  Status: OK  Service: 
+Hardware IDs:
+  HID\VID_28DE&PID_1302&REV_0307&Col03
+  HID\VID_28DE&PID_1302&Col03
+  HID\VID_28DE&UP:FF00_U:0001
+  HID_DEVICE_UP:FF00_U:0001
+  HID_DEVICE_UPR:FF00-FFFF
+  HID_DEVICE
+Compatible IDs:
+  
+Collection  : usage page 0xFF00 usage 0x0001
+==============================================================================
+Name        : USB Input Device
+Instance ID : USB\VID_28DE&PID_1302\FXA9962403787
+Class       : HIDClass  Status: OK  Service: HidUsb
+Hardware IDs:
+  USB\VID_28DE&PID_1302&REV_0307
+  USB\VID_28DE&PID_1302
+Compatible IDs:
+  USB\COMPAT_VID_28DE&Class_03&SubClass_00&Prot_00
+  USB\COMPAT_VID_28DE&Class_03&SubClass_00
+  USB\COMPAT_VID_28DE&Class_03
+  USB\Class_03&SubClass_00&Prot_00
+  USB\Class_03&SubClass_00
+  USB\Class_03
+USB identity: VID 0x28DE PID 0x1302
+==============================================================================
+Collections Steam can open are the HID children above; the one with a vendor usage page
+(0xFF00..0xFFFF) and a feature report is the controller interface.

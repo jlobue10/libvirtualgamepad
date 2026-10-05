@@ -1,0 +1,8 @@
+Steam Controller plug-in capture, 2026-10-05T09:25:14
+idVendor      : 0x28DE
+idProduct     : 0x1302
+bcdDevice     : 0x0307   (sc26_usb::version)
+USB address   : 15
+bNumInterfaces: 1
+interfaces    : numbers=0 classes=0x03 subclasses=0x00 protocols=0x00 hidReportLengths=372
+report desc 1 : frame 13576, wIndex(interface)=, 372 bytes -> sc26-report-descriptor-1.hex
