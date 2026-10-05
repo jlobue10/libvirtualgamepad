@@ -6,7 +6,21 @@ as the real thing instead of a DualSense. Developed in the `jlobue10/libvirtualg
 tested on the author's host in test-signing mode, then offered upstream as PRs here and in
 Vibepollo.
 
-Status: **planning / protocol research**. Nothing in `driver/` implements it yet.
+Status (2026-10-05): **implemented behind the real-descriptor gate.** `include/libvirtualgamepad/sc26_usb.h`
+(portable contract + encoders + feature responder + haptic decoder), `driver/src/steam_controller.{h,cpp}`
+(adapter) and the `driver.cpp` routing are in; `find_profile()` keeps refusing `profile::steam_controller`
+while `sc26_usb::report_descriptor_is_provisional` is true, so the public mask is still 0x7C and nothing
+changes for existing users. Tests pass on the fork's Windows CI (`test-driver.yml`) and the WDK build
+succeeds (`test-signed-package.yml`, manual). Vibepollo mapping: fork branch
+`jlobue10/Vibepollo` `feat/steam-controller-profile` (`vhf_steam`, `LI_CTYPE_STEAM` → profile,
+touchpad index carried to the driver, docs/web UI), submodule pointed at this branch.
+
+**To enable the profile:** replace `report_descriptor[]` in `sc26_usb.h` with the dump of a real wired
+unit, set `report_descriptor_is_provisional = false`, fix `version` (bcdDevice) and fill
+`attributes` defaults (firmware/bootloader build times, board revision) from the Steam handshake
+capture, then adjust `test_sc26_usb.cpp` if the real descriptor declares different report sizes.
+Then build the test-signed package from CI, install it on the test host, and run Vibepollo from the
+fork with `gamepad = vhf_steam`.
 
 ## 1. What has to exist (driver side)
 
