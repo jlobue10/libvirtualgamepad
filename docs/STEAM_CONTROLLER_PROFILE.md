@@ -376,3 +376,17 @@ Left:
    the profile branch, because the current behaviour is what keeps the kit's driver installed. Remaining
    on the host: `gamepad = vhf_steam`, the "will use the Vibepollo virtual gamepad driver" log line, the
    Moonlight stream, `Collect-Evidence.ps1`.
+5. 2026-10-06 (later): the user asked for a rebuilt installer. On the Vibepollo fork branch:
+   merged the cleanup fix (5e641b7), added a `vhf_local_test_package` dispatch input to `ci.yml` /
+   `ci-windows.yml` (760f093, 56306d3): the "Fetch pinned VHF producer release" job then checks out the
+   `third-party/libvirtualgamepad` submodule (gitlink must equal the pinned revision), runs
+   `tools/build-driver.ps1 -SigningMode LocalTest -DriverVer <pin>` plus `tools/verify-driver-package.ps1
+   -AllowLocalTestCertificate` (manifest channel `self-signed-local-test`), and the build configures CMake
+   with `SUNSHINE_ALLOW_LOCAL_VHF_GAMEPAD_TEST_PACKAGE=ON`, so the MSI ships the `.cer` and runs
+   `install.ps1` with `-AllowLocalTestCertificate 1`. First run 37486677594 failed in the CMake refresh
+   target: `refresh_driver_package.ps1` passed `@($null)` as `signed_downstream` for a manifest without that
+   list (upstream has the same code); fixed null-safe in 77fe6d5. Run 37490202610 built
+   `VibepolloSetup.exe` (sha256 8bb84183...ac9936, matches `release-provenance`), copied into the kit folder
+   and zip. Still outstanding on the host: install it, `gamepad = vhf_steam`, log line, Moonlight stream,
+   `Collect-Evidence.ps1`. The local-test input is for testers only; the upstream PR keeps the production
+   path (SignPath signs the catalog).

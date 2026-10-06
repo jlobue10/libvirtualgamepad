@@ -53,17 +53,16 @@ All in an elevated PowerShell, from the kit folder.
    Steam's own view is in `%ProgramFiles(x86)%\Steam\logs\controller.txt` ("Steam controller
    device opened", HWID 74, FWTimestamp 0x6A4D85E3).
 4. Vibepollo: run `VibepolloSetup.exe` from the kit, set `gamepad = vhf_steam` in its
-   config (web UI or `config\sunshine.conf`), restart Vibepollo. Its installer's own driver step
-   is best-effort and leaves the test-signed driver in place: the installer ends with "The
-   operation completed, but some components failed: Virtual gamepad driver setup failed". That
-   is expected. The fork build is unsigned (no SignPath), so the bundled driver catalog carries
-   no Authenticode signature and the MSI's `install.ps1` refuses it before touching the device
-   (`VIRTUAL_GAMEPAD_DRIVER_WARNING: Catalog or root-device setup tool has no intact
-   Authenticode signature`). The driver and root device from step 2 stay in place, which is
-   what Vibepollo checks at run time (it opens the driver's control interface). If a later
-   installer build does remove them (its uninstall cleanup currently fails to find
-   `pnputil.exe`, an upstream bug), re-run `.\Install-TestDriver.ps1 -Probe` after installing
-   Vibepollo. Stream from a Moonlight client that
+   config (web UI or `config\sunshine.conf`), restart Vibepollo. The kit installer is a
+   *local-test* build (fork CI run 37490202610, `vhf_local_test_package=true`): it carries the
+   driver signed with a throwaway certificate created on the CI runner, trusts that certificate
+   in Root and TrustedPublisher, and installs the driver and root device itself. Test signing
+   must still be on. It replaces the device from step 2 (same driver code, DriverVer
+   10/05/2026,0.1.0.68), so the probe still passes afterwards. It must NOT report "Virtual
+   gamepad driver setup failed" any more; if it does, keep the warning report it offers. The
+   earlier kit installer (run 37381766579) was a plain unsigned build whose driver step always
+   failed on that message, because its bundled catalog had no Authenticode signature; with that
+   build the step-2 driver stayed in place and Vibepollo used it. Stream from a Moonlight client that
    reports a Steam Controller (`LI_CTYPE_STEAM`); the host log should say "will use the Vibepollo
    virtual gamepad driver" and describe "a Steam Controller (2026)". Steam on the host should see
    the controller while the stream runs.
