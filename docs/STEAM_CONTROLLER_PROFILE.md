@@ -360,3 +360,19 @@ Left:
    (`docs/SC26_USB_COMPATIBILITY.md`, `captures/rig/`). The VM is shut down (restartable); the Steam-login check
    there was skipped in favour of a physical Windows 11 host using the `tools/test-rig/` kit, where the
    fork installer, `gamepad = vhf_steam` and the Moonlight stream will be exercised.
+4. 2026-10-06: the kit ran on a physical Windows 11 host (test signing on, `Install-TestDriver.ps1
+   -Probe` done). `VibepolloSetup.exe` from fork run 37381766579 installed Vibepollo 2.0.99 (exit code
+   0) but reported "Virtual gamepad driver setup failed". Cause: the unsigned fork build bundles the
+   beta.101 producer package, whose `.cat` and `VibeshineVhfGamepadDeviceSetup.exe` carry no Authenticode
+   signature (SignPath signs them in upstream builds), so the MSI's `install.ps1` throws "Catalog or
+   root-device setup tool has no intact Authenticode signature" before touching the device
+   (`-AllowLocalTestCertificate:0`; the CMake local-test path `SUNSHINE_ALLOW_LOCAL_VHF_GAMEPAD_TEST_PACKAGE`
+   expects a manifest-bearing self-signed package, which the `test-signed-package.yml` artifact is not).
+   Expected per the kit README. The kit-installed driver and `ROOT\VIBESHINEVIRTUALGAMEPAD 0` survive
+   because the MSI's `cleanup.ps1` looks for `pnputil.exe` under the WOW64-redirected System32 from the
+   32-bit custom action server and always fails ("PnPUtil is unavailable", also in the 2.0.0 uninstall
+   log). That is an upstream bug; a fix (Sysnative-aware lookup like `install.ps1`) is committed on the
+   Vibepollo fork branch `fix/vhf-gamepad-cleanup-pnputil-wow64` (929d5d5) off upstream `master`, not on
+   the profile branch, because the current behaviour is what keeps the kit's driver installed. Remaining
+   on the host: `gamepad = vhf_steam`, the "will use the Vibepollo virtual gamepad driver" log line, the
+   Moonlight stream, `Collect-Evidence.ps1`.

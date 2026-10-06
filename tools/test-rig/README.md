@@ -52,9 +52,18 @@ All in an elevated PowerShell, from the kit folder.
    not on the rig) and whether the input test shows the cycling A/B/X/Y presses and stick sweep.
    Steam's own view is in `%ProgramFiles(x86)%\Steam\logs\controller.txt` ("Steam controller
    device opened", HWID 74, FWTimestamp 0x6A4D85E3).
-4. Vibepollo (once the fork installer exists): install it, set `gamepad = vhf_steam` in its
+4. Vibepollo: run `VibepolloSetup.exe` from the kit, set `gamepad = vhf_steam` in its
    config (web UI or `config\sunshine.conf`), restart Vibepollo. Its installer's own driver step
-   is best-effort and leaves the test-signed driver in place. Stream from a Moonlight client that
+   is best-effort and leaves the test-signed driver in place: the installer ends with "The
+   operation completed, but some components failed: Virtual gamepad driver setup failed". That
+   is expected. The fork build is unsigned (no SignPath), so the bundled driver catalog carries
+   no Authenticode signature and the MSI's `install.ps1` refuses it before touching the device
+   (`VIRTUAL_GAMEPAD_DRIVER_WARNING: Catalog or root-device setup tool has no intact
+   Authenticode signature`). The driver and root device from step 2 stay in place, which is
+   what Vibepollo checks at run time (it opens the driver's control interface). If a later
+   installer build does remove them (its uninstall cleanup currently fails to find
+   `pnputil.exe`, an upstream bug), re-run `.\Install-TestDriver.ps1 -Probe` after installing
+   Vibepollo. Stream from a Moonlight client that
    reports a Steam Controller (`LI_CTYPE_STEAM`); the host log should say "will use the Vibepollo
    virtual gamepad driver" and describe "a Steam Controller (2026)". Steam on the host should see
    the controller while the stream runs.
