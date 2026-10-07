@@ -252,14 +252,18 @@ int main(int argc, char **argv) {
 
     if (hold_seconds > 0) {
       std::printf("\nHolding the controller for up to %d s (Enter stops). Open Steam -> Settings -> Controller now.\n", hold_seconds);
-      std::printf("Steam's calibration flow runs its steps in order (left trigger, right trigger, left pad, right pad,\n"
-                  "left stick circle, right stick circle), so the hold drives them in that order and repeats: each\n"
-                  "trigger to 255 and back, each pad touched and traced round its edges, each stick round the rim at\n"
-                  "full magnitude, then the face buttons. Feedback events are printed as they arrive.\n");
+      std::printf("Steam's controller test runs its steps in order: left trigger (full pull), right trigger, finger across the\n"
+                  "whole left pad, whole right pad, left stick in circles (several turns), right stick, every remaining button\n"
+                  "(stick and pad clicks included), then A when the left haptic buzzes and A when the right one buzzes.\n"
+                  "The hold drives exactly that and repeats; A is pressed automatically when a haptic pulse arrives. The\n"
+                  "grip touch flags toggle every 2 s throughout, so the grips should light up blue on Steam's screen.\n"
+                  "Feedback events are printed as they arrive.\n");
       const ULONGLONG end = GetTickCount64() + static_cast<ULONGLONG>(hold_seconds) * 1000;
       HANDLE stdin_handle = GetStdHandle(STD_INPUT_HANDLE);
       unsigned tick = 0;
       int last_phase = -1;
+      unsigned haptic_ack_ticks = 0;   // ticks left of the automatic A press after a haptic pulse
+      bool pad_down[2] = {false, false};
       const auto send_touch = [&](std::uint8_t pad, lvg::touch_event type, unsigned x, unsigned y) {
         lvg::touch_state_request touch {};
         touch.header.size = sizeof(touch); touch.header.version = lvg::k_protocol_version;
@@ -267,10 +271,21 @@ int main(int argc, char **argv) {
         touch.x = static_cast<std::uint16_t>(x > 65535 ? 65535 : x); touch.y = static_cast<std::uint16_t>(y > 65535 ? 65535 : y);
         touch.pressure = 32767;
         (void) client.submit_touch_state(touch);
+        pad_down[pad & 1] = type != lvg::touch_event::up;
       };
-      // Edge trace of a pad over `steps` ticks: left edge, top edge, right edge, bottom edge, then a diagonal.
-      const auto pad_trace = [](unsigned i, unsigned steps, unsigned &x, unsigned &y) {
-        const unsigned leg = steps / 5, k = i % steps, seg = k / leg, t = (k % leg) * 65535u / (leg > 1 ? leg - 1 : 1);
+      // Whole-surface sweep of a pad over `steps` ticks: a serpentine raster of `rows` rows (one finger pass per
+      // row, alternating direction), then a trace round the edges (left, top, right, bottom) and a diagonal.
+      const auto pad_sweep = [](unsigned i, unsigned steps, unsigned &x, unsigned &y) {
+        constexpr unsigned rows = 10;
+        const unsigned raster = steps * 3 / 4, per_row = raster / rows, k = i % steps;
+        if (k < per_row * rows) {
+          const unsigned row = k / per_row, t = (k % per_row) * 65535u / (per_row > 1 ? per_row - 1 : 1);
+          x = (row % 2) ? 65535u - t : t;
+          y = row * 65535u / (rows - 1);
+          return;
+        }
+        const unsigned e = k - per_row * rows, edge = steps - per_row * rows, leg = edge / 5 ? edge / 5 : 1;
+        const unsigned seg = e / leg, t = (e % leg) * 65535u / (leg > 1 ? leg - 1 : 1);
         switch (seg) {
           case 0: x = 0; y = t; break;
           case 1: x = t; y = 65535; break;
@@ -279,6 +294,23 @@ int main(int argc, char **argv) {
           default: x = t; y = t; break;
         }
       };
+      // Step 7: every remaining button, held for 5 ticks (250 ms) with a 5 tick gap. The pad clicks need a
+      // finger on the pad (the protocol has one click flag; the driver puts it on the touched pad).
+      struct button_step { std::uint32_t mask; int touch_pad; const char *name; };
+      static const button_step k_buttons[] = {
+        {lvg::button_mask::south, -1, "A"}, {lvg::button_mask::east, -1, "B"},
+        {lvg::button_mask::west, -1, "X"}, {lvg::button_mask::north, -1, "Y"},
+        {lvg::button_mask::dpad_up, -1, "dpad up"}, {lvg::button_mask::dpad_down, -1, "dpad down"},
+        {lvg::button_mask::dpad_left, -1, "dpad left"}, {lvg::button_mask::dpad_right, -1, "dpad right"},
+        {lvg::button_mask::left_shoulder, -1, "L1"}, {lvg::button_mask::right_shoulder, -1, "R1"},
+        {lvg::button_mask::left_stick, -1, "L3 (left stick click)"}, {lvg::button_mask::right_stick, -1, "R3 (right stick click)"},
+        {lvg::button_mask::touchpad, 0, "left pad click"}, {lvg::button_mask::touchpad, 1, "right pad click"},
+        {lvg::button_mask::start, -1, "View"}, {lvg::button_mask::back, -1, "Menu"},
+        {lvg::button_mask::home, -1, "Steam"}, {lvg::button_mask::misc, -1, "QAM"},
+        {lvg::button_mask::paddle_2, -1, "L4"}, {lvg::button_mask::paddle_4, -1, "L5"},
+        {lvg::button_mask::paddle_1, -1, "R4"}, {lvg::button_mask::paddle_3, -1, "R5"},
+      };
+      constexpr unsigned k_button_count = sizeof(k_buttons) / sizeof(k_buttons[0]);
       while (GetTickCount64() < end) {
         if (WaitForSingleObject(stdin_handle, 0) == WAIT_OBJECT_0) {
           INPUT_RECORD rec; DWORD n = 0;
@@ -286,9 +318,10 @@ int main(int argc, char **argv) {
               rec.Event.KeyEvent.wVirtualKeyCode == VK_RETURN) break;
           ReadConsoleInputW(stdin_handle, &rec, 1, &n);
         }
-        // 50 ms ticks. Phase lengths in ticks: triggers 60 each, pads 100 each, sticks 120 each, buttons 60.
-        constexpr unsigned k_trig = 60, k_pad = 100, k_stick = 120, k_btn = 60;
-        constexpr unsigned k_cycle = 2 * k_trig + 2 * k_pad + 2 * k_stick + k_btn;
+        // 50 ms ticks. Phase lengths in ticks: triggers 60 each, pads 160 each, sticks 180 each (3 turns),
+        // buttons 10 per button, then a 100 tick (5 s) quiet window for the haptic steps.
+        constexpr unsigned k_trig = 60, k_pad = 160, k_stick = 180, k_btn = 10 * k_button_count, k_haptic = 100;
+        constexpr unsigned k_cycle = 2 * k_trig + 2 * k_pad + 2 * k_stick + k_btn + k_haptic;
         const unsigned c = tick % k_cycle;
         int phase; unsigned i;
         if (c < k_trig) { phase = 0; i = c; }
@@ -297,14 +330,17 @@ int main(int argc, char **argv) {
         else if (c < 2 * k_trig + 2 * k_pad) { phase = 3; i = c - 2 * k_trig - k_pad; }
         else if (c < 2 * k_trig + 2 * k_pad + k_stick) { phase = 4; i = c - 2 * k_trig - 2 * k_pad; }
         else if (c < 2 * k_trig + 2 * k_pad + 2 * k_stick) { phase = 5; i = c - 2 * k_trig - 2 * k_pad - k_stick; }
-        else { phase = 6; i = c - 2 * k_trig - 2 * k_pad - 2 * k_stick; }
+        else if (c < 2 * k_trig + 2 * k_pad + 2 * k_stick + k_btn) { phase = 6; i = c - 2 * k_trig - 2 * k_pad - 2 * k_stick; }
+        else { phase = 7; i = c - 2 * k_trig - 2 * k_pad - 2 * k_stick - k_btn; }
         if (phase != last_phase) {
-          static const char *const names[] = {"left trigger 0->255->0", "right trigger 0->255->0", "left pad edge trace",
-                                              "right pad edge trace", "left stick full circle", "right stick full circle",
-                                              "face buttons"};
+          static const char *const names[] = {"1. left trigger 0->255->0", "2. right trigger 0->255->0",
+                                              "3. left pad whole-surface sweep", "4. right pad whole-surface sweep",
+                                              "5. left stick circles", "6. right stick circles",
+                                              "7. every remaining button", "8/9. waiting for haptic pulses (A auto-pressed)"};
           std::printf("  phase: %s\n", names[phase]);
-          if (last_phase == 2) send_touch(0, lvg::touch_event::up, 0, 0);
-          if (last_phase == 3) send_touch(1, lvg::touch_event::up, 0, 0);
+          for (int pad = 0; pad < 2; ++pad) {
+            if (pad_down[pad]) send_touch(static_cast<std::uint8_t>(pad), lvg::touch_event::up, 0, 0);
+          }
           last_phase = phase;
         }
         std::uint32_t buttons = 0;
@@ -320,7 +356,7 @@ int main(int argc, char **argv) {
           case 1: rt = tri(i, k_trig / 2); break;
           case 2: case 3: {
             unsigned x = 0, y = 0;
-            pad_trace(i, k_pad, x, y);
+            pad_sweep(i, k_pad, x, y);
             send_touch(static_cast<std::uint8_t>(phase - 2), i == 0 ? lvg::touch_event::down : lvg::touch_event::move, x, y);
             break;
           }
@@ -332,22 +368,49 @@ int main(int argc, char **argv) {
             if (phase == 4) { lx = cx; ly = cy; } else { rx = cx; ry = cy; }
             break;
           }
-          default: {
-            const std::uint32_t face[] = {lvg::button_mask::south, lvg::button_mask::east, lvg::button_mask::west, lvg::button_mask::north, 0};
-            buttons = ((i / 4) % 2) ? face[(i / 20) % 5] : 0;
+          case 6: {
+            const button_step &step = k_buttons[(i / 10) % k_button_count];
+            const unsigned k = i % 10;
+            if (k == 0) std::printf("    button: %s\n", step.name);
+            if (step.touch_pad >= 0) {
+              // Finger down one tick before the click and up one tick after it.
+              if (k == 0) send_touch(static_cast<std::uint8_t>(step.touch_pad), lvg::touch_event::down, 32768, 32768);
+              if (k == 6) send_touch(static_cast<std::uint8_t>(step.touch_pad), lvg::touch_event::up, 0, 0);
+            }
+            if (k >= 1 && k < 6) buttons = step.mask;
             break;
           }
+          default: break;
+        }
+        // Steps 8/9: Steam buzzes one side and waits for A. Every haptic pulse becomes a feedback event here,
+        // so answer each one with a 300 ms A press (also harmless during the earlier steps).
+        if (haptic_ack_ticks > 0) {
+          buttons |= lvg::button_mask::south;
+          --haptic_ack_ticks;
+        }
+        // Grip sense: left 2 s, right 2 s, both 2 s, none 2 s.
+        switch ((tick / 40) % 4) {
+          case 0: buttons |= lvg::button_mask::left_grip_touch; break;
+          case 1: buttons |= lvg::button_mask::right_grip_touch; break;
+          case 2: buttons |= lvg::button_mask::left_grip_touch | lvg::button_mask::right_grip_touch; break;
+          default: break;
         }
         (void) client.submit_input_state(make_input(slot, buttons, lx, ly, rx, ry, lt, rt));
-        if (client.poll_feedback(slot, &event) == ERROR_SUCCESS) {
+        while (client.poll_feedback(slot, &event) == ERROR_SUCCESS) {
           lvg::generic_rumble_rgb_feedback rumble {};
           std::memcpy(&rumble, event.payload, sizeof(rumble));
-          std::printf("  [%llus] feedback type %u low=%u high=%u\n", (GetTickCount64() - (end - static_cast<ULONGLONG>(hold_seconds) * 1000)) / 1000,
-                      static_cast<unsigned>(event.type), rumble.low_frequency, rumble.high_frequency);
+          std::printf("  [%llus] feedback type %u low=%u high=%u%s\n", (GetTickCount64() - (end - static_cast<ULONGLONG>(hold_seconds) * 1000)) / 1000,
+                      static_cast<unsigned>(event.type), rumble.low_frequency, rumble.high_frequency,
+                      (rumble.low_frequency | rumble.high_frequency) ? "  -> pressing A" : "");
+          if ((rumble.low_frequency | rumble.high_frequency) != 0) haptic_ack_ticks = 6;
         }
         ++tick;
         Sleep(50);
       }
+      for (int pad = 0; pad < 2; ++pad) {
+        if (pad_down[pad]) send_touch(static_cast<std::uint8_t>(pad), lvg::touch_event::up, 0, 0);
+      }
+      (void) client.submit_input_state(make_input(slot, 0));
       std::printf("hold finished\n");
     }
     CloseHandle(handle);

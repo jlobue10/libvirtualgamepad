@@ -47,9 +47,16 @@ All in an elevated PowerShell, from the kit folder.
    ```powershell
    .\probe_sc26_usb.exe --hold 900
    ```
-   holds a live, animated virtual controller for 15 minutes (Enter stops). Open Steam → Settings →
-   Controller: it should list a Steam Controller; note whether it offers a firmware update (it did
-   not on the rig) and whether the input test shows the cycling A/B/X/Y presses and stick sweep.
+   holds a live virtual controller for 15 minutes (Enter stops) and drives Steam's controller test
+   in its own order, repeating: left trigger (full pull), right trigger, a finger across the whole
+   left pad, the whole right pad, the left stick in circles, the right stick, every remaining
+   button (stick and pad clicks included), then a 5 s quiet window in which each haptic pulse
+   Steam sends is answered with an A press (the "press A when the left/right haptic buzzes"
+   steps). The grip touch flags toggle every 2 s throughout, so the grips should light blue on
+   Steam's screen. Open Steam → Settings → Controller: it should list a Steam Controller; note
+   whether it offers a firmware update (it did not on the rig), then start the controller test
+   and watch which step is the first that does not complete. The console prints each phase and
+   button as it is driven, and each feedback event as it arrives.
    Steam's own view is in `%ProgramFiles(x86)%\Steam\logs\controller.txt` ("Steam controller
    device opened", HWID 74, FWTimestamp 0x6A4D85E3).
 4. Vibepollo: run `VibepolloSetup.exe` from the kit, set `gamepad = vhf_steam` in its
