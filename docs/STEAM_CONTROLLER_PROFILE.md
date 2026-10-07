@@ -429,7 +429,9 @@ Done from the garage box (Linux) after pulling the Windows session's commits:
   `g++ -std=c++20 -I include -I driver/src -I <shim> driver/tests/test_pid_descriptor.cpp driver/src/{pid_ff,profile,report_pump,dualshock4,dualsense,switch_pro,steam_controller,xbox_one,xbox_series}.cpp`.
 
 On the Windows host next:
-1. Done 2026-10-07 (Windows session): both artifacts are in `C:\VMs\sc26-rig\kit\sc26-test-kit-e6611a2\` on the
+1. Done 2026-10-07 (Windows session), refreshed again the same day for beta.104: installer from Vibepollo fork
+   run 37619035635 (sha256 7465078f...535f), driver package from test-signed run 37619021508 (commit 2305ebf).
+   Earlier that day: both artifacts are in `C:\VMs\sc26-rig\kit\sc26-test-kit-e6611a2\` on the
    desktop (folder name kept; `VibepolloSetup.provenance.json` and `vhf-package\SOURCE.txt` record run 37597106078 /
    37596882384, sha256 verified), zip regenerated. Copy it to the garage host.
 2. Run the new `VibepolloSetup.exe` (it installs the beta.102 driver itself; test signing must
@@ -463,4 +465,5 @@ Second round (2026-10-07, beta.103), from the beta.102 test on the garage host:
 |---|---|---|
 | Gyro test: the controller glyph does not move / does not match the motion | The real unit's `imu_timestamp` (offset 30) is a microsecond clock, ~3.8 ms per 250 Hz report, and Steam integrates the gyro over its deltas. The virtual device incremented it by 1 per IMU sample, so Steam integrated 1 us per sample | `sc26_tick()` stamps every report with the driver's performance-counter microseconds before encoding (`now_us()` in driver.cpp) |
 | Grip sensors: no way to test | The protocol has no grip-sense event, so the capacitive grip bits (0x10000000 / 0x20000000) were never set | Derived: both grips read "held" while motion samples arrived within the last second (`k_sc26_grip_hold_us`); a client that streams motion is in someone's hands. Turn the client's motion off and the grips read released |
+| Grip sensors, properly (beta.104) | Clients could not send grip sense at all | Moonlight extension `LI_CCAP_GRIP_SENSE` (0x200) with `LEFT/RIGHT_GRIP_TOUCH_FLAG` (0x400000/0x800000) on the common-c fork, forwarded by the Android BLE driver (fork.19) and by Vibepollo (`platf::LEFT/RIGHT_GRIP_TOUCH`, fork branch 277c651); `button_mask::left/right_grip_touch` in the driver sets the device's grip bits per side, and the first grip bit seen on a controller turns the motion heuristic off for good |
 | Left stick "move in a full circle" calibration step stalls | Not changed. The stick is passed through untouched (client `s16/32767`, host, driver int16); Steam's step wants the raw magnitude to reach the rim all the way round, which a physical stick's circular limit does not give on every diagonal. Worth re-checking after the timestamp fix (the step also waits on fresh reports) | none yet |
