@@ -429,10 +429,14 @@ Done from the garage box (Linux) after pulling the Windows session's commits:
   `g++ -std=c++20 -I include -I driver/src -I <shim> driver/tests/test_pid_descriptor.cpp driver/src/{pid_ff,profile,report_pump,dualshock4,dualsense,switch_pro,steam_controller,xbox_one,xbox_series}.cpp`.
 
 On the Windows host next:
-1. Download the two artifacts above into the kit folder (replace `vhf-package\` and `VibepolloSetup.exe`).
+1. Done 2026-10-07 (Windows session): both artifacts are in `C:\VMs\sc26-rig\kit\sc26-test-kit-e6611a2\` on the
+   desktop (folder name kept; `VibepolloSetup.provenance.json` and `vhf-package\SOURCE.txt` record run 37597106078 /
+   37596882384, sha256 verified), zip regenerated. Copy it to the garage host.
 2. Run the new `VibepolloSetup.exe` (it installs the beta.102 driver itself; test signing must
    still be on), keep `gamepad = vhf_steam`, restart Vibepollo.
-3. Stream from the headset (Moonlight fork.15 or later, either trackpad setting). In Steam's
+3. Stream from the headset (Moonlight fork.16 or later, either trackpad setting; moonlight-android PRs #37
+   "movable/recenter stereo screen" = fork.17 and #38 "PyroWave HDR10" = fork.18 were opened 2026-10-07 and are
+   independent of this test). In Steam's
    controller test check: each pad spans its own full width, right-pad touch and click register,
    View and Menu are on the right buttons. Then `Collect-Evidence.ps1` and commit the zip under
    `captures/rig/`.
