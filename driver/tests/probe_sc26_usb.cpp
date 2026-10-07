@@ -252,12 +252,33 @@ int main(int argc, char **argv) {
 
     if (hold_seconds > 0) {
       std::printf("\nHolding the controller for up to %d s (Enter stops). Open Steam -> Settings -> Controller now.\n", hold_seconds);
-      std::printf("A/B/X/Y cycle every second; the left stick draws a full-magnitude circle every 3 s (the right stick the"
-                  " opposite one): run Steam\'s stick calibration step against it to see whether the virtual device passes."
-                  " Feedback events are printed as they arrive.\n");
+      std::printf("Steam's calibration flow runs its steps in order (left trigger, right trigger, left pad, right pad,\n"
+                  "left stick circle, right stick circle), so the hold drives them in that order and repeats: each\n"
+                  "trigger to 255 and back, each pad touched and traced round its edges, each stick round the rim at\n"
+                  "full magnitude, then the face buttons. Feedback events are printed as they arrive.\n");
       const ULONGLONG end = GetTickCount64() + static_cast<ULONGLONG>(hold_seconds) * 1000;
       HANDLE stdin_handle = GetStdHandle(STD_INPUT_HANDLE);
       unsigned tick = 0;
+      int last_phase = -1;
+      const auto send_touch = [&](std::uint8_t pad, lvg::touch_event type, unsigned x, unsigned y) {
+        lvg::touch_state_request touch {};
+        touch.header.size = sizeof(touch); touch.header.version = lvg::k_protocol_version;
+        touch.controller_id = slot; touch.contact_index = pad; touch.event_type = static_cast<std::uint8_t>(type);
+        touch.x = static_cast<std::uint16_t>(x > 65535 ? 65535 : x); touch.y = static_cast<std::uint16_t>(y > 65535 ? 65535 : y);
+        touch.pressure = 32767;
+        (void) client.submit_touch_state(touch);
+      };
+      // Edge trace of a pad over `steps` ticks: left edge, top edge, right edge, bottom edge, then a diagonal.
+      const auto pad_trace = [](unsigned i, unsigned steps, unsigned &x, unsigned &y) {
+        const unsigned leg = steps / 5, k = i % steps, seg = k / leg, t = (k % leg) * 65535u / (leg > 1 ? leg - 1 : 1);
+        switch (seg) {
+          case 0: x = 0; y = t; break;
+          case 1: x = t; y = 65535; break;
+          case 2: x = 65535; y = 65535 - t; break;
+          case 3: x = 65535 - t; y = 0; break;
+          default: x = t; y = t; break;
+        }
+      };
       while (GetTickCount64() < end) {
         if (WaitForSingleObject(stdin_handle, 0) == WAIT_OBJECT_0) {
           INPUT_RECORD rec; DWORD n = 0;
@@ -265,14 +286,59 @@ int main(int argc, char **argv) {
               rec.Event.KeyEvent.wVirtualKeyCode == VK_RETURN) break;
           ReadConsoleInputW(stdin_handle, &rec, 1, &n);
         }
-        const std::uint32_t face[] = {lvg::button_mask::south, lvg::button_mask::east, lvg::button_mask::west, lvg::button_mask::north, 0};
-        const std::uint32_t buttons = ((tick / 4) % 2) ? face[(tick / 20) % 5] : 0;
-        // One full turn at the rim every 60 ticks (3 s); the magnitude stays at 32767 all the way round.
-        const double angle = static_cast<double>(tick % 60) * (2.0 * 3.14159265358979 / 60.0);
-        const short cx = static_cast<short>(std::lround(32767.0 * std::cos(angle)));
-        const short cy = static_cast<short>(std::lround(32767.0 * std::sin(angle)));
-        (void) client.submit_input_state(make_input(slot, buttons, cx, cy, static_cast<short>(-cx), static_cast<short>(-cy),
-                                                    static_cast<unsigned char>((tick % 50) * 5), 0));
+        // 50 ms ticks. Phase lengths in ticks: triggers 60 each, pads 100 each, sticks 120 each, buttons 60.
+        constexpr unsigned k_trig = 60, k_pad = 100, k_stick = 120, k_btn = 60;
+        constexpr unsigned k_cycle = 2 * k_trig + 2 * k_pad + 2 * k_stick + k_btn;
+        const unsigned c = tick % k_cycle;
+        int phase; unsigned i;
+        if (c < k_trig) { phase = 0; i = c; }
+        else if (c < 2 * k_trig) { phase = 1; i = c - k_trig; }
+        else if (c < 2 * k_trig + k_pad) { phase = 2; i = c - 2 * k_trig; }
+        else if (c < 2 * k_trig + 2 * k_pad) { phase = 3; i = c - 2 * k_trig - k_pad; }
+        else if (c < 2 * k_trig + 2 * k_pad + k_stick) { phase = 4; i = c - 2 * k_trig - 2 * k_pad; }
+        else if (c < 2 * k_trig + 2 * k_pad + 2 * k_stick) { phase = 5; i = c - 2 * k_trig - 2 * k_pad - k_stick; }
+        else { phase = 6; i = c - 2 * k_trig - 2 * k_pad - 2 * k_stick; }
+        if (phase != last_phase) {
+          static const char *const names[] = {"left trigger 0->255->0", "right trigger 0->255->0", "left pad edge trace",
+                                              "right pad edge trace", "left stick full circle", "right stick full circle",
+                                              "face buttons"};
+          std::printf("  phase: %s\n", names[phase]);
+          if (last_phase == 2) send_touch(0, lvg::touch_event::up, 0, 0);
+          if (last_phase == 3) send_touch(1, lvg::touch_event::up, 0, 0);
+          last_phase = phase;
+        }
+        std::uint32_t buttons = 0;
+        short lx = 0, ly = 0, rx = 0, ry = 0;
+        unsigned char lt = 0, rt = 0;
+        // Trigger: 0..255..0 twice per phase (triangle wave with the full 255 reached at the peak).
+        const auto tri = [](unsigned k, unsigned period) {
+          const unsigned half = period / 2, m = k % period;
+          return static_cast<unsigned char>((m < half ? m : period - m) * 255u / (half ? half : 1));
+        };
+        switch (phase) {
+          case 0: lt = tri(i, k_trig / 2); break;
+          case 1: rt = tri(i, k_trig / 2); break;
+          case 2: case 3: {
+            unsigned x = 0, y = 0;
+            pad_trace(i, k_pad, x, y);
+            send_touch(static_cast<std::uint8_t>(phase - 2), i == 0 ? lvg::touch_event::down : lvg::touch_event::move, x, y);
+            break;
+          }
+          case 4: case 5: {
+            // One full turn at the rim every 60 ticks (3 s); the magnitude stays at 32767 all the way round.
+            const double angle = static_cast<double>(i % 60) * (2.0 * 3.14159265358979 / 60.0);
+            const short cx = static_cast<short>(std::lround(32767.0 * std::cos(angle)));
+            const short cy = static_cast<short>(std::lround(32767.0 * std::sin(angle)));
+            if (phase == 4) { lx = cx; ly = cy; } else { rx = cx; ry = cy; }
+            break;
+          }
+          default: {
+            const std::uint32_t face[] = {lvg::button_mask::south, lvg::button_mask::east, lvg::button_mask::west, lvg::button_mask::north, 0};
+            buttons = ((i / 4) % 2) ? face[(i / 20) % 5] : 0;
+            break;
+          }
+        }
+        (void) client.submit_input_state(make_input(slot, buttons, lx, ly, rx, ry, lt, rt));
         if (client.poll_feedback(slot, &event) == ERROR_SUCCESS) {
           lvg::generic_rumble_rgb_feedback rumble {};
           std::memcpy(&rumble, event.payload, sizeof(rumble));
