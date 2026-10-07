@@ -34,6 +34,9 @@ struct sc26_state {
   lvg::sc26_usb::rumble rumble;
   // Driver clock (microseconds) of the last motion sample; 0 = never.
   std::uint64_t last_motion_us {};
+  // Driver clock of the last report handed to the pump (sc26_tick); the
+  // keep-alive timer resends the state when this goes stale.
+  std::uint64_t last_report_us {};
   // Set once the client has sent a grip-touch bit (button_mask::left/right_grip_touch):
   // from then on the grips follow the client and the motion heuristic is off.
   bool grip_explicit {};

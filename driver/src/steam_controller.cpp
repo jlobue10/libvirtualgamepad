@@ -13,6 +13,7 @@ void sc26_state::reset() noexcept {
   features.reset();
   rumble = {};
   last_motion_us = 0;
+  last_report_us = 0;
   grip_explicit = false;
 }
 
@@ -148,6 +149,7 @@ void sc26_tick(sc26_state *const state, const std::uint64_t now_us) noexcept {
     return;
   }
   state->device.imu_timestamp = static_cast<std::uint32_t>(now_us);
+  state->last_report_us = now_us;
   if (!state->grip_explicit) {
     const bool held = state->last_motion_us != 0 && now_us >= state->last_motion_us &&
                       now_us - state->last_motion_us < k_sc26_grip_hold_us;

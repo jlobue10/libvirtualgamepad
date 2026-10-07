@@ -62,6 +62,14 @@ using lvg::driver::profile_definition;
 // itself as soon as nothing is playing.
 constexpr LONG k_pid_tick_ms = 10;
 
+// The Steam Controller (2026) streams its state report at ~250 Hz whether or
+// not anything changed, and Steam paces its gyro integration and smoothing on
+// that cadence. The pump sends only on changes, so this timer resends the last
+// state once nothing has gone out for a tick. It runs only while a Steam
+// Controller slot is active and stops itself when none is left.
+constexpr LONG k_sc26_tick_ms = 4;
+constexpr std::uint64_t k_sc26_resend_after_us = 3500;
+
 enum class slot_state : std::uint8_t {
   empty,
   starting,
@@ -117,6 +125,8 @@ struct device_context {
   bool vhf_target_open;
   bool stopping;
   WDFTIMER pid_timer;
+  WDFTIMER sc26_timer;
+  bool sc26_timer_running;
   controller_slot controllers[lvg::k_max_controllers];
 };
 
@@ -141,6 +151,7 @@ EVT_VHF_READY_FOR_NEXT_READ_REPORT evt_vhf_ready_for_next_report;
 EVT_VHF_ASYNC_OPERATION evt_vhf_set_feature;
 EVT_VHF_CLEANUP evt_vhf_cleanup;
 EVT_WDF_TIMER evt_pid_tick;
+EVT_WDF_TIMER evt_sc26_tick;
 
 // Defined below with the PlayStation submit helpers; create_controller needs it
 // to decide whether to register the feature-report callbacks.
@@ -889,7 +900,16 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
       lvg::driver::encode_sc26_input(request, &slot.sc26);
     const auto sc26_kind =
       slot.pump.classify(request.buttons, request.left_trigger, request.right_trigger);
+    // First input state of a Steam Controller: start the keep-alive cadence.
+    const bool start_keepalive = context->sc26_timer != nullptr && !context->sc26_timer_running;
+    if (start_keepalive) {
+      context->sc26_timer_running = true;
+    }
     unlock_context(context);
+    if (start_keepalive) {
+      // Started outside the lock: the tick callback takes state_lock itself.
+      WdfTimerStart(context->sc26_timer, WDF_REL_TIMEOUT_IN_MS(k_sc26_tick_ms));
+    }
     const NTSTATUS sc26_status =
       pump_report(context, slot, &sc26_report, sizeof(sc26_report),
                   lvg::driver::k_sc26_input_report_id, sc26_kind);
@@ -1546,6 +1566,47 @@ void evt_pid_tick(WDFTIMER timer) {
   }
 }
 
+// Keeps every active Steam Controller slot streaming at the real unit's cadence
+// while the client is quiet. Runs without the lifetime gate, like evt_pid_tick;
+// submit_profile_report checks the slot state under state_lock itself.
+void evt_sc26_tick(WDFTIMER timer) {
+  auto *const context = get_device_context(
+    reinterpret_cast<WDFDEVICE>(WdfTimerGetParentObject(timer)));
+  if (context == nullptr) {
+    return;
+  }
+
+  controller_slot *due[lvg::k_max_controllers] {};
+  std::size_t due_count = 0;
+  bool any_active = false;
+  const std::uint64_t now = now_us();
+  lock_context(context);
+  const bool stopping = context->stopping;
+  for (auto &slot : context->controllers) {
+    if (slot.state != slot_state::active || !is_steam_controller(slot.selected_profile)) {
+      continue;
+    }
+    any_active = true;
+    if (slot.have_last_input && now - slot.sc26.last_report_us >= k_sc26_resend_after_us) {
+      due[due_count++] = &slot;
+    }
+  }
+  const bool keep_running = any_active && !stopping;
+  if (!keep_running) {
+    context->sc26_timer_running = false;
+  }
+  unlock_context(context);
+
+  if (!keep_running) {
+    // Passing FALSE: a timer may stop itself from inside its own callback.
+    WdfTimerStop(timer, FALSE);
+    return;
+  }
+  for (std::size_t i = 0; i < due_count; ++i) {
+    std::ignore = submit_profile_report(context, *due[i]);
+  }
+}
+
 // A host can ask for the current state instead of waiting for the next change.
 // Answering from the last submitted state keeps that read consistent with what
 // the stream has already reported.
@@ -1828,6 +1889,8 @@ void stop_owned_controllers(device_context *const context, const bool forget_tar
   lock_lifetime(context);
   lock_context(context);
   const WDFTIMER timer = context->pid_timer;
+  const WDFTIMER sc26_timer = context->sc26_timer;
+  context->sc26_timer_running = false;
   context->stopping = true;
   context->vhf_file_handle = nullptr;
   if (forget_target) {
@@ -1853,9 +1916,12 @@ void stop_owned_controllers(device_context *const context, const bool forget_tar
     }
   }
 
-  // Stopped outside state_lock because the tick callback acquires it.
+  // Stopped outside state_lock because the tick callbacks acquire it.
   if (timer != nullptr) {
     WdfTimerStop(timer, TRUE);
+  }
+  if (sc26_timer != nullptr) {
+    WdfTimerStop(sc26_timer, TRUE);
   }
   unlock_lifetime(context);
 }
@@ -1967,6 +2033,18 @@ NTSTATUS evt_device_add(WDFDRIVER, PWDFDEVICE_INIT device_init) {
   if (!NT_SUCCESS(WdfTimerCreate(&timer_config, &timer_attributes, &context->pid_timer))) {
     context->pid_timer = nullptr;
   }
+
+  // Steam Controller keep-alive cadence; same optional footing as the effect clock.
+  WDF_TIMER_CONFIG sc26_timer_config;
+  WDF_TIMER_CONFIG_INIT_PERIODIC(&sc26_timer_config, evt_sc26_tick, k_sc26_tick_ms);
+  sc26_timer_config.AutomaticSerialization = FALSE;
+  WDF_OBJECT_ATTRIBUTES sc26_timer_attributes;
+  WDF_OBJECT_ATTRIBUTES_INIT(&sc26_timer_attributes);
+  sc26_timer_attributes.ParentObject = device;
+  if (!NT_SUCCESS(WdfTimerCreate(&sc26_timer_config, &sc26_timer_attributes, &context->sc26_timer))) {
+    context->sc26_timer = nullptr;
+  }
+  context->sc26_timer_running = false;
 
   WDF_OBJECT_ATTRIBUTES lifetime_attributes;
   WDF_OBJECT_ATTRIBUTES_INIT(&lifetime_attributes);
