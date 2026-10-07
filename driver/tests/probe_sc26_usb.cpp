@@ -11,6 +11,7 @@
 #include <setupapi.h>
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <cwctype>
@@ -251,7 +252,9 @@ int main(int argc, char **argv) {
 
     if (hold_seconds > 0) {
       std::printf("\nHolding the controller for up to %d s (Enter stops). Open Steam -> Settings -> Controller now.\n", hold_seconds);
-      std::printf("A/B/X/Y cycle every second, sticks sweep, feedback events are printed as they arrive.\n");
+      std::printf("A/B/X/Y cycle every second; the left stick draws a full-magnitude circle every 3 s (the right stick the"
+                  " opposite one): run Steam\'s stick calibration step against it to see whether the virtual device passes."
+                  " Feedback events are printed as they arrive.\n");
       const ULONGLONG end = GetTickCount64() + static_cast<ULONGLONG>(hold_seconds) * 1000;
       HANDLE stdin_handle = GetStdHandle(STD_INPUT_HANDLE);
       unsigned tick = 0;
@@ -264,8 +267,12 @@ int main(int argc, char **argv) {
         }
         const std::uint32_t face[] = {lvg::button_mask::south, lvg::button_mask::east, lvg::button_mask::west, lvg::button_mask::north, 0};
         const std::uint32_t buttons = ((tick / 4) % 2) ? face[(tick / 20) % 5] : 0;
-        const short sweep = static_cast<short>(((tick % 80) - 40) * 800);
-        (void) client.submit_input_state(make_input(slot, buttons, sweep, 0, 0, sweep, static_cast<unsigned char>((tick % 50) * 5), 0));
+        // One full turn at the rim every 60 ticks (3 s); the magnitude stays at 32767 all the way round.
+        const double angle = static_cast<double>(tick % 60) * (2.0 * 3.14159265358979 / 60.0);
+        const short cx = static_cast<short>(std::lround(32767.0 * std::cos(angle)));
+        const short cy = static_cast<short>(std::lround(32767.0 * std::sin(angle)));
+        (void) client.submit_input_state(make_input(slot, buttons, cx, cy, static_cast<short>(-cx), static_cast<short>(-cy),
+                                                    static_cast<unsigned char>((tick % 50) * 5), 0));
         if (client.poll_feedback(slot, &event) == ERROR_SUCCESS) {
           lvg::generic_rumble_rgb_feedback rumble {};
           std::memcpy(&rumble, event.payload, sizeof(rumble));
