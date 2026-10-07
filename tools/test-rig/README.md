@@ -57,6 +57,12 @@ All in an elevated PowerShell, from the kit folder.
    whether it offers a firmware update (it did not on the rig), then start the controller test
    and watch which step is the first that does not complete. The console prints each phase and
    button as it is driven, and each feedback event as it arrives.
+   `--circle N` (0..5) changes how the two stick-circle steps are driven, to find what Steam's
+   step objects to in a stream: 0 perfect unit circle at 20 reports/s (passes); 1 the shape the
+   controller sends over BLE (axes clipped at full scale, magnitude 1.17 on diagonals); 2 unit
+   circle at 60/s; 3 as 2 with gyro/accel streaming; 4 as 2 with a 100 ms gap every second (a
+   jump, as a Wi-Fi hiccup leaves); 5 all of it. Run Steam's test once per mode and note which
+   modes complete the left stick step.
    While a stream is running (the controller Vibepollo created, not the probe's own):
    ```powershell
    .\probe_sc26_usb.exe --monitor 120

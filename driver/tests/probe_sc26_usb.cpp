@@ -5,6 +5,15 @@
 // feature-report control channel, the state report, haptic output -> feedback),
 // then releases it. With --hold [seconds] it keeps the controller alive and
 // animates it so Steam can be opened next to it; Enter stops early.
+// --circle N picks how the stick-circle steps of the hold are driven, to find
+// what Steam's "move the stick in a full circle" step objects to in a stream:
+//   0  perfect unit circle, 20 reports/s (passes)
+//   1  the shape the controller sends over BLE: axes clipped at +/-32767, so the
+//      magnitude reaches 1.17 on diagonals (fork.20 passed this through)
+//   2  perfect unit circle at 60 reports/s (the BLE cadence)
+//   3  as 2 with gyro/accel motion streaming alongside
+//   4  as 2 with a 100 ms gap every second, as a Wi-Fi hiccup leaves (a jump)
+//   5  everything: clipped shape, 60/s, motion, gaps
 // With --monitor [seconds] it creates nothing: it opens the vendor collection of
 // the virtual Steam Controller that already exists (the one Vibepollo made for a
 // stream) and reads its state reports, printing once a second what Steam sees of
@@ -242,11 +251,13 @@ int monitor(int seconds) {
 
 int main(int argc, char **argv) {
   constexpr unsigned slot = 7;
-  int hold_seconds = 0, monitor_seconds = 0;
+  int hold_seconds = 0, monitor_seconds = 0, circle_mode = 0;
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--hold") == 0) hold_seconds = (i + 1 < argc) ? std::atoi(argv[++i]) : 600;
     if (std::strcmp(argv[i], "--monitor") == 0) monitor_seconds = (i + 1 < argc) ? std::atoi(argv[++i]) : 120;
+    if (std::strcmp(argv[i], "--circle") == 0) circle_mode = (i + 1 < argc) ? std::atoi(argv[++i]) : 0;
   }
+  circle_mode = std::clamp(circle_mode, 0, 5);
   if (monitor_seconds > 0) return monitor(monitor_seconds);
   GUID guid; HidD_GetHidGuid(&guid);
   const auto before = existing_paths(guid);
@@ -379,7 +390,7 @@ int main(int argc, char **argv) {
                   "(stick and pad clicks included), then A when the left haptic buzzes and A when the right one buzzes.\n"
                   "The hold drives exactly that and repeats; A is pressed automatically when a haptic pulse arrives. The\n"
                   "grip touch flags toggle every 2 s throughout, so the grips should light up blue on Steam's screen.\n"
-                  "Feedback events are printed as they arrive.\n");
+                  "Feedback events are printed as they arrive. Stick circle mode %d (--circle 0..5).\n", circle_mode);
       const ULONGLONG end = GetTickCount64() + static_cast<ULONGLONG>(hold_seconds) * 1000;
       HANDLE stdin_handle = GetStdHandle(STD_INPUT_HANDLE);
       unsigned tick = 0;
@@ -433,6 +444,25 @@ int main(int argc, char **argv) {
         {lvg::button_mask::paddle_1, -1, "R4"}, {lvg::button_mask::paddle_3, -1, "R5"},
       };
       constexpr unsigned k_button_count = sizeof(k_buttons) / sizeof(k_buttons[0]);
+      static const char *const circle_names[] = {" (unit circle, 20/s)", " (BLE shape: axes clipped, 20/s)", " (unit circle, 60/s)",
+                                                 " (unit circle, 60/s, motion streaming)", " (unit circle, 60/s, 100 ms gap each second)",
+                                                 " (BLE shape, 60/s, motion, gaps)"};
+      const bool circle_clipped = circle_mode == 1 || circle_mode == 5;
+      const bool circle_fast = circle_mode >= 2;
+      const bool circle_motion = circle_mode == 3 || circle_mode == 5;
+      const bool circle_gaps = circle_mode == 4 || circle_mode == 5;
+      const auto send_motion = [&](unsigned k) {
+        // Gyro: a slow wobble of a few deg/s; accel: 1 g on Z with a little noise. Units are milli
+        // (deg/s, m/s^2) as Vibepollo sends them.
+        lvg::motion_state_request m {};
+        m.header.size = sizeof(m); m.header.version = lvg::k_protocol_version; m.controller_id = slot;
+        m.motion_type = static_cast<std::uint8_t>(lvg::motion_kind::gyroscope);
+        m.x_milli = static_cast<std::int32_t>(3000.0 * std::sin(k * 0.1)); m.y_milli = static_cast<std::int32_t>(2000.0 * std::cos(k * 0.13)); m.z_milli = 500;
+        (void) client.submit_motion_state(m);
+        m.motion_type = static_cast<std::uint8_t>(lvg::motion_kind::accelerometer);
+        m.x_milli = static_cast<std::int32_t>(200.0 * std::sin(k * 0.2)); m.y_milli = 100; m.z_milli = 9807;
+        (void) client.submit_motion_state(m);
+      };
       while (GetTickCount64() < end) {
         if (WaitForSingleObject(stdin_handle, 0) == WAIT_OBJECT_0) {
           INPUT_RECORD rec; DWORD n = 0;
@@ -459,7 +489,7 @@ int main(int argc, char **argv) {
                                               "3. left pad whole-surface sweep", "4. right pad whole-surface sweep",
                                               "5. left stick circles", "6. right stick circles",
                                               "7. every remaining button", "8/9. waiting for haptic pulses (A auto-pressed)"};
-          std::printf("  phase: %s\n", names[phase]);
+          std::printf("  phase: %s%s\n", names[phase], (phase == 4 || phase == 5) ? circle_names[circle_mode] : "");
           for (int pad = 0; pad < 2; ++pad) {
             if (pad_down[pad]) send_touch(static_cast<std::uint8_t>(pad), lvg::touch_event::up, 0, 0);
           }
@@ -468,6 +498,20 @@ int main(int argc, char **argv) {
         std::uint32_t buttons = 0;
         short lx = 0, ly = 0, rx = 0, ry = 0;
         unsigned char lt = 0, rt = 0;
+        bool skip_send = false;
+        // Steps 8/9: Steam buzzes one side and waits for A. Every haptic pulse becomes a feedback event here,
+        // so answer each one with a 300 ms A press (also harmless during the earlier steps).
+        if (haptic_ack_ticks > 0) {
+          buttons |= lvg::button_mask::south;
+          --haptic_ack_ticks;
+        }
+        // Grip sense: left 2 s, right 2 s, both 2 s, none 2 s.
+        switch ((tick / 40) % 4) {
+          case 0: buttons |= lvg::button_mask::left_grip_touch; break;
+          case 1: buttons |= lvg::button_mask::right_grip_touch; break;
+          case 2: buttons |= lvg::button_mask::left_grip_touch | lvg::button_mask::right_grip_touch; break;
+          default: break;
+        }
         // Trigger: 0..255..0 twice per phase (triangle wave with the full 255 reached at the peak).
         const auto tri = [](unsigned k, unsigned period) {
           const unsigned half = period / 2, m = k % period;
@@ -483,11 +527,26 @@ int main(int argc, char **argv) {
             break;
           }
           case 4: case 5: {
-            // One full turn at the rim every 60 ticks (3 s); the magnitude stays at 32767 all the way round.
-            const double angle = static_cast<double>(i % 60) * (2.0 * 3.14159265358979 / 60.0);
-            const short cx = static_cast<short>(std::lround(32767.0 * std::cos(angle)));
-            const short cy = static_cast<short>(std::lround(32767.0 * std::sin(angle)));
-            if (phase == 4) { lx = cx; ly = cy; } else { rx = cx; ry = cy; }
+            // One full turn every 60 ticks (3 s). Mode 0: the magnitude stays at 32767 all the way round.
+            // Fast modes send three reports per tick (~60/s); the gap modes send nothing for two ticks
+            // (100 ms) out of every twenty, so the position jumps when reports resume.
+            if (circle_gaps && (i % 20) < 2) { skip_send = true; break; }
+            const unsigned sub = circle_fast ? 3 : 1;
+            for (unsigned k = 0; k < sub; ++k) {
+              const double t = static_cast<double>(i % 60) + static_cast<double>(k) / sub;
+              const double angle = t * (2.0 * 3.14159265358979 / 60.0);
+              double fx = std::cos(angle), fy = std::sin(angle);
+              if (circle_clipped) { fx = std::clamp(1.2 * fx, -1.0, 1.0); fy = std::clamp(1.2 * fy, -1.0, 1.0); }
+              const short cx = static_cast<short>(std::lround(32767.0 * fx));
+              const short cy = static_cast<short>(std::lround(32767.0 * fy));
+              if (phase == 4) { lx = cx; ly = cy; } else { rx = cx; ry = cy; }
+              if (circle_motion) send_motion(i * sub + k);
+              if (k + 1 < sub) {
+                // Intermediate report of a fast mode; the last one goes out with the common send below.
+                (void) client.submit_input_state(make_input(slot, buttons, lx, ly, rx, ry, lt, rt));
+                Sleep(16);
+              }
+            }
             break;
           }
           case 6: {
@@ -504,20 +563,7 @@ int main(int argc, char **argv) {
           }
           default: break;
         }
-        // Steps 8/9: Steam buzzes one side and waits for A. Every haptic pulse becomes a feedback event here,
-        // so answer each one with a 300 ms A press (also harmless during the earlier steps).
-        if (haptic_ack_ticks > 0) {
-          buttons |= lvg::button_mask::south;
-          --haptic_ack_ticks;
-        }
-        // Grip sense: left 2 s, right 2 s, both 2 s, none 2 s.
-        switch ((tick / 40) % 4) {
-          case 0: buttons |= lvg::button_mask::left_grip_touch; break;
-          case 1: buttons |= lvg::button_mask::right_grip_touch; break;
-          case 2: buttons |= lvg::button_mask::left_grip_touch | lvg::button_mask::right_grip_touch; break;
-          default: break;
-        }
-        (void) client.submit_input_state(make_input(slot, buttons, lx, ly, rx, ry, lt, rt));
+        if (!skip_send) (void) client.submit_input_state(make_input(slot, buttons, lx, ly, rx, ry, lt, rt));
         while (client.poll_feedback(slot, &event) == ERROR_SUCCESS) {
           lvg::generic_rumble_rgb_feedback rumble {};
           std::memcpy(&rumble, event.payload, sizeof(rumble));
@@ -527,7 +573,7 @@ int main(int argc, char **argv) {
           if ((rumble.low_frequency | rumble.high_frequency) != 0) haptic_ack_ticks = 6;
         }
         ++tick;
-        Sleep(50);
+        Sleep((circle_fast && (phase == 4 || phase == 5) && !skip_send) ? 18 : 50);
       }
       for (int pad = 0; pad < 2; ++pad) {
         if (pad_down[pad]) send_touch(static_cast<std::uint8_t>(pad), lvg::touch_event::up, 0, 0);
