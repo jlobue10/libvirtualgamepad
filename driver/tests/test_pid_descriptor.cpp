@@ -903,6 +903,38 @@ int main() {
             (lvg::sc26_usb::btn_r4 | lvg::sc26_usb::btn_l4 | lvg::sc26_usb::btn_r5 | lvg::sc26_usb::btn_l5),
           "sc26 paddles 1..4 are R4, L4, R5, L5");
 
+    // Grip sense: motion heuristic until the client sends a grip bit, then explicit.
+    {
+      input_state_request in {};
+      in.controller_id = 0;
+      auto held = encode_sc26_input(in, &state);
+      check((held.buttons & (lvg::sc26_usb::btn_left_grip_touch | lvg::sc26_usb::btn_right_grip_touch)) == 0,
+            "sc26 grips are released before any motion");
+      motion_state_request motion {};
+      motion.motion_type = static_cast<std::uint8_t>(motion_kind::gyroscope);
+      check(apply_sc26_motion(motion, &state, 5'000'000), "motion accepted");
+      sc26_tick(&state, 5'500'000);
+      held = encode_sc26_input(in, &state);
+      check((held.buttons & (lvg::sc26_usb::btn_left_grip_touch | lvg::sc26_usb::btn_right_grip_touch)) ==
+              (lvg::sc26_usb::btn_left_grip_touch | lvg::sc26_usb::btn_right_grip_touch),
+            "sc26 grips read held while motion flows");
+      sc26_tick(&state, 7'000'000);
+      held = encode_sc26_input(in, &state);
+      check((held.buttons & (lvg::sc26_usb::btn_left_grip_touch | lvg::sc26_usb::btn_right_grip_touch)) == 0,
+            "sc26 grips release a second after the last motion sample");
+      in.buttons = button_mask::right_grip_touch;
+      held = encode_sc26_input(in, &state);
+      check((held.buttons & (lvg::sc26_usb::btn_left_grip_touch | lvg::sc26_usb::btn_right_grip_touch)) ==
+              lvg::sc26_usb::btn_right_grip_touch,
+            "sc26 explicit right grip from the client");
+      in.buttons = 0;
+      sc26_tick(&state, 5'600'000);   // motion still "fresh" by the heuristic's clock
+      held = encode_sc26_input(in, &state);
+      check((held.buttons & (lvg::sc26_usb::btn_left_grip_touch | lvg::sc26_usb::btn_right_grip_touch)) == 0,
+            "sc26 heuristic stays off once the client sent a grip bit");
+      state.reset();
+    }
+
     // The single protocol click flag lands on the touched pad(s).
     check(sc26_buttons(button_mask::touchpad, state) == lvg::sc26_usb::btn_right_pad_click,
           "sc26 pad click with no touch goes to the right pad");

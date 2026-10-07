@@ -504,10 +504,11 @@ struct state {
   // the deltas of this field, so the driver must stamp it from a real clock: a
   // counter that moved by 1 per IMU sample left Steam's gyro glyph motionless.
   std::uint32_t imu_timestamp {};
-  // Both capacitive grip sensors report "held". The protocol carries no grip
-  // sense, so the driver derives it from motion activity (a controller that is
-  // streaming motion is in someone's hands).
-  bool grip_touch {};
+  // Capacitive grip sensors (left, right) report "held". A client with
+  // LI_CCAP_GRIP_SENSE sends them as button bits; otherwise the driver derives
+  // both from motion activity (a controller that is streaming motion is in
+  // someone's hands).
+  bool grip_touch[2] {};
   bool pad_touched[2] {};
   std::uint16_t pad_x[2] {};
   std::uint16_t pad_y[2] {};
@@ -563,7 +564,8 @@ inline constexpr std::int32_t stick_touch_deflection = 3276;
   if (right_trigger >= trigger_click_threshold) bits |= btn_right_trigger_click;
   if (st.pad_touched[0]) bits |= btn_left_pad_touch;
   if (st.pad_touched[1]) bits |= btn_right_pad_touch;
-  if (st.grip_touch) bits |= btn_left_grip_touch | btn_right_grip_touch;
+  if (st.grip_touch[0]) bits |= btn_left_grip_touch;
+  if (st.grip_touch[1]) bits |= btn_right_grip_touch;
   if (st.stick_touch_from_deflection) {
     const auto deflected = [](const std::int16_t x, const std::int16_t y) {
       const std::int32_t ax = x < 0 ? -static_cast<std::int32_t>(x) : x;

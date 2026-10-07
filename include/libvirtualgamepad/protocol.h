@@ -78,6 +78,10 @@ enum button_mask : std::uint32_t {
   paddle_4 = 0x080000u,
   touchpad = 0x100000u,
   misc = 0x200000u,
+  // Moonlight extension (LI_CCAP_GRIP_SENSE): capacitive grip touch of the Steam
+  // Controller (2026), not buttons. Ignored by every other profile.
+  left_grip_touch = 0x400000u,
+  right_grip_touch = 0x800000u,
 };
 
 enum class feedback_type : std::uint16_t {

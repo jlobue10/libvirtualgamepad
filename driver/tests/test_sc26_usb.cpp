@@ -141,13 +141,19 @@ int main() {
 
     // The driver stamps the clock and grip sense before encoding.
     st.imu_timestamp = 0x12345678u;
-    st.grip_touch = true;
+    st.grip_touch[0] = true;
+    st.grip_touch[1] = true;
     const input_report r2 = encode_input(0, 0, 0, 0, 0, 0, 0, st);
     const auto *b2 = reinterpret_cast<const std::uint8_t *>(&r2);
     check(ule32(b2 + 30) == 0x12345678u, "timestamp at 30 carries the driver clock");
     check((ule32(b2 + 2) & (btn_left_grip_touch | btn_right_grip_touch)) ==
             (btn_left_grip_touch | btn_right_grip_touch),
           "grip touch sets both grip bits");
+    st.grip_touch[0] = false;
+    const input_report r3 = encode_input(0, 0, 0, 0, 0, 0, 0, st);
+    const auto *b3 = reinterpret_cast<const std::uint8_t *>(&r3);
+    check((ule32(b3 + 2) & (btn_left_grip_touch | btn_right_grip_touch)) == btn_right_grip_touch,
+          "grips are reported per side");
   }
 
   // Pad axis conventions (SDL: x = raw/65536 + 0.5, y = -raw/65536 + 0.5).

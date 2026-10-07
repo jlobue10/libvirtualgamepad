@@ -13,6 +13,7 @@ void sc26_state::reset() noexcept {
   features.reset();
   rumble = {};
   last_motion_us = 0;
+  grip_explicit = false;
 }
 
 const std::uint8_t *sc26_descriptor(std::size_t *const size) noexcept {
@@ -88,6 +89,18 @@ sc26_input_report encode_sc26_input(
                             input.right_x, input.right_y, input.left_trigger,
                             input.right_trigger, scratch.device);
   }
+  // Grip sense from the client (Moonlight extension LI_CCAP_GRIP_SENSE) is carried as
+  // two button bits. The first one seen switches this controller to explicit grips for
+  // good; until then, and for clients without the extension, the motion heuristic in
+  // sc26_tick() stands in.
+  constexpr std::uint32_t grip_bits = button_mask::left_grip_touch | button_mask::right_grip_touch;
+  if ((input.buttons & grip_bits) != 0) {
+    state->grip_explicit = true;
+  }
+  if (state->grip_explicit) {
+    state->device.grip_touch[0] = (input.buttons & button_mask::left_grip_touch) != 0;
+    state->device.grip_touch[1] = (input.buttons & button_mask::right_grip_touch) != 0;
+  }
   return sc::encode_input(sc26_buttons(input.buttons, *state), input.left_x, input.left_y,
                           input.right_x, input.right_y, input.left_trigger, input.right_trigger,
                           state->device);
@@ -135,9 +148,12 @@ void sc26_tick(sc26_state *const state, const std::uint64_t now_us) noexcept {
     return;
   }
   state->device.imu_timestamp = static_cast<std::uint32_t>(now_us);
-  state->device.grip_touch =
-    state->last_motion_us != 0 && now_us >= state->last_motion_us &&
-    now_us - state->last_motion_us < k_sc26_grip_hold_us;
+  if (!state->grip_explicit) {
+    const bool held = state->last_motion_us != 0 && now_us >= state->last_motion_us &&
+                      now_us - state->last_motion_us < k_sc26_grip_hold_us;
+    state->device.grip_touch[0] = held;
+    state->device.grip_touch[1] = held;
+  }
 }
 
 bool apply_sc26_motion(const motion_state_request &motion, sc26_state *const state,
