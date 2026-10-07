@@ -416,10 +416,12 @@ Done from the garage box (Linux) after pulling the Windows session's commits:
 - Vibepollo fork branch `feat/steam-controller-profile`: 55383c1 (single-touchpad clients: the pad
   half selects the pad, see §8) + accb4f5 (pins → beta.102, written by
   `Update-VibepolloDriverPins.py`). Installer build: `ci.yml` run **37597106078**
-  (`workflow_dispatch`, `vhf_local_test_package=true`); when green, the `VibepolloSetup.exe`
-  artifact is the kit installer (fetch through the artifacts API, as before; sha256 in the
-  `release-provenance` artifact). If it failed, read the Windows job log first; the previous run of
-  the same kind (37490202610) was green on the same workflow code.
+  (`workflow_dispatch`, `vhf_local_test_package=true`): **Windows jobs green** (the run shows
+  "failure" only because of the unrelated Arch Linux job, as before). Kit installer = artifact
+  `VibepolloSetup.exe` (artifact id 11472796073, 43.6 MB), sha256
+  `bc9a621c52b8723fce255994527adbae8e3afb7b56922741609a83f44f9ed75a` (from `release-provenance`).
+  Fetch: `gh api repos/jlobue10/Vibepollo/actions/artifacts/11472796073/zip > VibepolloSetup.zip`
+  (raw upload, so the zip holds `VibepolloSetup.exe`), then check the hash.
 - Local clone notes: `~/GitHub/Vibepollo` origin fetch refspec was master-only and is now
   `+refs/heads/*`; the branch tracks `origin/feat/steam-controller-profile`. The driver tests build
   on Linux with the shim in the session scratchpad (`winshim/windows.h`, `winioctl.h`; recreate two
