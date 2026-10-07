@@ -57,6 +57,16 @@ All in an elevated PowerShell, from the kit folder.
    whether it offers a firmware update (it did not on the rig), then start the controller test
    and watch which step is the first that does not complete. The console prints each phase and
    button as it is driven, and each feedback event as it arrives.
+   While a stream is running (the controller Vibepollo created, not the probe's own):
+   ```powershell
+   .\probe_sc26_usb.exe --monitor 120
+   ```
+   creates nothing and reads the state reports of the virtual Steam Controller that already
+   exists, printing once a second what Steam sees: reports per second and the largest gap
+   between them, each stick's magnitude range, per-axis peaks, 16-sector coverage, largest
+   angular jump between consecutive reports and the peak at each compass point, plus the grip
+   and stick touch bits seen. Circle a stick during it and compare the numbers with the
+   client's `stick extents (raw)` log line to see where the rim is lost.
    Steam's own view is in `%ProgramFiles(x86)%\Steam\logs\controller.txt` ("Steam controller
    device opened", HWID 74, FWTimestamp 0x6A4D85E3).
 4. Vibepollo: run `VibepolloSetup.exe` from the kit, set `gamepad = vhf_steam` in its

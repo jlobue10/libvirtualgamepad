@@ -5,6 +5,11 @@
 // feature-report control channel, the state report, haptic output -> feedback),
 // then releases it. With --hold [seconds] it keeps the controller alive and
 // animates it so Steam can be opened next to it; Enter stops early.
+// With --monitor [seconds] it creates nothing: it opens the vendor collection of
+// the virtual Steam Controller that already exists (the one Vibepollo made for a
+// stream) and reads its state reports, printing once a second what Steam sees of
+// the sticks (magnitude range, sector coverage, largest jump between reports),
+// the grip and stick touch bits, and the report cadence.
 // Never installs drivers or modifies existing controllers.
 #include <windows.h>
 #include <hidsdi.h>
@@ -120,12 +125,129 @@ bool read_report(HANDLE handle, std::array<unsigned char, 64> &report, DWORD &by
   return ok;
 }
 
+// Every present vendor collection (usage ff00/0001) of VID 28DE PID 1302.
+std::vector<found_collection> present_vendor_collections(const GUID &guid) {
+  std::vector<found_collection> out;
+  for (const auto &c : new_collections(guid, {})) {
+    if (c.attributes.VendorID == 0x28de && c.attributes.ProductID == 0x1302 && c.usage_page == 0xff00 && c.usage == 0x0001) out.push_back(c);
+  }
+  return out;
+}
+
+struct stick_stats {
+  float mag_min = 9, mag_max = 0;        // over samples away from centre (> 0.5)
+  float axis_x = 0, axis_y = 0;          // per-axis peak |x|, |y|
+  unsigned sectors = 0;                  // 16 angular sectors visited (> 0.5)
+  float sector_peak[16] {};
+  float max_jump_deg = 0;                // largest angle change between consecutive rim samples (> 0.8)
+  bool have_prev = false; double prev_angle = 0;
+  void add(short x, short y) {
+    const float fx = x / 32767.f, fy = y / 32767.f;
+    const float m = std::hypot(fx, fy);
+    if (m <= 0.5f) { have_prev = false; return; }
+    mag_min = std::min(mag_min, m); mag_max = std::max(mag_max, m);
+    axis_x = std::max(axis_x, std::fabs(fx)); axis_y = std::max(axis_y, std::fabs(fy));
+    const double a = std::atan2(fy, fx);
+    int sec = static_cast<int>(std::floor((a + 3.14159265358979) / (2 * 3.14159265358979) * 16));
+    sec = std::clamp(sec, 0, 15);
+    sectors |= 1u << sec; sector_peak[sec] = std::max(sector_peak[sec], m);
+    if (m > 0.8f) {
+      if (have_prev) {
+        double d = std::fabs(a - prev_angle) * 180.0 / 3.14159265358979;
+        if (d > 180) d = 360 - d;
+        max_jump_deg = std::max(max_jump_deg, static_cast<float>(d));
+      }
+      have_prev = true; prev_angle = a;
+    } else {
+      have_prev = false;
+    }
+  }
+  void print(const char *name) const {
+    if (sectors == 0) { std::printf("%s: centred", name); return; }
+    unsigned n = 0; for (unsigned i = 0; i < 16; ++i) n += (sectors >> i) & 1;
+    std::printf("%s: mag %.2f..%.2f |x| %.2f |y| %.2f, %u/16 sectors, max jump %.0f deg, peaks", name, mag_min, mag_max, axis_x, axis_y, n, max_jump_deg);
+    // Compass points as the peak of the two sectors around each (sector 0 starts at -180 deg = W; y is up-positive here, so sector 4 = S).
+    static const char *const names[] = {"W", "SW", "S", "SE", "E", "NE", "N", "NW"};
+    for (int i = 0; i < 8; ++i) std::printf(" %s %.2f", names[i], std::max(sector_peak[(2 * i + 15) % 16], sector_peak[(2 * i) % 16]));
+  }
+};
+
+int monitor(int seconds) {
+  GUID guid; HidD_GetHidGuid(&guid);
+  const auto collections = present_vendor_collections(guid);
+  if (collections.empty()) {
+    std::printf("no virtual Steam Controller is present (VID 28DE PID 1302 vendor collection). Start the stream first.\n");
+    return 1;
+  }
+  std::printf("%zu virtual Steam Controller(s) present; monitoring the first for %d s (Enter stops):\n", collections.size(), seconds);
+  for (const auto &c : collections) std::printf("  %ls\n", c.path.c_str());
+  HANDLE handle = CreateFileW(collections[0].path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                              OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
+  if (handle == INVALID_HANDLE_VALUE) {
+    handle = CreateFileW(collections[0].path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
+  }
+  if (handle == INVALID_HANDLE_VALUE) {
+    std::printf("open failed: error %lu (another reader may hold it exclusively)\n", GetLastError());
+    return 1;
+  }
+  std::printf("Each second: reports/s, largest gap between reports, left/right stick statistics over that second,\n"
+              "grip and stick touch bits seen (L/R). A whole-run summary of the sticks follows at the end.\n");
+  HANDLE stdin_handle = GetStdHandle(STD_INPUT_HANDLE);
+  const ULONGLONG end = GetTickCount64() + static_cast<ULONGLONG>(seconds) * 1000;
+  ULONGLONG next_print = GetTickCount64() + 1000;
+  std::array<unsigned char, 64> report {};
+  DWORD bytes = 0;
+  unsigned count = 0, other = 0;
+  double max_gap_ms = 0; LARGE_INTEGER freq, last {}; QueryPerformanceFrequency(&freq);
+  unsigned grips = 0, stick_touch = 0;
+  std::uint32_t last_buttons = 0;
+  stick_stats left, right, left_all, right_all;
+  while (GetTickCount64() < end) {
+    if (WaitForSingleObject(stdin_handle, 0) == WAIT_OBJECT_0) {
+      INPUT_RECORD rec; DWORD n = 0;
+      if (PeekConsoleInputW(stdin_handle, &rec, 1, &n) && n && rec.EventType == KEY_EVENT && rec.Event.KeyEvent.bKeyDown &&
+          rec.Event.KeyEvent.wVirtualKeyCode == VK_RETURN) break;
+      ReadConsoleInputW(stdin_handle, &rec, 1, &n);
+    }
+    if (read_report(handle, report, bytes, 200) && bytes >= 18 && report[0] == 0x42) {
+      LARGE_INTEGER now; QueryPerformanceCounter(&now);
+      if (last.QuadPart) max_gap_ms = std::max(max_gap_ms, (now.QuadPart - last.QuadPart) * 1000.0 / freq.QuadPart);
+      last = now;
+      ++count;
+      const std::uint32_t buttons = ule32(report.data() + 2);
+      last_buttons = buttons;
+      if (buttons & sc::btn_left_grip_touch) grips |= 1;
+      if (buttons & sc::btn_right_grip_touch) grips |= 2;
+      if (buttons & sc::btn_left_stick_touch) stick_touch |= 1;
+      if (buttons & sc::btn_right_stick_touch) stick_touch |= 2;
+      const short lx = static_cast<short>(report[10] | (report[11] << 8)), ly = static_cast<short>(report[12] | (report[13] << 8));
+      const short rx = static_cast<short>(report[14] | (report[15] << 8)), ry = static_cast<short>(report[16] | (report[17] << 8));
+      left.add(lx, ly); right.add(rx, ry); left_all.add(lx, ly); right_all.add(rx, ry);
+    } else if (bytes) {
+      ++other;
+    }
+    if (GetTickCount64() >= next_print) {
+      next_print += 1000;
+      std::printf("[%3llus] %3u rep/s gap %5.1f ms buttons 0x%08x grips %s%s touch %s%s | ",
+                  (GetTickCount64() - (end - static_cast<ULONGLONG>(seconds) * 1000)) / 1000, count, max_gap_ms, last_buttons,
+                  (grips & 1) ? "L" : "-", (grips & 2) ? "R" : "-", (stick_touch & 1) ? "L" : "-", (stick_touch & 2) ? "R" : "-");
+      left.print("left"); std::printf(" | "); right.print("right"); std::printf("\n");
+      count = other = 0; max_gap_ms = 0; grips = stick_touch = 0; left = stick_stats {}; right = stick_stats {};
+    }
+  }
+  CloseHandle(handle);
+  std::printf("whole run: "); left_all.print("left"); std::printf("\n           "); right_all.print("right"); std::printf("\n");
+  return 0;
+}
+
 int main(int argc, char **argv) {
   constexpr unsigned slot = 7;
-  int hold_seconds = 0;
+  int hold_seconds = 0, monitor_seconds = 0;
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--hold") == 0) hold_seconds = (i + 1 < argc) ? std::atoi(argv[++i]) : 600;
+    if (std::strcmp(argv[i], "--monitor") == 0) monitor_seconds = (i + 1 < argc) ? std::atoi(argv[++i]) : 120;
   }
+  if (monitor_seconds > 0) return monitor(monitor_seconds);
   GUID guid; HidD_GetHidGuid(&guid);
   const auto before = existing_paths(guid);
   lvg::client client;
