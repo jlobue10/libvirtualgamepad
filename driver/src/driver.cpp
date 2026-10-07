@@ -29,6 +29,23 @@
 
 namespace {
 
+// Microseconds from the performance counter, for the Steam Controller report
+// clock and its grip-sense window (steam_controller.h).
+std::uint64_t now_us() noexcept {
+  static LARGE_INTEGER frequency {};
+  if (frequency.QuadPart == 0) {
+    QueryPerformanceFrequency(&frequency);
+  }
+  LARGE_INTEGER counter {};
+  QueryPerformanceCounter(&counter);
+  if (frequency.QuadPart <= 0) {
+    return 0;
+  }
+  const auto ticks = static_cast<std::uint64_t>(counter.QuadPart);
+  const auto hz = static_cast<std::uint64_t>(frequency.QuadPart);
+  return (ticks / hz) * 1'000'000u + ((ticks % hz) * 1'000'000u) / hz;
+}
+
 using lvg::driver::encode_generic_feedback;
 using lvg::driver::encode_generic_input;
 using lvg::driver::find_profile;
@@ -635,6 +652,7 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
       unlock_context(context);
       return STATUS_SUCCESS;
     }
+    lvg::driver::sc26_tick(&slot.sc26, now_us());
     const lvg::driver::sc26_input_report report =
       lvg::driver::encode_sc26_input(slot.last_input, &slot.sc26);
     unlock_context(context);
@@ -753,7 +771,7 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
       : slot->selected_profile == lvg::profile::dualsense
           ? lvg::driver::apply_ds5_motion(request, &slot->ds5)
           : is_steam_controller(slot->selected_profile)
-              ? lvg::driver::apply_sc26_motion(request, &slot->sc26)
+              ? lvg::driver::apply_sc26_motion(request, &slot->sc26, now_us())
               : lvg::driver::apply_switch_motion(request, &slot->switch_pro);
   unlock_context(context);
 
@@ -866,6 +884,7 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
   if (is_steam_controller(slot.selected_profile)) {
     slot.last_input = request;
     slot.have_last_input = true;
+    lvg::driver::sc26_tick(&slot.sc26, now_us());
     const lvg::driver::sc26_input_report sc26_report =
       lvg::driver::encode_sc26_input(request, &slot.sc26);
     const auto sc26_kind =
@@ -1590,6 +1609,7 @@ void evt_vhf_get_input_report(
           break;
         }
         case lvg::profile::steam_controller: {
+          sc26_tick(&slot->sc26, now_us());
           const sc26_input_report report = encode_sc26_input(slot->last_input, &slot->sc26);
           std::memcpy(buffer, &report, sizeof(report));
           length = sizeof(report);

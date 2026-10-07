@@ -12,6 +12,7 @@ void sc26_state::reset() noexcept {
   device.reset();
   features.reset();
   rumble = {};
+  last_motion_us = 0;
 }
 
 const std::uint8_t *sc26_descriptor(std::size_t *const size) noexcept {
@@ -129,22 +130,34 @@ bool apply_sc26_touch(const touch_state_request &touch, sc26_state *const state)
   }
 }
 
-bool apply_sc26_motion(const motion_state_request &motion, sc26_state *const state) noexcept {
+void sc26_tick(sc26_state *const state, const std::uint64_t now_us) noexcept {
+  if (state == nullptr) {
+    return;
+  }
+  state->device.imu_timestamp = static_cast<std::uint32_t>(now_us);
+  state->device.grip_touch =
+    state->last_motion_us != 0 && now_us >= state->last_motion_us &&
+    now_us - state->last_motion_us < k_sc26_grip_hold_us;
+}
+
+bool apply_sc26_motion(const motion_state_request &motion, sc26_state *const state,
+                       const std::uint64_t now_us) noexcept {
   if (state == nullptr) {
     return false;
   }
   switch (static_cast<motion_kind>(motion.motion_type)) {
     case motion_kind::accelerometer:
       sc::apply_accel_milli(state->device, motion.x_milli, motion.y_milli, motion.z_milli);
-      ++state->device.imu_timestamp;
-      return true;
+      break;
     case motion_kind::gyroscope:
       sc::apply_gyro_milli(state->device, motion.x_milli, motion.y_milli, motion.z_milli);
-      ++state->device.imu_timestamp;
-      return true;
+      break;
     default:
       return false;
   }
+  state->last_motion_us = now_us != 0 ? now_us : 1;
+  sc26_tick(state, now_us);
+  return true;
 }
 
 bool apply_sc26_battery(const battery_state_request &battery, sc26_state *const state) noexcept {

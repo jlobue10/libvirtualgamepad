@@ -135,6 +135,19 @@ int main() {
     check(le16(b + 40) == 16384, "gyro X at 40: 1000 dps -> 16384 counts");
     check(le16(b + 46) == 32767 && le16(b + 48) == 0, "identity quaternion at 46");
     check(sizeof(r) == 54, "struct is the wire size");
+    check(!(buttons & btn_left_grip_touch) && !(buttons & btn_right_grip_touch),
+          "grips untouched by default");
+    check(ule32(b + 30) == 0, "timestamp at 30 is the state's clock (0 here)");
+
+    // The driver stamps the clock and grip sense before encoding.
+    st.imu_timestamp = 0x12345678u;
+    st.grip_touch = true;
+    const input_report r2 = encode_input(0, 0, 0, 0, 0, 0, 0, st);
+    const auto *b2 = reinterpret_cast<const std::uint8_t *>(&r2);
+    check(ule32(b2 + 30) == 0x12345678u, "timestamp at 30 carries the driver clock");
+    check((ule32(b2 + 2) & (btn_left_grip_touch | btn_right_grip_touch)) ==
+            (btn_left_grip_touch | btn_right_grip_touch),
+          "grip touch sets both grip bits");
   }
 
   // Pad axis conventions (SDL: x = raw/65536 + 0.5, y = -raw/65536 + 0.5).

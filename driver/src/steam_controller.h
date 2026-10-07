@@ -32,9 +32,19 @@ struct sc26_state {
   lvg::sc26_usb::state device;
   lvg::sc26_usb::feature_state features;
   lvg::sc26_usb::rumble rumble;
+  // Driver clock (microseconds) of the last motion sample; 0 = never.
+  std::uint64_t last_motion_us {};
 
   void reset() noexcept;
 };
+
+// Grip sense is derived from motion activity: both grips read "held" while
+// motion samples arrived within this window.
+inline constexpr std::uint64_t k_sc26_grip_hold_us = 1'000'000;
+
+// Stamps the report clock (microseconds, truncated to 32 bits like the unit's)
+// and refreshes the derived grip-touch state. Call before encoding a report.
+void sc26_tick(sc26_state *state, std::uint64_t now_us) noexcept;
 
 [[nodiscard]] const std::uint8_t *sc26_descriptor(std::size_t *size) noexcept;
 
@@ -50,7 +60,8 @@ struct sc26_state {
 
 // contact_index 0 is the left pad, 1 the right pad; each pad is single-touch.
 [[nodiscard]] bool apply_sc26_touch(const touch_state_request &touch, sc26_state *state) noexcept;
-[[nodiscard]] bool apply_sc26_motion(const motion_state_request &motion, sc26_state *state) noexcept;
+[[nodiscard]] bool apply_sc26_motion(const motion_state_request &motion, sc26_state *state,
+                                     std::uint64_t now_us) noexcept;
 [[nodiscard]] bool apply_sc26_battery(const battery_state_request &battery, sc26_state *state) noexcept;
 
 // Output reports 0x80 (rumble) and 0x81 (pulse) become a generic_rumble

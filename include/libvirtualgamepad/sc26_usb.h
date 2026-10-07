@@ -499,7 +499,15 @@ inline constexpr bool report_descriptor_is_provisional = false;
 // in SDL axis order (x right, y up, z toward the player).
 struct state {
   std::uint8_t sequence {};
+  // Microsecond clock copied into every report, as the real unit does (its
+  // timestamp advances ~3.8 ms per 250 Hz report). Steam integrates the gyro over
+  // the deltas of this field, so the driver must stamp it from a real clock: a
+  // counter that moved by 1 per IMU sample left Steam's gyro glyph motionless.
   std::uint32_t imu_timestamp {};
+  // Both capacitive grip sensors report "held". The protocol carries no grip
+  // sense, so the driver derives it from motion activity (a controller that is
+  // streaming motion is in someone's hands).
+  bool grip_touch {};
   bool pad_touched[2] {};
   std::uint16_t pad_x[2] {};
   std::uint16_t pad_y[2] {};
@@ -555,6 +563,7 @@ inline constexpr std::int32_t stick_touch_deflection = 3276;
   if (right_trigger >= trigger_click_threshold) bits |= btn_right_trigger_click;
   if (st.pad_touched[0]) bits |= btn_left_pad_touch;
   if (st.pad_touched[1]) bits |= btn_right_pad_touch;
+  if (st.grip_touch) bits |= btn_left_grip_touch | btn_right_grip_touch;
   if (st.stick_touch_from_deflection) {
     const auto deflected = [](const std::int16_t x, const std::int16_t y) {
       const std::int32_t ax = x < 0 ? -static_cast<std::int32_t>(x) : x;

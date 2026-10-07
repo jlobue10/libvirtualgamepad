@@ -456,3 +456,11 @@ On the Windows host next:
 The pad-click resolution is the best the current protocol allows: a click while both pads are
 touched clicks both. A per-pad click flag would need a protocol extension on both the Moonlight
 and the driver side.
+
+Second round (2026-10-07, beta.103), from the beta.102 test on the garage host:
+
+| Symptom in Steam's controller test | Cause | Fix |
+|---|---|---|
+| Gyro test: the controller glyph does not move / does not match the motion | The real unit's `imu_timestamp` (offset 30) is a microsecond clock, ~3.8 ms per 250 Hz report, and Steam integrates the gyro over its deltas. The virtual device incremented it by 1 per IMU sample, so Steam integrated 1 us per sample | `sc26_tick()` stamps every report with the driver's performance-counter microseconds before encoding (`now_us()` in driver.cpp) |
+| Grip sensors: no way to test | The protocol has no grip-sense event, so the capacitive grip bits (0x10000000 / 0x20000000) were never set | Derived: both grips read "held" while motion samples arrived within the last second (`k_sc26_grip_hold_us`); a client that streams motion is in someone's hands. Turn the client's motion off and the grips read released |
+| Left stick "move in a full circle" calibration step stalls | Not changed. The stick is passed through untouched (client `s16/32767`, host, driver int16); Steam's step wants the raw magnitude to reach the rim all the way round, which a physical stick's circular limit does not give on every diagonal. Worth re-checking after the timestamp fix (the step also waits on fresh reports) | none yet |
