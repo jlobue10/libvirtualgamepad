@@ -9,7 +9,7 @@ Controller. This kit repeats that on a physical Windows 11 machine and adds the 
 
 | Item | Source |
 | --- | --- |
-| `vhf-package\` (driver, catalog, LocalTest `.cer`, setup tool) | `test-signed-package.yml` artifact for commit e6611a2 |
+| `vhf-package\` (driver, catalog, LocalTest `.cer`, setup tool) | `test-signed-package.yml` artifact; current = run 37596882384 for commit 8c75150 (beta.102 code) |
 | `probe_sc26_usb.exe` | `driver/tests/probe_sc26_usb.cpp`, static MinGW build |
 | `Install-TestDriver.ps1` | this folder |
 | `Collect-Evidence.ps1` | this folder |
@@ -54,11 +54,12 @@ All in an elevated PowerShell, from the kit folder.
    device opened", HWID 74, FWTimestamp 0x6A4D85E3).
 4. Vibepollo: run `VibepolloSetup.exe` from the kit, set `gamepad = vhf_steam` in its
    config (web UI or `config\sunshine.conf`), restart Vibepollo. The kit installer is a
-   *local-test* build (fork CI run 37490202610, `vhf_local_test_package=true`): it carries the
+   *local-test* build (fork CI `vhf_local_test_package=true`; current = run 37597106078 for the
+   beta.102 pins, the earlier one was 37490202610 for beta.101): it carries the
    driver signed with a throwaway certificate created on the CI runner, trusts that certificate
    in Root and TrustedPublisher, and installs the driver and root device itself. Test signing
    must still be on. It replaces the device from step 2 (same driver code, DriverVer
-   10/05/2026,0.1.0.68), so the probe still passes afterwards. It must NOT report "Virtual
+   10/07/2026,0.1.0.74 for beta.102), so the probe still passes afterwards. It must NOT report "Virtual
    gamepad driver setup failed" any more; if it does, keep the warning report it offers. The
    earlier kit installer (run 37381766579) was a plain unsigned build whose driver step always
    failed on that message, because its bundled catalog had no Authenticode signature; with that
@@ -75,9 +76,9 @@ All in an elevated PowerShell, from the kit folder.
 
 ## Vibepollo fork build (done from the development machine, not here)
 
-1. Tag the driver fork: `git tag --no-sign v0.1.0-beta.101 origin/feat/steam-controller-profile; git push origin v0.1.0-beta.101`
+1. Tag the driver fork: `git tag --no-sign v0.1.0-beta.<N> origin/feat/steam-controller-profile; git push origin v0.1.0-beta.<N>` (102 is taken)
    (a **lightweight** tag; `publish-release.ps1` refuses annotated ones and needs the repository's immutable-releases setting on. `release-windows.yml` publishes the prerelease).
-2. `python tools/capture/Update-VibepolloDriverPins.py --tag v0.1.0-beta.101` rewrites the
+2. `python tools/capture/Update-VibepolloDriverPins.py --tag v0.1.0-beta.<N>` rewrites the
    Vibepollo fork's seven driver pins and submodule gitlink through the GitHub API.
 3. `gh workflow run ci.yml -R jlobue10/Vibepollo --ref feat/steam-controller-profile`, then
    download the `unsigned-installer-Windows` artifact and copy it into this kit.

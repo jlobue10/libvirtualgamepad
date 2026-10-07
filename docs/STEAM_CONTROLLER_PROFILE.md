@@ -22,8 +22,9 @@ Three defects were found in Steam's controller test and are fixed on this branch
 landed on the left pad (left pad = its left half, right pad = its right half; the right pad never
 registered a touch or a click), and the View and Menu buttons were swapped.
 
-**Next:** driver prerelease `v0.1.0-beta.102` with the fixes, the Vibepollo fork repinned to it and
-rebuilt with `vhf_local_test_package=true`, then the same test from the headset.
+**Next (§7.8 has the exact state):** install the beta.102 kit on the host, repeat the test from the
+headset (pads full width on both pads, right pad click, View/Menu), `Collect-Evidence.ps1`, then the
+upstream PRs (driver first, then Vibepollo).
 
 ## 1. What has to exist (driver side)
 
@@ -399,6 +400,44 @@ Left:
    and zip. Still outstanding on the host: install it, `gamepad = vhf_steam`, log line, Moonlight stream,
    `Collect-Evidence.ps1`. The local-test input is for testers only; the upstream PR keeps the production
    path (SignPath signs the catalog).
+
+### 7.8 Linux session 2026-10-07: field fixes shipped, kit rebuild
+
+Done from the garage box (Linux) after pulling the Windows session's commits:
+- Driver fork branch `feat/steam-controller-profile` = 8c75150 (View/Menu bits, pad click on the
+  touched pad, tests, docs §8). `test-driver.yml` run 37596677768 green.
+- Driver prerelease **`v0.1.0-beta.102`** (lightweight tag on 8c75150, run 37596883215):
+  https://github.com/jlobue10/libvirtualgamepad/releases/tag/v0.1.0-beta.102, DriverVer
+  `10/07/2026,0.1.0.74`, archive sha256
+  `11bec8577e4932723ba7b4af9f1c0c2263e6983e79ab315e72692a6c5758275f`.
+- Test-signed driver package for the kit's `vhf-package\` and the probe: `test-signed-package.yml`
+  run 37596882384, artifact `vhf-gamepad-test-signed-x64-8c75150ae93aacf62a197bdfc55854cc651185cd`
+  (`gh run download 37596882384 -R jlobue10/libvirtualgamepad -D artifacts/`).
+- Vibepollo fork branch `feat/steam-controller-profile`: 55383c1 (single-touchpad clients: the pad
+  half selects the pad, see §8) + accb4f5 (pins → beta.102, written by
+  `Update-VibepolloDriverPins.py`). Installer build: `ci.yml` run **37597106078**
+  (`workflow_dispatch`, `vhf_local_test_package=true`); when green, the `VibepolloSetup.exe`
+  artifact is the kit installer (fetch through the artifacts API, as before; sha256 in the
+  `release-provenance` artifact). If it failed, read the Windows job log first; the previous run of
+  the same kind (37490202610) was green on the same workflow code.
+- Local clone notes: `~/GitHub/Vibepollo` origin fetch refspec was master-only and is now
+  `+refs/heads/*`; the branch tracks `origin/feat/steam-controller-profile`. The driver tests build
+  on Linux with the shim in the session scratchpad (`winshim/windows.h`, `winioctl.h`; recreate two
+  empty headers if the scratchpad is gone) via
+  `g++ -std=c++20 -I include -I driver/src -I <shim> driver/tests/test_pid_descriptor.cpp driver/src/{pid_ff,profile,report_pump,dualshock4,dualsense,switch_pro,steam_controller,xbox_one,xbox_series}.cpp`.
+
+On the Windows host next:
+1. Download the two artifacts above into the kit folder (replace `vhf-package\` and `VibepolloSetup.exe`).
+2. Run the new `VibepolloSetup.exe` (it installs the beta.102 driver itself; test signing must
+   still be on), keep `gamepad = vhf_steam`, restart Vibepollo.
+3. Stream from the headset (Moonlight fork.15 or later, either trackpad setting). In Steam's
+   controller test check: each pad spans its own full width, right-pad touch and click register,
+   View and Menu are on the right buttons. Then `Collect-Evidence.ps1` and commit the zip under
+   `captures/rig/`.
+4. When clean: upstream PRs. Driver PR to Nonary/libvirtualgamepad from this branch (squash the
+   docs noise; keep `captures/` out or trimmed per the profile contract's evidence rules), then the
+   Vibepollo PR (`vhf_steam`, touchpad index + capability plumbing, the cleanup fix is already on
+   `fix/vhf-gamepad-cleanup-pnputil-wow64`) once a Nonary driver release carries the profile.
 
 ## 8. Field fixes after the first stream (2026-10-07)
 
