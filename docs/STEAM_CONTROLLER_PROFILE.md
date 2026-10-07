@@ -16,9 +16,14 @@ mapping: fork branch `jlobue10/Vibepollo` `feat/steam-controller-profile` (`vhf_
 `LI_CTYPE_STEAM` → profile, touchpad index carried to the driver, docs/web UI), submodule pointed at
 this branch.
 
-**Next:** build the test-signed package from CI (§7.4 step 3), install it on the test host (§7.5), and
-run Vibepollo from the fork with `gamepad = vhf_steam`; record the virtual device's enumeration and
-Steam's reaction in `docs/SC26_USB_COMPATIBILITY.md`.
+**2026-10-07, first stream from the headset (fork installer from run 37490202610, `gamepad =
+vhf_steam`):** Steam listed the virtual device as the user's Steam Controller and the stream worked.
+Three defects were found in Steam's controller test and are fixed on this branch (see §8): both pads
+landed on the left pad (left pad = its left half, right pad = its right half; the right pad never
+registered a touch or a click), and the View and Menu buttons were swapped.
+
+**Next:** driver prerelease `v0.1.0-beta.102` with the fixes, the Vibepollo fork repinned to it and
+rebuilt with `vhf_local_test_package=true`, then the same test from the headset.
 
 ## 1. What has to exist (driver side)
 
@@ -90,11 +95,15 @@ STEAM 0x10000, L4 0x20000, L5 0x40000, L 0x80000, RSTICK_TOUCH 0x100000, RPAD_TO
 RPAD_CLICK 0x400000, RTRIGGER_CLICK 0x800000, LSTICK_TOUCH 0x1000000, LPAD_TOUCH 0x2000000,
 LPAD_CLICK 0x4000000, LTRIGGER_CLICK 0x8000000, RGRIP_TOUCH 0x10000000, LGRIP_TOUCH 0x20000000`.
 
-Mapping from `lvg::button_mask`: south→A, east→B, west→X, north→Y, dpad→dpad, start→MENU,
-back→VIEW, home→STEAM, misc→QAM, LB/RB→L/R, LS/RS→L3/R3, paddle_1..4→L4,R4,L5,R5 (order to be
-confirmed against the Moonlight client), touchpad button→LPAD_CLICK+RPAD_CLICK? (decide; the
-Moonlight client already sends pad clicks as separate buttons). Trigger full-pull bits set when
-trigger ≥ ~0xF0. Pad touch bits follow the touch state.
+Mapping from `lvg::button_mask`: south→A, east→B, west→X, north→Y, dpad→dpad,
+**start→VIEW (0x40), back→MENU (0x4000)**, home→STEAM, misc→QAM, LB/RB→L/R, LS/RS→L3/R3,
+paddle_1..4→R4, L4, R5, L5 (the Moonlight client's order), touchpad button→the click bit of the
+pad(s) currently touched (left only → LPAD_CLICK, right only → RPAD_CLICK, both → both, none →
+RPAD_CLICK). Trigger full-pull bits set when trigger ≥ ~0xF0. Pad touch bits follow the touch
+state. The start/back pair is deliberately the opposite of Valve's constant names: SDL's Triton
+driver maps `TRITON_LBUTTON_VIEW` (0x40) to `SDL_GAMEPAD_BUTTON_START` and `TRITON_LBUTTON_MENU`
+(0x4000) to `SDL_GAMEPAD_BUTTON_BACK`, the Moonlight client reading the real controller does the
+same, and mapping by name made Steam show the two buttons swapped (first stream, 2026-10-07).
 
 ### Battery report `0x43` (15 bytes)
 `charge_state u8 (1 discharging, 2 charging, 4 done), level u8 (0..100), battery_voltage u16,
@@ -390,3 +399,15 @@ Left:
    and zip. Still outstanding on the host: install it, `gamepad = vhf_steam`, log line, Moonlight stream,
    `Collect-Evidence.ps1`. The local-test input is for testers only; the upstream PR keeps the production
    path (SignPath signs the catalog).
+
+## 8. Field fixes after the first stream (2026-10-07)
+
+| Symptom in Steam's controller test | Cause | Fix |
+|---|---|---|
+| Left pad drives only the left half of the left pad; right pad drives the right half of the left pad; right pad never activates | The Galaxy XR client defaults to "Trackpads as DualShock touchpad halves" (it sends both pads as two fingers on touchpad 0, each confined to a half, without `LI_CCAP_DUAL_TOUCHPAD`). Vibepollo mapped `touchpadIndex` straight to the driver's contact, so everything became the left pad. | Vibepollo (`vhf_gamepad.cpp`) now keeps the client's `LI_CCAP_*` flags per slot: with `LI_CCAP_DUAL_TOUCHPAD` the touchpad index is the pad; without it the half the finger went down in selects the pad (tracked per pointer so releases land on the right pad) and the half is stretched back to the pad's full width. Either client setting now works. |
+| Right pad click never registers | The protocol has one click flag; `sc26_buttons()` gave it to the right pad only when the left pad was untouched, and all touches were "left" (above). | `sc26_buttons()` clicks the touched pad(s): left only, right only, both when both are touched, right when none is. |
+| View and Menu swapped | Mapped by Valve's constant names (`start→btn_menu 0x4000`, `back→btn_view 0x40`); SDL and the client put START on 0x40 and BACK on 0x4000. | `start→btn_view`, `back→btn_menu`; pinned by `test_pid_descriptor`. |
+
+The pad-click resolution is the best the current protocol allows: a click while both pads are
+touched clicks both. A per-pad click flag would need a protocol extension on both the Moonlight
+and the driver side.

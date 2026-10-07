@@ -886,6 +886,40 @@ int main() {
   }
 
   {
+    // Steam Controller (2026) button bits. The start/back pair follows SDL's
+    // Triton driver (VIEW 0x40 is START, MENU 0x4000 is BACK), which is also
+    // what a client reading the real controller sends; mapping by Valve's
+    // constant names put the two buttons on each other's bit.
+    sc26_state state {};
+    state.reset();
+    check(sc26_buttons(button_mask::start, state) == lvg::sc26_usb::btn_view,
+          "sc26 start is the 0x40 bit SDL calls START");
+    check(sc26_buttons(button_mask::back, state) == lvg::sc26_usb::btn_menu,
+          "sc26 back is the 0x4000 bit SDL calls BACK");
+    check(sc26_buttons(button_mask::home, state) == lvg::sc26_usb::btn_steam, "sc26 home is Steam");
+    check(sc26_buttons(button_mask::misc, state) == lvg::sc26_usb::btn_qam, "sc26 misc is QAM");
+    check(sc26_buttons(button_mask::paddle_1 | button_mask::paddle_2 |
+                       button_mask::paddle_3 | button_mask::paddle_4, state) ==
+            (lvg::sc26_usb::btn_r4 | lvg::sc26_usb::btn_l4 | lvg::sc26_usb::btn_r5 | lvg::sc26_usb::btn_l5),
+          "sc26 paddles 1..4 are R4, L4, R5, L5");
+
+    // The single protocol click flag lands on the touched pad(s).
+    check(sc26_buttons(button_mask::touchpad, state) == lvg::sc26_usb::btn_right_pad_click,
+          "sc26 pad click with no touch goes to the right pad");
+    state.device.pad_touched[0] = true;
+    check(sc26_buttons(button_mask::touchpad, state) == lvg::sc26_usb::btn_left_pad_click,
+          "sc26 pad click while touching the left pad clicks the left pad");
+    state.device.pad_touched[0] = false;
+    state.device.pad_touched[1] = true;
+    check(sc26_buttons(button_mask::touchpad, state) == lvg::sc26_usb::btn_right_pad_click,
+          "sc26 pad click while touching the right pad clicks the right pad");
+    state.device.pad_touched[0] = true;
+    check(sc26_buttons(button_mask::touchpad, state) ==
+            (lvg::sc26_usb::btn_left_pad_click | lvg::sc26_usb::btn_right_pad_click),
+          "sc26 pad click while touching both pads clicks both");
+  }
+
+  {
     // A profile the driver does not implement has to be refused, not answered
     // with a neighbouring one. This is the guard against a switch fallthrough
     // handing a caller a different vendor's controller under the wrong name.

@@ -87,10 +87,10 @@ Interrupt traffic in the same capture:
 
 | Capability | Virtual device | Notes |
 | --- | --- | --- |
-| Buttons | all 30 bits of `TritonButtons` | A/B/X/Y, D-pad, Menu/View/Steam/QAM, L/R, L3/R3, L4/L5/R4/R5, pad clicks, trigger clicks, stick/pad/grip touch |
+| Buttons | all 30 bits of `TritonButtons` | A/B/X/Y, D-pad, View/Menu (start on 0x40, back on 0x4000, as SDL maps them; by-name mapping showed them swapped in Steam), Steam/QAM, L/R, L3/R3, L4/L5/R4/R5, pad clicks (the single protocol click flag lands on the touched pad or pads), trigger clicks, stick/pad/grip touch |
 | Sticks | two, s16 ±32767, positive up | deflection beyond ~10 % sets the stick-touch bit when the client has no capacitive touch |
 | Triggers | two, 0..32767 | click bits at ≥ 0xF0 of the client's 0..255 |
-| Touch pads | two, single contact each, x/y ±32767, pressure 0..32767 | protocol contact index 0 = left, 1 = right |
+| Touch pads | two, single contact each, x/y ±32767, pressure 0..32767 | protocol contact index 0 = left, 1 = right; Vibepollo derives the index from the client's touchpad index, or from the half of a single DualShock-style pad for clients without `LI_CCAP_DUAL_TOUCHPAD` |
 | Motion | accelerometer and gyroscope at SDL scaling, device axes | quaternion fixed at identity, as on the real unit |
 | Battery | report 0x43 with level and charge state | emitted on battery updates |
 | LEDs | none | the controller has no host-controlled LED |

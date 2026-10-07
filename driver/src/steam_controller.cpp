@@ -34,8 +34,14 @@ std::uint32_t sc26_buttons(const std::uint32_t buttons, const sc26_state &state)
     {button_mask::dpad_down, sc::btn_dpad_down},
     {button_mask::dpad_left, sc::btn_dpad_left},
     {button_mask::dpad_right, sc::btn_dpad_right},
-    {button_mask::start, sc::btn_menu},
-    {button_mask::back, sc::btn_view},
+    // Valve's constant names and the buttons' positions disagree: SDL's Triton
+    // driver maps TRITON_LBUTTON_VIEW (0x40) to SDL_GAMEPAD_BUTTON_START and
+    // TRITON_LBUTTON_MENU (0x4000) to SDL_GAMEPAD_BUTTON_BACK, and a Moonlight
+    // client that reads the real controller sends 0x40 as its start button. The
+    // virtual device has to put each press back on the bit the client read it
+    // from, or Steam shows the two buttons swapped (observed 2026-10-07).
+    {button_mask::start, sc::btn_view},
+    {button_mask::back, sc::btn_menu},
     {button_mask::left_stick, sc::btn_l3},
     {button_mask::right_stick, sc::btn_r3},
     {button_mask::left_shoulder, sc::btn_l},
@@ -54,11 +60,17 @@ std::uint32_t sc26_buttons(const std::uint32_t buttons, const sc26_state &state)
     }
   }
   if ((buttons & button_mask::touchpad) != 0) {
-    // One pad-click flag on the wire; give it to the pad being touched, or the
-    // right pad when neither is.
-    if (state.device.pad_touched[0] && !state.device.pad_touched[1]) {
+    // The protocol has one pad-click flag; the controller has one per pad. A
+    // click lands on the pad under a finger: the left pad when only it is
+    // touched, the right pad when only it is, both when both are (the
+    // protocol cannot tell which was pressed), and the right pad when neither
+    // is, so a click without touch data still registers.
+    const bool left = state.device.pad_touched[0];
+    const bool right = state.device.pad_touched[1];
+    if (left) {
       out |= sc::btn_left_pad_click;
-    } else {
+    }
+    if (right || !left) {
       out |= sc::btn_right_pad_click;
     }
   }
