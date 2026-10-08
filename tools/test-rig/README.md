@@ -75,7 +75,11 @@ All in an elevated PowerShell, from the kit folder.
    between them, each stick's magnitude range, per-axis peaks, 16-sector coverage, largest
    angular jump between consecutive reports and the peak at each compass point, plus the grip
    and stick touch bits seen. Circle a stick during it and compare the numbers with the
-   client's `stick extents (raw)` log line to see where the rim is lost.
+   client's `stick extents (raw)` log line to see where the rim is lost. The `seq gaps` column counts
+   sequence-byte discontinuities (the real unit never has any) and `ts max`/`back` the largest and any
+   backwards imu_timestamp step; do not select text in the console while it runs (that pauses the
+   process and fakes gaps). With the controller lying still the grips column should read `--`; `LR` at
+   rest means the driver's motion heuristic is on, i.e. the client's explicit grip bits are not arriving.
    Steam's own view is in `%ProgramFiles(x86)%\Steam\logs\controller.txt` ("Steam controller
    device opened", HWID 74, FWTimestamp 0x6A4D85E3).
 4. Vibepollo: run `VibepolloSetup.exe` from the kit, set `gamepad = vhf_steam` in its

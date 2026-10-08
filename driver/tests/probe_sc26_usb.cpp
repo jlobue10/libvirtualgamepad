@@ -200,8 +200,12 @@ int monitor(int seconds) {
     std::printf("open failed: error %lu (another reader may hold it exclusively)\n", GetLastError());
     return 1;
   }
-  std::printf("Each second: reports/s, largest gap between reports, left/right stick statistics over that second,\n"
-              "grip and stick touch bits seen (L/R). A whole-run summary of the sticks follows at the end.\n");
+  std::printf("Each second: reports/s, largest gap between reports, sequence-byte gaps (count, reports lost), largest\n"
+              "imu_timestamp step and backwards steps, buttons, grip and stick touch bits seen (L/R), then left/right\n"
+              "stick statistics over that second. A whole-run summary of the sticks follows at the end.\n"
+              "Do not select text in this console while it runs: that pauses the process and shows up as gaps.\n");
+  // The gap column is measured on arrival in this process; keep scheduling jitter out of it.
+  SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
   HANDLE stdin_handle = GetStdHandle(STD_INPUT_HANDLE);
   const ULONGLONG end = GetTickCount64() + static_cast<ULONGLONG>(seconds) * 1000;
   ULONGLONG next_print = GetTickCount64() + 1000;
@@ -211,6 +215,10 @@ int monitor(int seconds) {
   double max_gap_ms = 0; LARGE_INTEGER freq, last {}; QueryPerformanceFrequency(&freq);
   unsigned grips = 0, stick_touch = 0;
   std::uint32_t last_buttons = 0;
+  // The unit's sequence byte advances by exactly 1 per report and its imu_timestamp by ~4 ms;
+  // a virtual device that drops or reorders reports shows here.
+  int last_seq = -1; unsigned seq_gaps = 0, seq_lost = 0, seq_gaps_all = 0, seq_lost_all = 0;
+  bool have_ts = false; std::uint32_t last_ts = 0; double ts_max_ms = 0; unsigned ts_back = 0;
   stick_stats left, right, left_all, right_all;
   while (GetTickCount64() < end) {
     if (WaitForSingleObject(stdin_handle, 0) == WAIT_OBJECT_0) {
@@ -224,6 +232,20 @@ int monitor(int seconds) {
       if (last.QuadPart) max_gap_ms = std::max(max_gap_ms, (now.QuadPart - last.QuadPart) * 1000.0 / freq.QuadPart);
       last = now;
       ++count;
+      const int seq = report[1];
+      if (last_seq >= 0) {
+        const unsigned step = static_cast<unsigned>((seq - last_seq) & 0xff);
+        if (step != 1) { ++seq_gaps; ++seq_gaps_all; seq_lost += step ? step - 1 : 255; seq_lost_all += step ? step - 1 : 255; }
+      }
+      last_seq = seq;
+      if (bytes >= 34) {
+        const std::uint32_t ts = ule32(report.data() + 30);
+        if (have_ts) {
+          const std::uint32_t d = ts - last_ts;  // wraps correctly for a 32-bit microsecond clock
+          if (d > 0x80000000u) ++ts_back; else ts_max_ms = std::max(ts_max_ms, d / 1000.0);
+        }
+        last_ts = ts; have_ts = true;
+      }
       const std::uint32_t buttons = ule32(report.data() + 2);
       last_buttons = buttons;
       if (buttons & sc::btn_left_grip_touch) grips |= 1;
@@ -238,15 +260,18 @@ int monitor(int seconds) {
     }
     if (GetTickCount64() >= next_print) {
       next_print += 1000;
-      std::printf("[%3llus] %3u rep/s gap %5.1f ms buttons 0x%08x grips %s%s touch %s%s | ",
-                  (GetTickCount64() - (end - static_cast<ULONGLONG>(seconds) * 1000)) / 1000, count, max_gap_ms, last_buttons,
+      std::printf("[%3llus] %3u rep/s gap %5.1f ms seq gaps %u (%u lost) ts max %5.1f ms back %u buttons 0x%08x grips %s%s touch %s%s | ",
+                  (GetTickCount64() - (end - static_cast<ULONGLONG>(seconds) * 1000)) / 1000, count, max_gap_ms, seq_gaps, seq_lost,
+                  ts_max_ms, ts_back, last_buttons,
                   (grips & 1) ? "L" : "-", (grips & 2) ? "R" : "-", (stick_touch & 1) ? "L" : "-", (stick_touch & 2) ? "R" : "-");
       left.print("left"); std::printf(" | "); right.print("right"); std::printf("\n");
-      count = other = 0; max_gap_ms = 0; grips = stick_touch = 0; left = stick_stats {}; right = stick_stats {};
+      count = other = 0; max_gap_ms = 0; seq_gaps = seq_lost = 0; ts_max_ms = 0; ts_back = 0;
+      grips = stick_touch = 0; left = stick_stats {}; right = stick_stats {};
     }
   }
   CloseHandle(handle);
-  std::printf("whole run: "); left_all.print("left"); std::printf("\n           "); right_all.print("right"); std::printf("\n");
+  std::printf("whole run: sequence gaps %u (%u reports lost)\n           ", seq_gaps_all, seq_lost_all);
+  left_all.print("left"); std::printf("\n           "); right_all.print("right"); std::printf("\n");
   return 0;
 }
 
