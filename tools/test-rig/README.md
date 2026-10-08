@@ -62,7 +62,10 @@ All in an elevated PowerShell, from the kit folder.
    controller sends over BLE (axes clipped at full scale, magnitude 1.17 on diagonals); 2 unit
    circle at 60/s; 3 as 2 with gyro/accel streaming; 4 as 2 with a 100 ms gap every second (a
    jump, as a Wi-Fi hiccup leaves); 5 all of it. Run Steam's test once per mode and note which
-   modes complete the left stick step.
+   modes complete the left stick step. `--rate N` (20..250, steps of 20) sets how many reports per second
+   the stick phases submit instead of the mode's 20 or 60; the turn stays 3 s long. `--rate 250` is the
+   wired unit's cadence, `--rate 40` halves the fast modes. The hold now runs with 1 ms timer resolution,
+   so these cadences are real (earlier builds slept 16-31 ms where 16 was asked).
    While a stream is running (the controller Vibepollo created, not the probe's own):
    ```powershell
    .\probe_sc26_usb.exe --monitor 120

@@ -23,6 +23,7 @@
 #include <windows.h>
 #include <hidsdi.h>
 #include <setupapi.h>
+#include <timeapi.h>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -251,13 +252,20 @@ int monitor(int seconds) {
 
 int main(int argc, char **argv) {
   constexpr unsigned slot = 7;
-  int hold_seconds = 0, monitor_seconds = 0, circle_mode = 0;
+  int hold_seconds = 0, monitor_seconds = 0, circle_mode = 0, stick_rate = 0;
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--hold") == 0) hold_seconds = (i + 1 < argc) ? std::atoi(argv[++i]) : 600;
     if (std::strcmp(argv[i], "--monitor") == 0) monitor_seconds = (i + 1 < argc) ? std::atoi(argv[++i]) : 120;
     if (std::strcmp(argv[i], "--circle") == 0) circle_mode = (i + 1 < argc) ? std::atoi(argv[++i]) : 0;
+    if (std::strcmp(argv[i], "--rate") == 0) stick_rate = (i + 1 < argc) ? std::atoi(argv[++i]) : 0;
   }
   circle_mode = std::clamp(circle_mode, 0, 5);
+  // Stick-circle submit rate in reports per second: 0 = the mode's default (20 for modes 0 and 1,
+  // 60 for the fast modes), otherwise 20..250 in steps of 20 (the real unit streams at 250).
+  if (stick_rate != 0) stick_rate = std::clamp(stick_rate, 20, 250);
+  // Sleep() granularity is 15.6 ms by default, which makes a 16 ms sleep last up to 31 ms; the
+  // hold's cadences depend on 4..50 ms sleeps being honoured, so ask for 1 ms timer resolution.
+  timeBeginPeriod(1);
   if (monitor_seconds > 0) return monitor(monitor_seconds);
   GUID guid; HidD_GetHidGuid(&guid);
   const auto before = existing_paths(guid);
@@ -390,7 +398,9 @@ int main(int argc, char **argv) {
                   "(stick and pad clicks included), then A when the left haptic buzzes and A when the right one buzzes.\n"
                   "The hold drives exactly that and repeats; A is pressed automatically when a haptic pulse arrives. The\n"
                   "grip touch flags toggle every 2 s throughout, so the grips should light up blue on Steam's screen.\n"
-                  "Feedback events are printed as they arrive. Stick circle mode %d (--circle 0..5).\n", circle_mode);
+                  "Feedback events are printed as they arrive. Stick circle mode %d (--circle 0..5), stick submit rate\n"
+                  "%s (--rate 20..250 per second overrides the mode's 20 or 60).\n", circle_mode,
+                  stick_rate ? std::to_string(stick_rate).c_str() : "mode default");
       const ULONGLONG end = GetTickCount64() + static_cast<ULONGLONG>(hold_seconds) * 1000;
       HANDLE stdin_handle = GetStdHandle(STD_INPUT_HANDLE);
       unsigned tick = 0;
@@ -451,6 +461,11 @@ int main(int argc, char **argv) {
       const bool circle_fast = circle_mode >= 2;
       const bool circle_motion = circle_mode == 3 || circle_mode == 5;
       const bool circle_gaps = circle_mode == 4 || circle_mode == 5;
+      // Reports per 50 ms tick during the stick phases and the sleep between them. The tick stays
+      // 50 ms long whatever the rate, so a turn is always 3 s.
+      const unsigned stick_sub = stick_rate ? std::max(1u, (static_cast<unsigned>(stick_rate) + 10) / 20) : (circle_fast ? 3 : 1);
+      const DWORD sub_sleep_ms = stick_sub > 1 ? 50 / stick_sub : 50;
+      const DWORD stick_tail_sleep_ms = stick_sub > 1 ? 50 - sub_sleep_ms * (stick_sub - 1) : 50;
       const auto send_motion = [&](unsigned k) {
         // Gyro: a slow wobble of a few deg/s; accel: 1 g on Z with a little noise. Units are milli
         // (deg/s, m/s^2) as Vibepollo sends them.
@@ -460,7 +475,9 @@ int main(int argc, char **argv) {
         m.x_milli = static_cast<std::int32_t>(3000.0 * std::sin(k * 0.1)); m.y_milli = static_cast<std::int32_t>(2000.0 * std::cos(k * 0.13)); m.z_milli = 500;
         (void) client.submit_motion_state(m);
         m.motion_type = static_cast<std::uint8_t>(lvg::motion_kind::accelerometer);
-        m.x_milli = static_cast<std::int32_t>(200.0 * std::sin(k * 0.2)); m.y_milli = 100; m.z_milli = 9807;
+        // SDL axes as Vibepollo sends them: Y is up, so a controller held flat has 1 g on Y
+        // (the driver maps that to the unit's Z, where the wired capture shows 1 g at rest).
+        m.x_milli = static_cast<std::int32_t>(200.0 * std::sin(k * 0.2)); m.y_milli = 9807; m.z_milli = 100;
         (void) client.submit_motion_state(m);
       };
       while (GetTickCount64() < end) {
@@ -489,7 +506,8 @@ int main(int argc, char **argv) {
                                               "3. left pad whole-surface sweep", "4. right pad whole-surface sweep",
                                               "5. left stick circles", "6. right stick circles",
                                               "7. every remaining button", "8/9. waiting for haptic pulses (A auto-pressed)"};
-          std::printf("  phase: %s%s\n", names[phase], (phase == 4 || phase == 5) ? circle_names[circle_mode] : "");
+          if (phase == 4 || phase == 5) std::printf("  phase: %s%s @ %u reports/s\n", names[phase], circle_names[circle_mode], stick_sub * 20);
+          else std::printf("  phase: %s\n", names[phase]);
           for (int pad = 0; pad < 2; ++pad) {
             if (pad_down[pad]) send_touch(static_cast<std::uint8_t>(pad), lvg::touch_event::up, 0, 0);
           }
@@ -531,7 +549,7 @@ int main(int argc, char **argv) {
             // Fast modes send three reports per tick (~60/s); the gap modes send nothing for two ticks
             // (100 ms) out of every twenty, so the position jumps when reports resume.
             if (circle_gaps && (i % 20) < 2) { skip_send = true; break; }
-            const unsigned sub = circle_fast ? 3 : 1;
+            const unsigned sub = stick_sub;
             for (unsigned k = 0; k < sub; ++k) {
               const double t = static_cast<double>(i % 60) + static_cast<double>(k) / sub;
               const double angle = t * (2.0 * 3.14159265358979 / 60.0);
@@ -544,7 +562,7 @@ int main(int argc, char **argv) {
               if (k + 1 < sub) {
                 // Intermediate report of a fast mode; the last one goes out with the common send below.
                 (void) client.submit_input_state(make_input(slot, buttons, lx, ly, rx, ry, lt, rt));
-                Sleep(16);
+                Sleep(sub_sleep_ms);
               }
             }
             break;
@@ -573,7 +591,7 @@ int main(int argc, char **argv) {
           if ((rumble.low_frequency | rumble.high_frequency) != 0) haptic_ack_ticks = 6;
         }
         ++tick;
-        Sleep((circle_fast && (phase == 4 || phase == 5) && !skip_send) ? 18 : 50);
+        Sleep(((phase == 4 || phase == 5) && !skip_send) ? stick_tail_sleep_ms : 50);
       }
       for (int pad = 0; pad < 2; ++pad) {
         if (pad_down[pad]) send_touch(static_cast<std::uint8_t>(pad), lvg::touch_event::up, 0, 0);
@@ -585,5 +603,6 @@ int main(int argc, char **argv) {
   }
   check(client.destroy_controller(slot) == ERROR_SUCCESS, "release test controller");
   std::printf("%s\n", failures ? "PROBE FAILED" : "PROBE PASSED");
+  timeEndPeriod(1);
   return failures ? 1 : 0;
 }
