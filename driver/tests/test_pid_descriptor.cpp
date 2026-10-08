@@ -903,7 +903,8 @@ int main() {
             (lvg::sc26_usb::btn_r4 | lvg::sc26_usb::btn_l4 | lvg::sc26_usb::btn_r5 | lvg::sc26_usb::btn_l5),
           "sc26 paddles 1..4 are R4, L4, R5, L5");
 
-    // Grip sense: motion heuristic until the client sends a grip bit, then explicit.
+    // Grip sense: released until the client sends a grip bit, then explicit. Motion
+    // samples never imply a held grip (a streaming client sends them continuously).
     {
       input_state_request in {};
       in.controller_id = 0;
@@ -915,23 +916,18 @@ int main() {
       check(apply_sc26_motion(motion, &state, 5'000'000), "motion accepted");
       sc26_tick(&state, 5'500'000);
       held = encode_sc26_input(in, &state);
-      check((held.buttons & (lvg::sc26_usb::btn_left_grip_touch | lvg::sc26_usb::btn_right_grip_touch)) ==
-              (lvg::sc26_usb::btn_left_grip_touch | lvg::sc26_usb::btn_right_grip_touch),
-            "sc26 grips read held while motion flows");
-      sc26_tick(&state, 7'000'000);
-      held = encode_sc26_input(in, &state);
       check((held.buttons & (lvg::sc26_usb::btn_left_grip_touch | lvg::sc26_usb::btn_right_grip_touch)) == 0,
-            "sc26 grips release a second after the last motion sample");
+            "sc26 grips stay released while motion flows");
       in.buttons = button_mask::right_grip_touch;
       held = encode_sc26_input(in, &state);
       check((held.buttons & (lvg::sc26_usb::btn_left_grip_touch | lvg::sc26_usb::btn_right_grip_touch)) ==
               lvg::sc26_usb::btn_right_grip_touch,
             "sc26 explicit right grip from the client");
       in.buttons = 0;
-      sc26_tick(&state, 5'600'000);   // motion still "fresh" by the heuristic's clock
+      sc26_tick(&state, 5'600'000);
       held = encode_sc26_input(in, &state);
       check((held.buttons & (lvg::sc26_usb::btn_left_grip_touch | lvg::sc26_usb::btn_right_grip_touch)) == 0,
-            "sc26 heuristic stays off once the client sent a grip bit");
+            "sc26 grips follow the client once it has sent a grip bit");
       state.reset();
     }
 

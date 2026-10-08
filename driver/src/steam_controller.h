@@ -38,18 +38,15 @@ struct sc26_state {
   // keep-alive timer resends the state when this goes stale.
   std::uint64_t last_report_us {};
   // Set once the client has sent a grip-touch bit (button_mask::left/right_grip_touch):
-  // from then on the grips follow the client and the motion heuristic is off.
+  // from then on the grips follow the client. Until then they read released;
+  // there is no motion-based guess (it held both grips for the whole session).
   bool grip_explicit {};
 
   void reset() noexcept;
 };
 
-// Grip sense is derived from motion activity: both grips read "held" while
-// motion samples arrived within this window.
-inline constexpr std::uint64_t k_sc26_grip_hold_us = 1'000'000;
-
 // Stamps the report clock (microseconds, truncated to 32 bits like the unit's)
-// and refreshes the derived grip-touch state. Call before encoding a report.
+// and clears the grips while no client has reported them. Call before encoding a report.
 void sc26_tick(sc26_state *state, std::uint64_t now_us) noexcept;
 
 [[nodiscard]] const std::uint8_t *sc26_descriptor(std::size_t *size) noexcept;

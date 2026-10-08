@@ -106,6 +106,11 @@ struct controller_slot {
   lvg::driver::ds5_state ds5;
   lvg::driver::switch_state switch_pro;
   lvg::driver::sc26_state sc26;
+  // Sequence byte of the next Steam Controller state report handed to VHF. The
+  // encoder numbers reports as it builds them, but the pump keeps only the newest
+  // analog-only report when VHF is busy, so numbering at submission is what keeps
+  // the stream Steam reads consecutive, like the unit's.
+  std::uint8_t sc26_wire_sequence;
   // Paces input reports so reads do not always complete instantly, which would
   // leave a polling application spinning.
   lvg::driver::report_pump pump;
@@ -374,6 +379,7 @@ void destroy_owned_controller(
   slot.ds5.features.address[0] = static_cast<std::uint8_t>(request.controller_id);
   slot.switch_pro.reset();
   slot.sc26.reset();
+  slot.sc26_wire_sequence = 0;
   // Per-slot serial so two virtual Steam Controllers never collide in Steam.
   slot.sc26.features.unit_serial[9] = static_cast<char>('0' + (request.controller_id / 10) % 10);
   slot.sc26.features.unit_serial[10] = static_cast<char>('0' + request.controller_id % 10);
@@ -510,6 +516,15 @@ void destroy_owned_controller(
   return STATUS_SUCCESS;
 }
 
+// Numbers a Steam Controller state report as it leaves for VHF. Call under
+// state_lock with the report just taken from the pump.
+void stamp_sc26_sequence(controller_slot &slot, lvg::driver::report_buffer &report) noexcept {
+  if (report.report_id == lvg::driver::k_sc26_input_report_id && report.length > 1 &&
+      is_steam_controller(slot.selected_profile)) {
+    report.data[1] = slot.sc26_wire_sequence++;
+  }
+}
+
 // Hands one report to VHF if it can take it now, otherwise leaves it queued for
 // the readiness callback. Takes state_lock itself and must be called without
 // it. The lifetime gate is deliberately not taken: this also runs from inside
@@ -535,6 +550,9 @@ NTSTATUS pump_report(
     std::ignore = slot.pump.enqueue(data, length, report_id, kind);
   }
   have_next = slot.pump.take(&next);
+  if (have_next) {
+    stamp_sc26_sequence(slot, next);
+  }
   vhf = slot.vhf;
   unlock_context(context);
 
@@ -571,6 +589,9 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
   slot->pump.set_ready();
   if (!context->stopping && slot->state == slot_state::active) {
     have_next = slot->pump.take(&next);
+    if (have_next) {
+      stamp_sc26_sequence(*slot, next);
+    }
     vhf = slot->vhf;
   }
   unlock_context(context);
