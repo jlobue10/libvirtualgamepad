@@ -69,7 +69,14 @@ All in an elevated PowerShell, from the kit folder.
    stick turn (default 3; the wired unit's owner took ~0.9 s in the Steam capture) and `--update N` lets the
    stick VALUE change only N times per second while reports keep flowing at `--rate` (a stream changes it
    ~66 times a second inside ~250 reports). `--rate 250` alone stalls Steam's circle step every time;
-   `--rate 20` (80 reports/s with the keep-alive) passes.
+   `--rate 20` (80 reports/s with the keep-alive) passes. Findings of 2026-10-08 at 250/s: the
+   perfect unit circle stalls whatever the turn speed, `--circle 1` (the wired unit's rounded
+   square, each axis parked at full deflection) passes, `--update 20` (unit circle, value held
+   50 ms) passes, `--circle 1 --update 66` and `--circle 5` pass. Steam rejects a stick value
+   that creeps by a tiny step on every report; the report rate, motion and gaps are innocent.
+   `--burst N` sends the reports in back-to-back groups of N with the value changing once per
+   group, as a stream does when Vibepollo submits the input state plus two motion states for
+   every BLE packet: `--rate 200 --burst 3` is 66 packets/s of three reports each, ~15 ms apart.
    While a stream is running (the controller Vibepollo created, not the probe's own):
    ```powershell
    .\probe_sc26_usb.exe --monitor 120

@@ -14,6 +14,12 @@
 //   3  as 2 with gyro/accel motion streaming alongside
 //   4  as 2 with a 100 ms gap every second, as a Wi-Fi hiccup leaves (a jump)
 //   5  everything: clipped shape, 60/s, motion, gaps
+// --rate N sets the stick-phase report rate, --turn S the seconds per turn,
+// --update N how many times a second the stick value may change, and
+// --burst N sends the reports in back-to-back groups of N with the value
+// changing once per group, as a stream does when Vibepollo submits the input
+// state plus two motion states for every BLE packet (--rate 200 --burst 3 is
+// 66 packets/s of three reports each, ~15 ms apart).
 // With --monitor [seconds] it creates nothing: it opens the vendor collection of
 // the virtual Steam Controller that already exists (the one Vibepollo made for a
 // stream) and reads its state reports, printing once a second what Steam sees of
@@ -286,7 +292,7 @@ int monitor(int seconds) {
 
 int main(int argc, char **argv) {
   constexpr unsigned slot = 7;
-  int hold_seconds = 0, monitor_seconds = 0, circle_mode = 0, stick_rate = 0, stick_update_rate = 0;
+  int hold_seconds = 0, monitor_seconds = 0, circle_mode = 0, stick_rate = 0, stick_update_rate = 0, burst = 1;
   double turn_seconds = 3.0;
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--hold") == 0) hold_seconds = (i + 1 < argc) ? std::atoi(argv[++i]) : 600;
@@ -295,6 +301,7 @@ int main(int argc, char **argv) {
     if (std::strcmp(argv[i], "--rate") == 0) stick_rate = (i + 1 < argc) ? std::atoi(argv[++i]) : 0;
     if (std::strcmp(argv[i], "--turn") == 0) turn_seconds = (i + 1 < argc) ? std::atof(argv[++i]) : 3.0;
     if (std::strcmp(argv[i], "--update") == 0) stick_update_rate = (i + 1 < argc) ? std::atoi(argv[++i]) : 0;
+    if (std::strcmp(argv[i], "--burst") == 0) burst = (i + 1 < argc) ? std::atoi(argv[++i]) : 3;
   }
   circle_mode = std::clamp(circle_mode, 0, 5);
   // Seconds per stick turn (the wired unit's owner took ~0.9 s per turn in the Steam capture) and
@@ -302,6 +309,7 @@ int main(int argc, char **argv) {
   // (a stream changes it ~66 times per second inside ~250 reports). 0 = every report.
   turn_seconds = std::clamp(turn_seconds, 0.5, 10.0);
   if (stick_update_rate != 0) stick_update_rate = std::clamp(stick_update_rate, 5, 250);
+  burst = std::clamp(burst, 1, 13);
   // Stick-circle submit rate in reports per second: 0 = the mode's default (20 for modes 0 and 1,
   // 60 for the fast modes), otherwise 20..250 in steps of 20 (the real unit streams at 250).
   if (stick_rate != 0) stick_rate = std::clamp(stick_rate, 20, 250);
@@ -554,7 +562,7 @@ int main(int argc, char **argv) {
                                               "3. left pad whole-surface sweep", "4. right pad whole-surface sweep",
                                               "5. left stick circles", "6. right stick circles",
                                               "7. every remaining button", "8/9. waiting for haptic pulses (A auto-pressed)"};
-          if (phase == 4 || phase == 5) std::printf("  phase: %s%s @ %u reports/s, %.1f s/turn, value every %u report(s)\n", names[phase], circle_names[circle_mode], stick_sub * 20, turn_seconds, update_every);
+          if (phase == 4 || phase == 5) std::printf("  phase: %s%s @ %u reports/s, %.1f s/turn, value every %u report(s), bursts of %d\n", names[phase], circle_names[circle_mode], stick_sub * 20, turn_seconds, update_every, burst);
           else std::printf("  phase: %s\n", names[phase]);
           for (int pad = 0; pad < 2; ++pad) {
             if (pad_down[pad]) send_touch(static_cast<std::uint8_t>(pad), lvg::touch_event::up, 0, 0);
@@ -612,14 +620,19 @@ int main(int argc, char **argv) {
               short cy = static_cast<short>(std::lround(32767.0 * fy));
               // --update: keep repeating the last value between value changes, as a stream does
               // when the device reports faster than the client samples the stick.
-              if (update_every > 1 && ((i % turn_ticks) * sub + k) % update_every != 0) { cx = held_cx; cy = held_cy; }
+              // --burst: the value changes only with the first report of each group.
+              const bool value_repeats = (update_every > 1 && ((i % turn_ticks) * sub + k) % update_every != 0)
+                                         || (burst > 1 && k % static_cast<unsigned>(burst) != 0);
+              if (value_repeats) { cx = held_cx; cy = held_cy; }
               else { held_cx = cx; held_cy = cy; }
               if (phase == 4) { lx = cx; ly = cy; } else { rx = cx; ry = cy; }
               if (circle_motion) send_motion(i * sub + k);
               if (k + 1 < sub) {
                 // Intermediate report of a fast mode; the last one goes out with the common send below.
                 (void) client.submit_input_state(make_input(slot, buttons, lx, ly, rx, ry, lt, rt));
-                Sleep(sub_sleep_ms);
+                // --burst: no pause inside a group; the group's whole share of the tick after it.
+                if (burst <= 1) Sleep(sub_sleep_ms);
+                else if ((k + 1) % static_cast<unsigned>(burst) == 0) Sleep(sub_sleep_ms * static_cast<DWORD>(burst));
               }
             }
             break;
