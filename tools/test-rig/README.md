@@ -65,7 +65,11 @@ All in an elevated PowerShell, from the kit folder.
    modes complete the left stick step. `--rate N` (20..250, steps of 20) sets how many reports per second
    the stick phases submit instead of the mode's 20 or 60; the turn stays 3 s long. `--rate 250` is the
    wired unit's cadence, `--rate 40` halves the fast modes. The hold now runs with 1 ms timer resolution,
-   so these cadences are real (earlier builds slept 16-31 ms where 16 was asked).
+   so these cadences are real (earlier builds slept 16-31 ms where 16 was asked). `--turn S` sets seconds per
+   stick turn (default 3; the wired unit's owner took ~0.9 s in the Steam capture) and `--update N` lets the
+   stick VALUE change only N times per second while reports keep flowing at `--rate` (a stream changes it
+   ~66 times a second inside ~250 reports). `--rate 250` alone stalls Steam's circle step every time;
+   `--rate 20` (80 reports/s with the keep-alive) passes.
    While a stream is running (the controller Vibepollo created, not the probe's own):
    ```powershell
    .\probe_sc26_usb.exe --monitor 120

@@ -286,14 +286,22 @@ int monitor(int seconds) {
 
 int main(int argc, char **argv) {
   constexpr unsigned slot = 7;
-  int hold_seconds = 0, monitor_seconds = 0, circle_mode = 0, stick_rate = 0;
+  int hold_seconds = 0, monitor_seconds = 0, circle_mode = 0, stick_rate = 0, stick_update_rate = 0;
+  double turn_seconds = 3.0;
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--hold") == 0) hold_seconds = (i + 1 < argc) ? std::atoi(argv[++i]) : 600;
     if (std::strcmp(argv[i], "--monitor") == 0) monitor_seconds = (i + 1 < argc) ? std::atoi(argv[++i]) : 120;
     if (std::strcmp(argv[i], "--circle") == 0) circle_mode = (i + 1 < argc) ? std::atoi(argv[++i]) : 0;
     if (std::strcmp(argv[i], "--rate") == 0) stick_rate = (i + 1 < argc) ? std::atoi(argv[++i]) : 0;
+    if (std::strcmp(argv[i], "--turn") == 0) turn_seconds = (i + 1 < argc) ? std::atof(argv[++i]) : 3.0;
+    if (std::strcmp(argv[i], "--update") == 0) stick_update_rate = (i + 1 < argc) ? std::atoi(argv[++i]) : 0;
   }
   circle_mode = std::clamp(circle_mode, 0, 5);
+  // Seconds per stick turn (the wired unit's owner took ~0.9 s per turn in the Steam capture) and
+  // how many times per second the stick VALUE may change while reports keep flowing at --rate
+  // (a stream changes it ~66 times per second inside ~250 reports). 0 = every report.
+  turn_seconds = std::clamp(turn_seconds, 0.5, 10.0);
+  if (stick_update_rate != 0) stick_update_rate = std::clamp(stick_update_rate, 5, 250);
   // Stick-circle submit rate in reports per second: 0 = the mode's default (20 for modes 0 and 1,
   // 60 for the fast modes), otherwise 20..250 in steps of 20 (the real unit streams at 250).
   if (stick_rate != 0) stick_rate = std::clamp(stick_rate, 20, 250);
@@ -433,8 +441,10 @@ int main(int argc, char **argv) {
                   "The hold drives exactly that and repeats; A is pressed automatically when a haptic pulse arrives. The\n"
                   "grip touch flags toggle every 2 s throughout, so the grips should light up blue on Steam's screen.\n"
                   "Feedback events are printed as they arrive. Stick circle mode %d (--circle 0..5), stick submit rate\n"
-                  "%s (--rate 20..250 per second overrides the mode's 20 or 60).\n", circle_mode,
-                  stick_rate ? std::to_string(stick_rate).c_str() : "mode default");
+                  "%s (--rate 20..250 per second overrides the mode's 20 or 60), %.1f s per turn (--turn), stick value\n"
+                  "changes %s per second (--update).\n", circle_mode,
+                  stick_rate ? std::to_string(stick_rate).c_str() : "mode default", turn_seconds,
+                  stick_update_rate ? std::to_string(stick_update_rate).c_str() : "with every report");
       const ULONGLONG end = GetTickCount64() + static_cast<ULONGLONG>(hold_seconds) * 1000;
       HANDLE stdin_handle = GetStdHandle(STD_INPUT_HANDLE);
       unsigned tick = 0;
@@ -500,6 +510,10 @@ int main(int argc, char **argv) {
       const unsigned stick_sub = stick_rate ? std::max(1u, (static_cast<unsigned>(stick_rate) + 10) / 20) : (circle_fast ? 3 : 1);
       const DWORD sub_sleep_ms = stick_sub > 1 ? 50 / stick_sub : 50;
       const DWORD stick_tail_sleep_ms = stick_sub > 1 ? 50 - sub_sleep_ms * (stick_sub - 1) : 50;
+      // Ticks per turn (20 ticks per second) and, in sub-steps, how often the stick value may change.
+      const unsigned turn_ticks = std::max(10u, static_cast<unsigned>(std::lround(turn_seconds * 20.0)));
+      const unsigned update_every = stick_update_rate ? std::max(1u, (stick_sub * 20 + stick_update_rate / 2) / static_cast<unsigned>(stick_update_rate)) : 1;
+      short held_cx = 0, held_cy = 0;
       const auto send_motion = [&](unsigned k) {
         // Gyro: a slow wobble of a few deg/s; accel: 1 g on Z with a little noise. Units are milli
         // (deg/s, m/s^2) as Vibepollo sends them.
@@ -540,7 +554,7 @@ int main(int argc, char **argv) {
                                               "3. left pad whole-surface sweep", "4. right pad whole-surface sweep",
                                               "5. left stick circles", "6. right stick circles",
                                               "7. every remaining button", "8/9. waiting for haptic pulses (A auto-pressed)"};
-          if (phase == 4 || phase == 5) std::printf("  phase: %s%s @ %u reports/s\n", names[phase], circle_names[circle_mode], stick_sub * 20);
+          if (phase == 4 || phase == 5) std::printf("  phase: %s%s @ %u reports/s, %.1f s/turn, value every %u report(s)\n", names[phase], circle_names[circle_mode], stick_sub * 20, turn_seconds, update_every);
           else std::printf("  phase: %s\n", names[phase]);
           for (int pad = 0; pad < 2; ++pad) {
             if (pad_down[pad]) send_touch(static_cast<std::uint8_t>(pad), lvg::touch_event::up, 0, 0);
@@ -590,12 +604,16 @@ int main(int argc, char **argv) {
             if (circle_gaps && (i % 20) < 2) { skip_send = true; break; }
             const unsigned sub = stick_sub;
             for (unsigned k = 0; k < sub; ++k) {
-              const double t = static_cast<double>(i % 60) + static_cast<double>(k) / sub;
-              const double angle = t * (2.0 * 3.14159265358979 / 60.0);
+              const double t = static_cast<double>(i % turn_ticks) + static_cast<double>(k) / sub;
+              const double angle = t * (2.0 * 3.14159265358979 / turn_ticks);
               double fx = std::cos(angle), fy = std::sin(angle);
               if (circle_clipped) { fx = std::clamp(1.2 * fx, -1.0, 1.0); fy = std::clamp(1.2 * fy, -1.0, 1.0); }
-              const short cx = static_cast<short>(std::lround(32767.0 * fx));
-              const short cy = static_cast<short>(std::lround(32767.0 * fy));
+              short cx = static_cast<short>(std::lround(32767.0 * fx));
+              short cy = static_cast<short>(std::lround(32767.0 * fy));
+              // --update: keep repeating the last value between value changes, as a stream does
+              // when the device reports faster than the client samples the stick.
+              if (update_every > 1 && ((i % turn_ticks) * sub + k) % update_every != 0) { cx = held_cx; cy = held_cy; }
+              else { held_cx = cx; held_cy = cy; }
               if (phase == 4) { lx = cx; ly = cy; } else { rx = cx; ry = cy; }
               if (circle_motion) send_motion(i * sub + k);
               if (k + 1 < sub) {
