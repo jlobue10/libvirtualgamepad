@@ -201,8 +201,9 @@ int monitor(int seconds) {
     return 1;
   }
   std::printf("Each second: reports/s, largest gap between reports, sequence-byte gaps (count, reports lost), largest\n"
-              "imu_timestamp step and backwards steps, buttons, grip and stick touch bits seen (L/R), then left/right\n"
-              "stick statistics over that second. A whole-run summary of the sticks follows at the end.\n"
+              "imu_timestamp step and backwards steps, reports whose stick value changed (the effective stick update\n"
+              "rate), buttons, grip and stick touch bits seen (L/R), then left/right stick statistics over that second.\n"
+              "A whole-run summary of the sticks follows at the end.\n"
               "Do not select text in this console while it runs: that pauses the process and shows up as gaps.\n");
   // The gap column is measured on arrival in this process; keep scheduling jitter out of it.
   SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
@@ -219,6 +220,9 @@ int monitor(int seconds) {
   // a virtual device that drops or reorders reports shows here.
   int last_seq = -1; unsigned seq_gaps = 0, seq_lost = 0, seq_gaps_all = 0, seq_lost_all = 0;
   bool have_ts = false; std::uint32_t last_ts = 0; double ts_max_ms = 0; unsigned ts_back = 0;
+  // Reports whose stick value differs from the previous report's: the effective stick update
+  // rate, as opposed to the report rate padded by keep-alives and motion resends.
+  bool have_sticks = false; short prev_lx = 0, prev_ly = 0, prev_rx = 0, prev_ry = 0; unsigned left_updates = 0, right_updates = 0;
   stick_stats left, right, left_all, right_all;
   while (GetTickCount64() < end) {
     if (WaitForSingleObject(stdin_handle, 0) == WAIT_OBJECT_0) {
@@ -254,18 +258,23 @@ int monitor(int seconds) {
       if (buttons & sc::btn_right_stick_touch) stick_touch |= 2;
       const short lx = static_cast<short>(report[10] | (report[11] << 8)), ly = static_cast<short>(report[12] | (report[13] << 8));
       const short rx = static_cast<short>(report[14] | (report[15] << 8)), ry = static_cast<short>(report[16] | (report[17] << 8));
+      if (have_sticks) {
+        if (lx != prev_lx || ly != prev_ly) ++left_updates;
+        if (rx != prev_rx || ry != prev_ry) ++right_updates;
+      }
+      prev_lx = lx; prev_ly = ly; prev_rx = rx; prev_ry = ry; have_sticks = true;
       left.add(lx, ly); right.add(rx, ry); left_all.add(lx, ly); right_all.add(rx, ry);
     } else if (bytes) {
       ++other;
     }
     if (GetTickCount64() >= next_print) {
       next_print += 1000;
-      std::printf("[%3llus] %3u rep/s gap %5.1f ms seq gaps %u (%u lost) ts max %5.1f ms back %u buttons 0x%08x grips %s%s touch %s%s | ",
+      std::printf("[%3llus] %3u rep/s gap %5.1f ms seq gaps %u (%u lost) ts max %5.1f ms back %u stick upd L %u R %u buttons 0x%08x grips %s%s touch %s%s | ",
                   (GetTickCount64() - (end - static_cast<ULONGLONG>(seconds) * 1000)) / 1000, count, max_gap_ms, seq_gaps, seq_lost,
-                  ts_max_ms, ts_back, last_buttons,
+                  ts_max_ms, ts_back, left_updates, right_updates, last_buttons,
                   (grips & 1) ? "L" : "-", (grips & 2) ? "R" : "-", (stick_touch & 1) ? "L" : "-", (stick_touch & 2) ? "R" : "-");
       left.print("left"); std::printf(" | "); right.print("right"); std::printf("\n");
-      count = other = 0; max_gap_ms = 0; seq_gaps = seq_lost = 0; ts_max_ms = 0; ts_back = 0;
+      count = other = 0; max_gap_ms = 0; seq_gaps = seq_lost = 0; ts_max_ms = 0; ts_back = 0; left_updates = right_updates = 0;
       grips = stick_touch = 0; left = stick_stats {}; right = stick_stats {};
     }
   }
@@ -555,10 +564,15 @@ int main(int argc, char **argv) {
           case 2: buttons |= lvg::button_mask::left_grip_touch | lvg::button_mask::right_grip_touch; break;
           default: break;
         }
-        // Trigger: 0..255..0 twice per phase (triangle wave with the full 255 reached at the peak).
+        // Trigger: 0..255..0 twice per phase. A hand holds the full pull for a good fraction of a
+        // second, so the wave is a trapezoid: a third of the period ramping up, a third held at 255,
+        // a third ramping down. A single 50 ms peak was lost at high report rates.
         const auto tri = [](unsigned k, unsigned period) {
-          const unsigned half = period / 2, m = k % period;
-          return static_cast<unsigned char>((m < half ? m : period - m) * 255u / (half ? half : 1));
+          const unsigned third = period / 3 ? period / 3 : 1, m = k % period;
+          if (m < third) return static_cast<unsigned char>(m * 255u / third);
+          if (m < 2 * third) return static_cast<unsigned char>(255);
+          const unsigned down = period - m;
+          return static_cast<unsigned char>(down >= third ? 255 : down * 255u / third);
         };
         switch (phase) {
           case 0: lt = tri(i, k_trig / 2); break;
