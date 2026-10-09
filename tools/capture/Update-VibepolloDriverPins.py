@@ -17,6 +17,7 @@ Requires `gh` authenticated for both repositories.
 import argparse
 import base64
 import json
+import os
 import re
 import subprocess
 import sys
@@ -133,7 +134,7 @@ def main():
                f"is released there.\n\n"
                f"source revision {new['rev']}\nDriverVer {new['ver']}\narchive sha256 {new['sha']}\n\n"
                f"Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>\n"
-               f"Claude-Session: https://claude.ai/code/session_01YABzuxurYwwoGSaHYKJSNs\n")
+               f"Claude-Session: {os.environ.get('CLAUDE_SESSION_URL', 'https://claude.ai/code/session_01XHQnCA633DTtJxNKGvBYzW')}\n")
     if args.dry_run:
         print('\n--dry-run: would commit\n' + message)
         return
