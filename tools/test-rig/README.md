@@ -9,7 +9,7 @@ Controller. This kit repeats that on a physical Windows 11 machine and adds the 
 
 | Item | Source |
 | --- | --- |
-| `vhf-package\` (driver, catalog, LocalTest `.cer`, setup tool) | `test-signed-package.yml` artifact; current = run 37596882384 for commit 8c75150 (beta.102 code) |
+| `vhf-package\` (driver, catalog, LocalTest `.cer`, setup tool) | `test-signed-package.yml` artifact; current = run 37877814035 for commit 6f2ad3a (motion on the 4 ms tick, grips from the client only, sequence stamped at submission; see `docs/STEAM_CONTROLLER_PROFILE.md` §7.9) |
 | `probe_sc26_usb.exe` | `driver/tests/probe_sc26_usb.cpp`, static MinGW build |
 | `Install-TestDriver.ps1` | this folder |
 | `Collect-Evidence.ps1` | this folder |

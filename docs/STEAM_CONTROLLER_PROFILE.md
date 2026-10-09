@@ -447,6 +447,45 @@ On the Windows host next:
    Vibepollo PR (`vhf_steam`, touchpad index + capability plumbing, the cleanup fix is already on
    `fix/vhf-gamepad-cleanup-pnputil-wow64`) once a Nonary driver release carries the profile.
 
+### 7.9 Linux session 2026-10-08: circle-step burst fix, CI repaired (pick up here)
+
+State when this session ended (branch `feat/steam-controller-profile` = 5f75c05; no new beta tag,
+nothing merged upstream; last prerelease is still `v0.1.0-beta.105` = edb2d38, which predates
+`fb21e41` "grips only from the client"):
+- The 2026-10-08 Windows probe runs (commits aa64eb2..9355094, findings in the §8 row "Stick circle
+  step: what Steam keys on") cleared the stream's stick shape and 66/s value cadence; the burst was
+  the one property left. Commit **6f2ad3a**: `submit_motion_state` folds a Steam Controller motion
+  sample into the state and returns; `evt_sc26_tick` (4 ms) carries it, so the wire is an even
+  cadence instead of three reports in a millisecond per BLE packet.
+- CI "Controller protocol tests" had been red since c2cb0a5 (probe only built with MinGW):
+  f6dc6a9 `NOMINMAX`, 5f75c05 link `winmm`. Run 37877928931 green.
+- **Test-signed driver package to install on the host:** `test-signed-package.yml` run
+  37877814035, artifact `vhf-gamepad-test-signed-x64-6f2ad3a1de75e2243edc5e122460bf1f40ce3e9e`
+  (id 11593181427, 1.5 MB): https://github.com/jlobue10/libvirtualgamepad/actions/runs/37877814035
+  (or `gh run download 37877814035 -R jlobue10/libvirtualgamepad -D artifacts/`). Unzip into the
+  kit's `vhf-package\`, run `Install-TestDriver.ps1` elevated as before. Vibepollo on the host
+  needs no change (it only forwards; the driver pins in the fork installer still say beta.105,
+  which the test package replaces).
+- The owner's last test before this change: client fork.24 (no rim stretch; the stick path is
+  passthrough plus a 5 % centre dead zone) on the host driver of 2026-10-08 (which exact package is
+  unknown: beta.105 or the fb21e41 test package from run 37802277663) → circle step still stalls,
+  grips never light.
+
+Next on the Windows host, in order:
+1. Install the 6f2ad3a test package, stream from the headset (fork.24), run Steam's controller
+   test. Expected: the left-stick circle step completes. If it still stalls, run
+   `probe_sc26_usb --rate 200 --burst 3` (the old burst pattern against the probe alone) and
+   `--rate 200 --burst 1` to see whether the burst is really what Steam rejects; also
+   `--monitor 60` during a stream to confirm the wire now shows no bursts (largest gap ~4 ms,
+   ~250/s, value changes ~66/s).
+2. Grips: get the client's stream log (Settings → Misc → Share stream log) with the controller
+   held for 10 s+. Line `Steam Controller BLE: stick extents (raw): ...; raw buttons seen 0x……
+   (grip touch L yes/no R yes/no)`. "yes" while held → the bits flow and the host side is at fault
+   (check the driver is the fb21e41+ package, then `--monitor` shows the grip bits). "no" → the BLE
+   firmware does not send them; add a client proxy in `SteamControllerBle.handleState` (e.g. grip =
+   stick-touch bit 26/27 or any pad touch) behind a preference.
+3. When both pass: `Collect-Evidence.ps1`, then the upstream PRs (§7.8 step 4).
+
 ## 8. Field fixes after the first stream (2026-10-07)
 
 | Symptom in Steam's controller test | Cause | Fix |
