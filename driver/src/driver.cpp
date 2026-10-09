@@ -11,6 +11,7 @@
 #include <wdf.h>
 #include <vhf.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
