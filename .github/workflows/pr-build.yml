@@ -1,0 +1,44 @@
+name: Validate Windows driver
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: driver-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  driver:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Build and verify the unsigned driver package with the WDK
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $instance = & $vswhere -latest -products '*' -requires Microsoft.Component.MSBuild -property installationPath
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($instance)) { throw 'No MSBuild instance found.' }
+          $msbuild = Join-Path $instance.Trim() 'MSBuild/Current/Bin/MSBuild.exe'
+          $date = (git log -1 --format=%cd --date=format:%m/%d/%Y).Trim()
+          $revision = (git rev-list --count HEAD).Trim()
+          $source = (git rev-parse HEAD).Trim()
+          $driverVer = "$date,0.1.0.$revision"
+          $package = Join-Path $env:RUNNER_TEMP 'vhf-pr-package'
+          $evidence = Join-Path $env:RUNNER_TEMP 'vhf-pr-catalog.json'
+          ./tools/build-driver.ps1 -Configuration Release -Platform x64 -DriverVer $driverVer `
+            -PackageDir $package -SigningMode Release -MSBuildPath $msbuild `
+            -CatalogGenerationEvidencePath $evidence
+          ./tools/verify-driver-package.ps1 -PackageDir $package -Platform x64 `
+            -DriverVer $driverVer -SourceRevision $source -UnsignedForMsiSigning `
+            -CatalogGenerationEvidencePath $evidence
