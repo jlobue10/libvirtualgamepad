@@ -17,7 +17,8 @@
 // --rate N sets the stick-phase report rate, --turn S the seconds per turn,
 // --update N how many times a second the stick value may change,
 // --scale S the magnification of the clipped shape (modes 1 and 5; default 1.2,
-// the BLE stream measures 1.11..1.16 at the diagonals), and
+// the BLE stream measures 1.11..1.16 at the diagonals), --clip N the largest
+// value an axis may carry (default 32767; a Moonlight stream stops at 32766), and
 // --burst N sends the reports in back-to-back groups of N with the value
 // changing once per group, as a stream does when Vibepollo submits the input
 // state plus two motion states for every BLE packet (--rate 200 --burst 3 is
@@ -298,6 +299,7 @@ int monitor(int seconds) {
 int main(int argc, char **argv) {
   constexpr unsigned slot = 7;
   int hold_seconds = 0, monitor_seconds = 0, circle_mode = 0, stick_rate = 0, stick_update_rate = 0, burst = 1;
+  int stick_clip = 32767;
   double turn_seconds = 3.0, circle_scale = 1.2;
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--hold") == 0) hold_seconds = (i + 1 < argc) ? std::atoi(argv[++i]) : 600;
@@ -308,6 +310,7 @@ int main(int argc, char **argv) {
     if (std::strcmp(argv[i], "--update") == 0) stick_update_rate = (i + 1 < argc) ? std::atoi(argv[++i]) : 0;
     if (std::strcmp(argv[i], "--burst") == 0) burst = (i + 1 < argc) ? std::atoi(argv[++i]) : 3;
     if (std::strcmp(argv[i], "--scale") == 0) circle_scale = (i + 1 < argc) ? std::atof(argv[++i]) : 1.2;
+    if (std::strcmp(argv[i], "--clip") == 0) stick_clip = (i + 1 < argc) ? std::atoi(argv[++i]) : 32766;
   }
   circle_mode = std::clamp(circle_mode, 0, 5);
   // Seconds per stick turn (the wired unit's owner took ~0.9 s per turn in the Steam capture) and
@@ -322,6 +325,9 @@ int main(int argc, char **argv) {
   // --scale S: magnification of the clipped shape (modes 1 and 5) before the per-axis clip. 1.2 is the
   // wired unit's shape; the BLE stream measures 1.11..1.16 at the diagonals, so 1.1..1.15 stages it.
   circle_scale = std::clamp(circle_scale, 1.0, 2.0);
+  // --clip N: the largest magnitude a stick axis may carry. Moonlight scales the client's
+  // stick by 0x7FFE, so a stream never reaches +/-32767; --clip 32766 stages that.
+  stick_clip = std::clamp(stick_clip, 16384, 32767);
   // Sleep() granularity is 15.6 ms by default, which makes a 16 ms sleep last up to 31 ms; the
   // hold's cadences depend on 4..50 ms sleeps being honoured, so ask for 1 ms timer resolution.
   timeBeginPeriod(1);
@@ -625,8 +631,8 @@ int main(int argc, char **argv) {
               const double angle = t * (2.0 * 3.14159265358979 / turn_ticks);
               double fx = std::cos(angle), fy = std::sin(angle);
               if (circle_clipped) { fx = std::clamp(circle_scale * fx, -1.0, 1.0); fy = std::clamp(circle_scale * fy, -1.0, 1.0); }
-              short cx = static_cast<short>(std::lround(32767.0 * fx));
-              short cy = static_cast<short>(std::lround(32767.0 * fy));
+              short cx = static_cast<short>(std::clamp<long>(std::lround(32767.0 * fx), -stick_clip, stick_clip));
+              short cy = static_cast<short>(std::clamp<long>(std::lround(32767.0 * fy), -stick_clip, stick_clip));
               // --update: keep repeating the last value between value changes, as a stream does
               // when the device reports faster than the client samples the stick.
               // --burst: the value changes only with the first report of each group.
