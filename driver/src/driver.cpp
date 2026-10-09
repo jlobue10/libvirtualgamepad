@@ -27,6 +27,10 @@
 #include "xbox_one.h"
 #include "xbox_series.h"
 
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+  #define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+
 namespace {
 
 // Microseconds from the performance counter, for the Steam Controller report
@@ -130,7 +134,13 @@ struct device_context {
   bool vhf_target_open;
   bool stopping;
   WDFTIMER pid_timer;
-  WDFTIMER sc26_timer;
+  // Steam Controller keep-alive: a worker thread on a high-resolution waitable
+  // timer (see start_sc26_keepalive). A WDFTIMER cannot hold a 4 ms cadence in
+  // UMDF: it fires on the system clock interrupt and UseHighResolutionTimer is
+  // KMDF-only (WdfTimerCreate refuses it here).
+  HANDLE sc26_keepalive_timer;
+  HANDLE sc26_keepalive_stop;
+  HANDLE sc26_keepalive_thread;
   bool sc26_timer_running;
   controller_slot controllers[lvg::k_max_controllers];
 };
@@ -156,7 +166,9 @@ EVT_VHF_READY_FOR_NEXT_READ_REPORT evt_vhf_ready_for_next_report;
 EVT_VHF_ASYNC_OPERATION evt_vhf_set_feature;
 EVT_VHF_CLEANUP evt_vhf_cleanup;
 EVT_WDF_TIMER evt_pid_tick;
-EVT_WDF_TIMER evt_sc26_tick;
+EVT_WDF_OBJECT_CONTEXT_CLEANUP evt_device_cleanup;
+void start_sc26_keepalive(device_context *context) noexcept;
+void stop_sc26_keepalive(device_context *context) noexcept;
 
 // Defined below with the PlayStation submit helpers; create_controller needs it
 // to decide whether to register the feature-report callbacks.
@@ -818,7 +830,7 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
     // then nothing until the next 15 ms BLE interval). Submitting a full report
     // for each produced three reports in a burst and a ~12 ms hole, whereas the
     // wired unit streams one report every 4 ms with the IMU folded in. The
-    // sample is folded into the state here; evt_sc26_tick (4 ms) carries it in
+    // sample is folded into the state here; the keep-alive worker (4 ms) carries it in
     // the next scheduled report, so the wire cadence stays even. Steam's stick
     // "full circle" calibration step stalled over the stream and passed against
     // the probe at the same rate and value cadence; the burst timing was the
@@ -937,14 +949,15 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
     const auto sc26_kind =
       slot.pump.classify(request.buttons, request.left_trigger, request.right_trigger);
     // First input state of a Steam Controller: start the keep-alive cadence.
-    const bool start_keepalive = context->sc26_timer != nullptr && !context->sc26_timer_running;
+    const bool start_keepalive =
+      context->sc26_keepalive_timer != nullptr && !context->sc26_timer_running;
     if (start_keepalive) {
       context->sc26_timer_running = true;
     }
     unlock_context(context);
     if (start_keepalive) {
-      // Started outside the lock: the tick callback takes state_lock itself.
-      WdfTimerStart(context->sc26_timer, WDF_REL_TIMEOUT_IN_MS(k_sc26_tick_ms));
+      // Started outside the lock: the worker takes state_lock on every tick.
+      start_sc26_keepalive(context);
     }
     const NTSTATUS sc26_status =
       pump_report(context, slot, &sc26_report, sizeof(sc26_report),
@@ -1605,13 +1618,10 @@ void evt_pid_tick(WDFTIMER timer) {
 // Keeps every active Steam Controller slot streaming at the real unit's cadence
 // while the client is quiet. Runs without the lifetime gate, like evt_pid_tick;
 // submit_profile_report checks the slot state under state_lock itself.
-void evt_sc26_tick(WDFTIMER timer) {
-  auto *const context = get_device_context(
-    reinterpret_cast<WDFDEVICE>(WdfTimerGetParentObject(timer)));
-  if (context == nullptr) {
-    return;
-  }
-
+// One keep-alive pass: resends the state of every active Steam Controller whose
+// last report is older than k_sc26_resend_after_us. Returns false once no Steam
+// Controller is active or the device is stopping; the worker exits on that.
+bool sc26_keepalive_tick(device_context *const context) noexcept {
   controller_slot *due[lvg::k_max_controllers] {};
   std::size_t due_count = 0;
   bool any_active = false;
@@ -1634,12 +1644,72 @@ void evt_sc26_tick(WDFTIMER timer) {
   unlock_context(context);
 
   if (!keep_running) {
-    // Passing FALSE: a timer may stop itself from inside its own callback.
-    WdfTimerStop(timer, FALSE);
-    return;
+    return false;
   }
   for (std::size_t i = 0; i < due_count; ++i) {
     std::ignore = submit_profile_report(context, *due[i]);
+  }
+  return true;
+}
+
+DWORD WINAPI sc26_keepalive_thread(LPVOID parameter) {
+  auto *const context = static_cast<device_context *>(parameter);
+  const HANDLE waits[2] = {context->sc26_keepalive_stop, context->sc26_keepalive_timer};
+  for (;;) {
+    const DWORD signalled = WaitForMultipleObjects(2, waits, FALSE, INFINITE);
+    if (signalled != WAIT_OBJECT_0 + 1) {
+      break;  // the stop event, or a failed wait
+    }
+    if (!sc26_keepalive_tick(context)) {
+      break;  // idle: no Steam Controller left
+    }
+  }
+  CancelWaitableTimer(context->sc26_keepalive_timer);
+  return 0;
+}
+
+// Both run under lifetime_gate and outside state_lock, which serializes the
+// thread handle between the submit path (start) and the stop paths.
+void start_sc26_keepalive(device_context *const context) noexcept {
+  if (context->sc26_keepalive_thread != nullptr) {
+    // The previous worker left when its last controller went away; let it finish.
+    WaitForSingleObject(context->sc26_keepalive_thread, INFINITE);
+    CloseHandle(context->sc26_keepalive_thread);
+    context->sc26_keepalive_thread = nullptr;
+  }
+  ResetEvent(context->sc26_keepalive_stop);
+  LARGE_INTEGER first_due {};
+  first_due.QuadPart = -static_cast<LONGLONG>(k_sc26_tick_ms) * 10000;  // relative, 100 ns units
+  if (!SetWaitableTimer(context->sc26_keepalive_timer, &first_due, k_sc26_tick_ms, nullptr, nullptr, FALSE)) {
+    lock_context(context);
+    context->sc26_timer_running = false;
+    unlock_context(context);
+    return;
+  }
+  const HANDLE thread = CreateThread(nullptr, 0, sc26_keepalive_thread, context, 0, nullptr);
+  if (thread == nullptr) {
+    CancelWaitableTimer(context->sc26_keepalive_timer);
+    lock_context(context);
+    context->sc26_timer_running = false;
+    unlock_context(context);
+    return;
+  }
+  // A 4 ms cadence should not queue behind the host's ordinary work.
+  SetThreadPriority(thread, THREAD_PRIORITY_HIGHEST);
+  context->sc26_keepalive_thread = thread;
+}
+
+void stop_sc26_keepalive(device_context *const context) noexcept {
+  if (context->sc26_keepalive_stop != nullptr) {
+    SetEvent(context->sc26_keepalive_stop);
+  }
+  if (context->sc26_keepalive_thread != nullptr) {
+    WaitForSingleObject(context->sc26_keepalive_thread, INFINITE);
+    CloseHandle(context->sc26_keepalive_thread);
+    context->sc26_keepalive_thread = nullptr;
+  }
+  if (context->sc26_keepalive_timer != nullptr) {
+    CancelWaitableTimer(context->sc26_keepalive_timer);
   }
 }
 
@@ -1925,7 +1995,6 @@ void stop_owned_controllers(device_context *const context, const bool forget_tar
   lock_lifetime(context);
   lock_context(context);
   const WDFTIMER timer = context->pid_timer;
-  const WDFTIMER sc26_timer = context->sc26_timer;
   context->sc26_timer_running = false;
   context->stopping = true;
   context->vhf_file_handle = nullptr;
@@ -1956,9 +2025,7 @@ void stop_owned_controllers(device_context *const context, const bool forget_tar
   if (timer != nullptr) {
     WdfTimerStop(timer, TRUE);
   }
-  if (sc26_timer != nullptr) {
-    WdfTimerStop(sc26_timer, TRUE);
-  }
+  stop_sc26_keepalive(context);
   unlock_lifetime(context);
 }
 
@@ -2014,6 +2081,23 @@ NTSTATUS evt_release_hardware(WDFDEVICE device, WDFCMRESLIST) {
   return STATUS_SUCCESS;
 }
 
+void evt_device_cleanup(WDFOBJECT object) {
+  auto *const context = get_device_context(reinterpret_cast<WDFDEVICE>(object));
+  if (context == nullptr) {
+    return;
+  }
+  // Release hardware already stopped the worker; this only drops the handles.
+  stop_sc26_keepalive(context);
+  if (context->sc26_keepalive_timer != nullptr) {
+    CloseHandle(context->sc26_keepalive_timer);
+    context->sc26_keepalive_timer = nullptr;
+  }
+  if (context->sc26_keepalive_stop != nullptr) {
+    CloseHandle(context->sc26_keepalive_stop);
+    context->sc26_keepalive_stop = nullptr;
+  }
+}
+
 NTSTATUS evt_device_add(WDFDRIVER, PWDFDEVICE_INIT device_init) {
   // The INF installs this UMDF component above the inbox VHF function driver.
   // Tell WDF that this is a filter so VHF remains the sole power-policy owner
@@ -2039,6 +2123,7 @@ NTSTATUS evt_device_add(WDFDRIVER, PWDFDEVICE_INIT device_init) {
 
   WDF_OBJECT_ATTRIBUTES device_attributes;
   WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&device_attributes, device_context);
+  device_attributes.EvtCleanupCallback = evt_device_cleanup;
 
   WDFDEVICE device = nullptr;
   NTSTATUS status = WdfDeviceCreate(&device_init, &device_attributes, &device);
@@ -2071,21 +2156,25 @@ NTSTATUS evt_device_add(WDFDRIVER, PWDFDEVICE_INIT device_init) {
   }
 
   // Steam Controller keep-alive cadence; same optional footing as the effect clock.
-  WDF_TIMER_CONFIG sc26_timer_config;
-  WDF_TIMER_CONFIG_INIT_PERIODIC(&sc26_timer_config, evt_sc26_tick, k_sc26_tick_ms);
-  // A plain periodic timer fires on the system clock interrupt, 15.6 ms unless some
-  // process has raised the timer resolution. The probe does (timeBeginPeriod(1)), a
-  // streaming host does not, so over a stream the 4 ms keep-alive ran at ~64 Hz and
-  // the wire fell to ~115 reports/s with 16..19 ms gaps where the unit sends a steady
-  // 250/s. A high-resolution timer (KMDF 1.13+) keeps the cadence on its own.
-  sc26_timer_config.UseHighResolutionTimer = WdfTrue;
-  sc26_timer_config.AutomaticSerialization = FALSE;
-  WDF_OBJECT_ATTRIBUTES sc26_timer_attributes;
-  WDF_OBJECT_ATTRIBUTES_INIT(&sc26_timer_attributes);
-  sc26_timer_attributes.ParentObject = device;
-  if (!NT_SUCCESS(WdfTimerCreate(&sc26_timer_config, &sc26_timer_attributes, &context->sc26_timer))) {
-    context->sc26_timer = nullptr;
+  // A UMDF WDFTIMER fires on the system clock interrupt: 15.6 ms unless some
+  // process has raised the timer resolution. The probe does (timeBeginPeriod(1)),
+  // a streaming host does not, so over a stream the 4 ms tick ran at ~64 Hz and
+  // the wire fell to ~115 reports/s with 16..19 ms gaps where the unit sends a
+  // steady 250/s; WDF_TIMER_CONFIG::UseHighResolutionTimer is KMDF-only and
+  // WdfTimerCreate refuses it here. A high-resolution waitable timer on a worker
+  // thread holds the cadence whatever the resolution (Windows 10 1803 and later;
+  // older hosts fall back to a plain waitable timer at the system resolution).
+  context->sc26_keepalive_stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+  context->sc26_keepalive_timer =
+    CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+  if (context->sc26_keepalive_timer == nullptr) {
+    context->sc26_keepalive_timer = CreateWaitableTimerExW(nullptr, nullptr, 0, TIMER_ALL_ACCESS);
   }
+  if (context->sc26_keepalive_stop == nullptr && context->sc26_keepalive_timer != nullptr) {
+    CloseHandle(context->sc26_keepalive_timer);
+    context->sc26_keepalive_timer = nullptr;
+  }
+  context->sc26_keepalive_thread = nullptr;
   context->sc26_timer_running = false;
 
   WDF_OBJECT_ATTRIBUTES lifetime_attributes;
