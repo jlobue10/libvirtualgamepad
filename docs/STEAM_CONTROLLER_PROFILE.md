@@ -22,9 +22,10 @@ Three defects were found in Steam's controller test and are fixed on this branch
 landed on the left pad (left pad = its left half, right pad = its right half; the right pad never
 registered a touch or a click), and the View and Menu buttons were swapped.
 
-**Next (§7.8 has the exact state):** install the beta.102 kit on the host, repeat the test from the
-headset (pads full width on both pads, right pad click, View/Menu), `Collect-Evidence.ps1`, then the
-upstream PRs (driver first, then Vibepollo).
+**Next (§7.10 has the exact state):** sideload client fork.26 (full-scale sticks), run Steam's
+controller test over the stream (the left-stick circle step is the last open item; grips and stick
+touch already light), then tag beta.107, bump the Vibepollo pins, merge the Vibepollo PRs,
+`Collect-Evidence.ps1`, and the upstream PRs (driver first, then Vibepollo).
 
 ## 1. What has to exist (driver side)
 
@@ -447,7 +448,7 @@ On the Windows host next:
    Vibepollo PR (`vhf_steam`, touchpad index + capability plumbing, the cleanup fix is already on
    `fix/vhf-gamepad-cleanup-pnputil-wow64`) once a Nonary driver release carries the profile.
 
-### 7.9 Linux session 2026-10-08: circle-step burst fix, CI repaired (pick up here)
+### 7.9 Linux session 2026-10-08: circle-step burst fix, CI repaired
 
 State when this session ended (branch `feat/steam-controller-profile` = 5f75c05; no new beta tag,
 nothing merged upstream; last prerelease is still `v0.1.0-beta.105` = edb2d38, which predates
@@ -486,6 +487,47 @@ Next on the Windows host, in order:
    stick-touch bit 26/27 or any pad touch) behind a preference.
 3. When both pass: `Collect-Evidence.ps1`, then the upstream PRs (§7.8 step 4).
 
+### 7.10 Windows session 2026-10-09: grips and stick touch over the stream, keep-alive cadence, full-scale sticks (pick up here)
+
+State when this session ended (branch `feat/steam-controller-profile` = 01ea7fc; prerelease
+`v0.1.0-beta.106` = 4e60d70; the garage host runs the 0.1.0.101 test package = 4dc591d; Vibepollo PRs
+#1 and #2 open, pinned to beta.106; Moonlight fork.25 released, fork.26 = PR #47 awaiting the
+stream test; nothing merged upstream):
+- **Grips and stick touch now light on Steam's test screen over the stream.** Grips were dark
+  because Vibepollo's `supported_button_mask` (`vhf_gamepad_policy.h`) lacked the grip-touch bits and
+  `make_input_state` ANDs the button word with it (Vibepollo PR #1, 875d176b). The BLE stick-touch
+  bits (20/24) were never forwarded and the driver guessed touch from deflection: now
+  `LI_CCAP_STICK_TOUCH` (0x400) with `LEFT/RIGHT_STICK_TOUCH_FLAG` (common-c 0b1d3ec, fork.25,
+  Vibepollo PR #2, driver 4e60d70 `stick_touch_explicit`).
+- Vibepollo CI guard: "Fetch pinned VHF producer release" throws unless the
+  `third-party/libvirtualgamepad` gitlink equals the pinned `VHF_SOURCE_REVISION`. New driver
+  headers need a driver release tag first, then `Update-VibepolloDriverPins.py --tag`.
+- **Keep-alive cadence.** `probe_sc26_usb --monitor` during a stream showed ~115 reports/s with
+  16..19 ms gaps on 0.1.0.98. A UMDF `WDFTIMER` fires on the system clock interrupt (15.6 ms)
+  unless some process has raised the timer resolution; the probe does (`timeBeginPeriod(1)`), so
+  every probe run ticked at 4 ms and no stream ever did. `WDF_TIMER_CONFIG::UseHighResolutionTimer`
+  is KMDF-only: adef7b3 silently ran with no keep-alive at all (exactly the 67 BLE packets/s).
+  4dc591d moves the keep-alive to a worker thread on a `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`
+  waitable timer: `--monitor` now shows ~245/s with an 8 ms worst gap.
+- **Circle step, root cause found.** With the cadence fixed the stream still stalled, and the probe
+  gained `--scale S` (magnification of the clipped shape) and `--clip N` (largest axis value).
+  `--hold --circle 1 --rate 120 --update 66 --scale 1.15 --turn 0.5` (the stream's shape, update
+  rate and turn speed) passes; the same run with `--clip 32766` stalls. Steam waits for the stick
+  to sit at exact ±32767, and Moonlight's `reportControllerState` scaled sticks by `0x7FFE`, so a
+  fully pushed stick arrived as 32766 on every build so far (fork.21's rim stretch included).
+  Fix: moonlight-android PR #47 = fork.26 (`driverStickAxis`: round(v · 0x7FFF), clamped).
+
+Next on the Windows host, in order:
+1. Sideload fork.26, stream, run Steam's controller test: the left-stick circle step is expected to
+   pass with the grips and stick touch lit. If it still stalls, `--monitor 60` during the step
+   must now show `|x| 1.00 |y| 1.00` reached at exactly 32767 (add a raw-extreme column if needed).
+2. Merge PR #47 and dispatch `release.yml` with `release_tag=v20.3.0-fork.26`. Tag
+   `v0.1.0-beta.107` at 01ea7fc (keep-alive thread, probe `--scale`/`--clip`; the owner pushes the
+   tag), `Update-VibepolloDriverPins.py --tag v0.1.0-beta.107`, Vibepollo CI with
+   `vhf_local_test_package=true`, merge Vibepollo PR #1 then #2 into `feat/steam-controller-profile`.
+3. `Collect-Evidence.ps1`, then the upstream PRs (driver first, then Vibepollo without the
+   local-test input and fork pins; the Moonlight fork stays a fork).
+
 ## 8. Field fixes after the first stream (2026-10-07)
 
 | Symptom in Steam's controller test | Cause | Fix |
@@ -509,3 +551,7 @@ Second round (2026-10-07, beta.103), from the beta.102 test on the garage host:
 | Left stick "move in a full circle" calibration step stalls | Not changed. The stick is passed through untouched (client `s16/32767`, host, driver int16); Steam's step wants the raw magnitude to reach the rim all the way round, which a physical stick's circular limit does not give on every diagonal. Still stalls on beta.104. Steam's controller test (as described by the tester 2026-10-07) runs in order: left trigger full pull, right trigger, finger across the whole left pad, whole right pad, left stick in circles ("multiple times until it registers"), right stick, every remaining button including stick and pad clicks, then A when the left haptic buzzes and A when the right one buzzes; the grips light blue whenever grip sense is detected. `probe_sc26_usb --hold` now drives exactly that sequence (whole-surface pad sweeps, three full-magnitude turns per stick, every button, automatic A on each haptic feedback event, grip flags toggling): if Steam's stick step passes with the probe, the driver is fine and the loss is upstream (the fork.20 client logs each stick's peak magnitude and angular coverage); if it stalls with the probe too, Steam wants something the virtual report lacks. RESULT 2026-10-07: the probe-driven test passed every step, so the driver and report format are cleared; over the stream the step still stalls (client log: BLE stick magnitude up to 1.18, i.e. the BLE stick is not shaped like the wired report). Client fork.21 rescales the BLE sticks to the rim and STILL stalls, although its output is a unit circle like the probe's (fork.21 log: raw axes clip at 1.00, compass peaks 1.06-1.18, i.e. the BLE values are ~1.2x over range and clipped per axis). So the shape is not what Steam objects to; `probe_sc26_usb --circle N` drives the circle step under the stream's other conditions one at a time (clipped shape, 60/s cadence, motion streaming, 100 ms gaps) and `--monitor` reads the stream's virtual controller from the host side | probe scenarios + host monitor |
 | Stick circle step: what Steam keys on (2026-10-08, probe runs at the wired unit's 250 reports/s) | A perfect unit circle whose value creeps by a tiny step on every report stalls the step at any turn speed; the wired unit's rounded square (`--circle 1`, each axis parked at full deflection) passes; a unit circle held 50 ms between steps (`--update 20`) passes; `--circle 1 --update 66` (the stream's shape and update rate) passes. Rate, motion data and gaps are innocent. The client's fork.21 rim stretch produced exactly the shape that stalls and was retired (fork.23, off by default), yet fork.24 still stalls | The one stream property the probe had not staged is the burst: Vibepollo forwards each Moonlight packet as an input state plus two motion samples, and the driver submitted a full report for each, so Steam saw three reports within a millisecond and then ~12 ms of nothing, 66 times a second (`--monitor` counted ~248/s). Motion samples are now folded into the state without submitting; `evt_sc26_tick` carries them in the next 4 ms report, so the wire is a steady cadence with the stick changing once per BLE packet. `probe_sc26_usb --rate 200 --burst 3` reproduces the old burst against the probe for comparison. Also: the probe did not compile under MSVC since `--rate` (`windows.h` `min`/`max` macros vs `std::min`/`std::max`, CI "Controller protocol tests" red), fixed with `NOMINMAX` | driver: `submit_motion_state` returns after `apply_sc26_motion` for this profile; probe: `NOMINMAX` |
 | Grips never light up on Steam's test screen (fork.24 client, 2026-10-08) | With the motion heuristic (beta.103/104 hosts) both grips read held for the whole stream, which Steam shows as not touched; with the client-only grips (fb21e41 test package) they stay released unless the client sends `LEFT/RIGHT_GRIP_TOUCH_FLAG`. SDL's Triton driver reads the grip bits (0x10000000 / 0x20000000) from the same button word on the BLE state report, so the client decodes the right bits; whether this firmware sets them over BLE is answered by the fork.22+ stream-log line `raw buttons seen 0x…… (grip touch L yes/no R yes/no)` while the controller is held | Pending the fork.24 stream log. If the BLE report never carries the bits, the client needs another source (e.g. stick or pad touch, or any input, as a grip proxy) | open |
+| Grips lit in the client log (`grip touch L yes R yes`) but never on Steam's screen (2026-10-09, fork.25 + driver 0.1.0.98) | Vibepollo's `supported_button_mask` lacked `LEFT/RIGHT_GRIP_TOUCH`; `make_input_state` ANDs the client's button word with it, so the driver never saw the bits | Vibepollo PR #1 (875d176b) adds them to the mask; confirmed lit on Steam's test screen over the stream |
+| Stick touch guessed from deflection (misses a resting thumb, reads a bumped stick as touched) | BLE button bits 20/24 (right/left stick touch) were never forwarded | `LI_CCAP_STICK_TOUCH` (0x400) + `LEFT/RIGHT_STICK_TOUCH_FLAG` on common-c 0b1d3ec, client fork.25, Vibepollo PR #2 (`platf::LEFT/RIGHT_STICK_TOUCH`), driver 4e60d70 (`button_mask::left/right_stick_touch`; the first bit seen turns the deflection heuristic off) |
+| Wire ~115 reports/s with 16..19 ms gaps over a stream (`--monitor`, driver 0.1.0.98) while every probe run saw ~250/s | A UMDF `WDFTIMER` fires on the system clock interrupt, 15.6 ms unless a process raised the timer resolution; the probe's `timeBeginPeriod(1)` masked it. `UseHighResolutionTimer` is KMDF-only, so adef7b3 silently had no keep-alive (67/s) | 4dc591d: keep-alive worker thread on a `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION` waitable timer (plain waitable timer before Windows 10 1803), started by the first input state, joined by the stop paths; `--monitor` shows ~245/s, 8 ms worst gap |
+| Left-stick circle step stalls over a stream although rate, update rate, shape, turn speed, grips and stick touch all match a passing probe run | Steam waits for the stick to sit at exact ±32767. Moonlight's `reportControllerState` scaled sticks by `0x7FFE`, so a fully pushed stick arrived as 32766 on every client build (`probe --circle 1 ... --clip 32766` stalls the step; 32767 passes) | moonlight-android PR #47 = fork.26: `driverStickAxis` scales by `0x7FFF`, rounds and clamps to ±32767 on the USB/BLE driver path |
