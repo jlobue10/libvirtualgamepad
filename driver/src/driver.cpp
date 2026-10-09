@@ -812,6 +812,21 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
     return STATUS_INVALID_PARAMETER;
   }
 
+  if (is_steam_controller(slot->selected_profile)) {
+    // A streaming client sends an input state plus a gyro and an accelerometer
+    // sample per controller packet (Moonlight: three IOCTLs within a millisecond,
+    // then nothing until the next 15 ms BLE interval). Submitting a full report
+    // for each produced three reports in a burst and a ~12 ms hole, whereas the
+    // wired unit streams one report every 4 ms with the IMU folded in. The
+    // sample is folded into the state here; evt_sc26_tick (4 ms) carries it in
+    // the next scheduled report, so the wire cadence stays even. Steam's stick
+    // "full circle" calibration step stalled over the stream and passed against
+    // the probe at the same rate and value cadence; the burst timing was the
+    // one stream property left (2026-10-08, probe --burst stages it).
+    unlock_lifetime(context);
+    return STATUS_SUCCESS;
+  }
+
   status = submit_profile_report(context, *slot);
   unlock_lifetime(context);
   return status;
