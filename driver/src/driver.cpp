@@ -2073,6 +2073,12 @@ NTSTATUS evt_device_add(WDFDRIVER, PWDFDEVICE_INIT device_init) {
   // Steam Controller keep-alive cadence; same optional footing as the effect clock.
   WDF_TIMER_CONFIG sc26_timer_config;
   WDF_TIMER_CONFIG_INIT_PERIODIC(&sc26_timer_config, evt_sc26_tick, k_sc26_tick_ms);
+  // A plain periodic timer fires on the system clock interrupt, 15.6 ms unless some
+  // process has raised the timer resolution. The probe does (timeBeginPeriod(1)), a
+  // streaming host does not, so over a stream the 4 ms keep-alive ran at ~64 Hz and
+  // the wire fell to ~115 reports/s with 16..19 ms gaps where the unit sends a steady
+  // 250/s. A high-resolution timer (KMDF 1.13+) keeps the cadence on its own.
+  sc26_timer_config.UseHighResolutionTimer = WdfTrue;
   sc26_timer_config.AutomaticSerialization = FALSE;
   WDF_OBJECT_ATTRIBUTES sc26_timer_attributes;
   WDF_OBJECT_ATTRIBUTES_INIT(&sc26_timer_attributes);
