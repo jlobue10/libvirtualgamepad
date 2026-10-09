@@ -1746,6 +1746,14 @@ bool sc26_keepalive_tick(device_context *const context) noexcept {
         continue;
       }
       any_active = true;
+      if (!slot.pump.ready()) {
+        // VHF has no read pending (Steam closed the handle, or the HID child is
+        // still starting): an encode would only overwrite the latest snapshot the
+        // readiness callback drains later. Move the cadence clock so the timer
+        // keeps idling at the tick instead of firing at once.
+        slot.sc26.last_report_us = now;
+        continue;
+      }
       if (now >= slot.sc26.last_report_us && now - slot.sc26.last_report_us >= k_sc26_resend_after_us) {
         lvg::driver::sc26_tick(&slot.sc26, now);
         const auto report = lvg::driver::encode_sc26_input(slot.last_input, &slot.sc26);
@@ -1938,6 +1946,10 @@ void evt_vhf_get_input_report(
           sc26_tick(&slot->sc26, now_us());
           const sc26_input_report report = encode_sc26_input(slot->last_input, &slot->sc26);
           std::memcpy(buffer, &report, sizeof(report));
+          // Number it like the read stream does (stamp_sc26_sequence), not with the
+          // encoder's own counter: an app mixing HidD_GetInputReport with reads
+          // should see one consecutive sequence. Peek only; the next read stamps it.
+          buffer[1] = slot->sc26_wire_sequence;
           length = sizeof(report);
           report_id = k_sc26_input_report_id;
           break;
