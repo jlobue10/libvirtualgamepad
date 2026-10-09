@@ -1775,19 +1775,24 @@ bool sc26_keepalive_tick(device_context *const context) noexcept {
 
 // Caller holds state_lock. Schedule the earliest per-controller deadline:
 // traffic from one controller must not postpone another controller's reports.
+// Each controller is due k_sc26_tick_ms after its own last report, so the wire
+// keeps the real unit's 4 ms cadence; the tick's lower k_sc26_resend_after_us
+// threshold only tolerates an early wake. A controller that is already late
+// fires the timer at once.
 void arm_sc26_keepalive(device_context *const context) noexcept {
   if (context->sc26_keepalive_timer == nullptr || !context->sc26_timer_running) {
     return;
   }
+  constexpr std::uint64_t tick_us = static_cast<std::uint64_t>(k_sc26_tick_ms) * 1000;
   const std::uint64_t now = now_us();
-  std::uint64_t delay_us = k_sc26_resend_after_us;
+  std::uint64_t delay_us = tick_us;
   for (const auto &slot : context->controllers) {
     if (slot.state != slot_state::active || !is_steam_controller(slot.selected_profile) ||
         slot.vhf == nullptr || !slot.have_last_input) {
       continue;
     }
     const std::uint64_t elapsed = now >= slot.sc26.last_report_us ? now - slot.sc26.last_report_us : 0;
-    const std::uint64_t remaining = elapsed >= k_sc26_resend_after_us ? 1 : k_sc26_resend_after_us - elapsed;
+    const std::uint64_t remaining = elapsed >= tick_us ? 1 : tick_us - elapsed;
     delay_us = (std::min)(delay_us, remaining);
   }
   LARGE_INTEGER due {};

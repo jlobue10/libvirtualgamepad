@@ -47,7 +47,8 @@ struct controller_slot {slot_state state=slot_state::active; int selected_profil
  lvg::driver::sc26_state sc26; int submits_in_flight=0;};
 struct device_context {controller_slot controllers[2]; bool stopping=false,sc26_timer_running=true;
  HANDLE sc26_keepalive_timer=(void*)1,sc26_keepalive_thread=nullptr,sc26_keepalive_stop=(void*)1;};
-constexpr uint64_t k_sc26_resend_after_us=4000; constexpr int k_sc26_tick_ms=4;
+// The driver's values: a 4 ms tick, resent when at least 3 ms old (early-wake tolerance).
+constexpr uint64_t k_sc26_resend_after_us=3000; constexpr int k_sc26_tick_ms=4;
 uint64_t clock_us=0; long long timer_due=0; bool locked=false,inspect_release=false,protected_release=false;
 int submitted=0; device_context *joining=nullptr;
 uint64_t now_us(){return clock_us;} bool is_steam_controller(int p){return p==1;}
@@ -72,7 +73,10 @@ void SetThreadPriority(HANDLE,int){}
 suffix = r'''
 int main(){int failures=0;
  auto check=[&](bool ok,const char* text){printf("%s %s\n",ok?"PASS":"FAIL",text);failures+=!ok;};
- device_context c;clock_us=3000;c.controllers[0].sc26.last_report_us=3000;
+ device_context c;clock_us=3000;c.controllers[0].sc26.last_report_us=3000;c.controllers[1].sc26.last_report_us=3000;
+ lock_context(&c);arm_sc26_keepalive(&c);unlock_context(&c);
+ check(timer_due==-40000,"a fresh report arms the full 4ms tick, not the early-wake threshold");
+ c.controllers[1].sc26.last_report_us=0;
  lock_context(&c);arm_sc26_keepalive(&c);unlock_context(&c);
  check(timer_due==-10000,"busy controller preserves idle controller's 4ms deadline");
  clock_us=8000;inspect_release=true;sc26_keepalive_tick(&c);
