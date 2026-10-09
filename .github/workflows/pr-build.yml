@@ -12,6 +12,16 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+      - name: Test production keep-alive scheduling and lifetime under ASan/UBSan
+        run: python3 driver/tests/test_sc26_keepalive.py
+
   driver:
     runs-on: windows-2022
     timeout-minutes: 30

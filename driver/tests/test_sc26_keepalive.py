@@ -5,6 +5,7 @@ Tests scheduling/lifetime logic, not WDK compatibility or real timer precision.
 Pass --baseline to compare against the checked-out commit before local edits.
 """
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -22,13 +23,21 @@ def function(signature):
         depth += (source[end] == '{') - (source[end] == '}')
     return source[start:end+1]
 
+def constant(name):
+    # Copy the real timing values as well as the real functions. A fake that
+    # equates the early-wake threshold with the tick can hide cadence bugs.
+    match = re.search(r'^constexpr [^\n]*\b' + re.escape(name) + r'\s*=[^\n]*;', source, re.MULTILINE)
+    if match is None:
+        raise ValueError('Production constant not found: ' + name)
+    return match.group(0)
+
 prefix = r'''
 #include <algorithm>
 #include <cstdint>
 #include <tuple>
 #include <cstdio>
 #include <cassert>
-using HANDLE=void*; using VHFHANDLE=void*; using LONGLONG=long long;
+using HANDLE=void*; using VHFHANDLE=void*; using LONGLONG=long long; using LONG=std::int32_t;
 using NTSTATUS=int; struct LARGE_INTEGER{long long QuadPart;};
 #define FALSE 0
 #define INFINITE 0xffffffff
@@ -47,8 +56,7 @@ struct controller_slot {slot_state state=slot_state::active; int selected_profil
  lvg::driver::sc26_state sc26; int submits_in_flight=0;};
 struct device_context {controller_slot controllers[2]; bool stopping=false,sc26_timer_running=true;
  HANDLE sc26_keepalive_timer=(void*)1,sc26_keepalive_thread=nullptr,sc26_keepalive_stop=(void*)1;};
-// The driver's values: a 4 ms tick, resent when at least 3 ms old (early-wake tolerance).
-constexpr uint64_t k_sc26_resend_after_us=3000; constexpr int k_sc26_tick_ms=4;
+// PRODUCTION_TIMING_CONSTANTS
 uint64_t clock_us=0; long long timer_due=0; bool locked=false,inspect_release=false,protected_release=false;
 int submitted=0; device_context *joining=nullptr;
 uint64_t now_us(){return clock_us;} bool is_steam_controller(int p){return p==1;}
@@ -89,6 +97,8 @@ signatures = [
  'bool sc26_keepalive_tick(device_context *const context) noexcept',
  'void arm_sc26_keepalive(device_context *const context) noexcept',
  'void start_sc26_keepalive(device_context *const context) noexcept']
+prefix = prefix.replace('// PRODUCTION_TIMING_CONSTANTS', '\n'.join(
+    constant(name) for name in ('k_sc26_tick_ms', 'k_sc26_resend_after_us')))
 with tempfile.TemporaryDirectory(prefix='sc26-keepalive-') as directory:
     work = pathlib.Path(directory)
     (work/'test.cpp').write_text(prefix+'\n'.join(map(function, signatures))+suffix)
