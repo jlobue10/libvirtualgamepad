@@ -82,6 +82,11 @@ enum button_mask : std::uint32_t {
   // Controller (2026), not buttons. Ignored by every other profile.
   left_grip_touch = 0x400000u,
   right_grip_touch = 0x800000u,
+  // Moonlight extension (LI_CCAP_STICK_TOUCH): capacitive touch of the Steam
+  // Controller (2026) sticks, held rather than pressed. Without them the driver
+  // derives stick touch from deflection. Ignored by every other profile.
+  left_stick_touch = 0x1000000u,
+  right_stick_touch = 0x2000000u,
 };
 
 enum class feedback_type : std::uint16_t {

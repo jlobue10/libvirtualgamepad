@@ -15,6 +15,7 @@ void sc26_state::reset() noexcept {
   last_motion_us = 0;
   last_report_us = 0;
   grip_explicit = false;
+  stick_touch_explicit = false;
 }
 
 const std::uint8_t *sc26_descriptor(std::size_t *const size) noexcept {
@@ -80,12 +81,30 @@ std::uint32_t sc26_buttons(const std::uint32_t buttons, const sc26_state &state)
   return out;
 }
 
+// Stick touch from the client (LI_CCAP_STICK_TOUCH) is carried as two button bits.
+// The first one seen turns the deflection heuristic off for good: from then on a
+// stick reads touched exactly when the client says so, including a thumb resting
+// on a centred stick, which the real unit reports and the heuristic cannot.
+static void apply_client_stick_touch(const std::uint32_t buttons, sc26_state *const state) noexcept {
+  constexpr std::uint32_t stick_touch_bits =
+    button_mask::left_stick_touch | button_mask::right_stick_touch;
+  if ((buttons & stick_touch_bits) != 0) {
+    state->stick_touch_explicit = true;
+    state->device.stick_touch_from_deflection = false;
+  }
+  if (state->stick_touch_explicit) {
+    state->device.stick_touch[0] = (buttons & button_mask::left_stick_touch) != 0;
+    state->device.stick_touch[1] = (buttons & button_mask::right_stick_touch) != 0;
+  }
+}
+
 sc26_input_report encode_sc26_input(
   const input_state_request &input,
   sc26_state *const state) noexcept {
   if (state == nullptr) {
     sc26_state scratch {};
     scratch.reset();
+    apply_client_stick_touch(input.buttons, &scratch);
     return sc::encode_input(sc26_buttons(input.buttons, scratch), input.left_x, input.left_y,
                             input.right_x, input.right_y, input.left_trigger,
                             input.right_trigger, scratch.device);
@@ -102,6 +121,7 @@ sc26_input_report encode_sc26_input(
     state->device.grip_touch[0] = (input.buttons & button_mask::left_grip_touch) != 0;
     state->device.grip_touch[1] = (input.buttons & button_mask::right_grip_touch) != 0;
   }
+  apply_client_stick_touch(input.buttons, state);
   return sc::encode_input(sc26_buttons(input.buttons, *state), input.left_x, input.left_y,
                           input.right_x, input.right_y, input.left_trigger, input.right_trigger,
                           state->device);

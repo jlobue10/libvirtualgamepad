@@ -154,6 +154,18 @@ int main() {
     const auto *b3 = reinterpret_cast<const std::uint8_t *>(&r3);
     check((ule32(b3 + 2) & (btn_left_grip_touch | btn_right_grip_touch)) == btn_right_grip_touch,
           "grips are reported per side");
+
+    // Client-reported stick touch replaces the deflection heuristic: a touched centred
+    // left stick reads touched, a deflected right stick without the bit does not.
+    st.stick_touch_from_deflection = false;
+    st.stick_touch[0] = true;
+    const input_report r4 = encode_input(0, 0, 0, 20000, 0, 0, 0, st);
+    const auto *b4 = reinterpret_cast<const std::uint8_t *>(&r4);
+    check((ule32(b4 + 2) & btn_left_stick_touch) != 0, "client stick touch sets the left stick bit");
+    check((ule32(b4 + 2) & btn_right_stick_touch) == 0,
+          "deflection no longer implies touch once the client reports it");
+    st.stick_touch[0] = false;
+    st.stick_touch_from_deflection = true;
   }
 
   // Pad axis conventions (SDL: x = raw/65536 + 0.5, y = -raw/65536 + 0.5).

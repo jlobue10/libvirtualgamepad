@@ -931,6 +931,32 @@ int main() {
       state.reset();
     }
 
+    // Stick touch: derived from deflection until the client sends a stick-touch bit,
+    // then explicit for good (a thumb resting on a centred stick reads touched).
+    {
+      input_state_request in {};
+      in.left_x = 20000;
+      auto rep = encode_sc26_input(in, &state);
+      check((rep.buttons & lvg::sc26_usb::btn_left_stick_touch) != 0,
+            "sc26 deflected stick counts as touched before any client touch bit");
+      in.left_x = 0;
+      in.buttons = button_mask::right_stick_touch;
+      rep = encode_sc26_input(in, &state);
+      check((rep.buttons & (lvg::sc26_usb::btn_left_stick_touch | lvg::sc26_usb::btn_right_stick_touch)) ==
+              lvg::sc26_usb::btn_right_stick_touch,
+            "sc26 explicit right stick touch from the client");
+      in.buttons = 0;
+      in.left_x = 20000;
+      rep = encode_sc26_input(in, &state);
+      check((rep.buttons & (lvg::sc26_usb::btn_left_stick_touch | lvg::sc26_usb::btn_right_stick_touch)) == 0,
+            "sc26 deflection no longer implies touch once the client reports it");
+      state.reset();
+      rep = encode_sc26_input(in, &state);
+      check((rep.buttons & lvg::sc26_usb::btn_left_stick_touch) != 0,
+            "sc26 reset restores the deflection heuristic");
+      state.reset();
+    }
+
     // The single protocol click flag lands on the touched pad(s).
     check(sc26_buttons(button_mask::touchpad, state) == lvg::sc26_usb::btn_right_pad_click,
           "sc26 pad click with no touch goes to the right pad");

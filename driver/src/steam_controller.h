@@ -41,6 +41,9 @@ struct sc26_state {
   // from then on the grips follow the client. Until then they read released;
   // there is no motion-based guess (it held both grips for the whole session).
   bool grip_explicit {};
+  // Same for the stick-touch bits (button_mask::left/right_stick_touch): the first one
+  // seen turns the deflection heuristic off and the sticks' touch follows the client.
+  bool stick_touch_explicit {};
 
   void reset() noexcept;
 };

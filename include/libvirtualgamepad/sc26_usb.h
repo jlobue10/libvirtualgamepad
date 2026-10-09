@@ -509,6 +509,10 @@ struct state {
   // both from motion activity (a controller that is streaming motion is in
   // someone's hands).
   bool grip_touch[2] {};
+  // Capacitive stick touch (left, right) from a client with LI_CCAP_STICK_TOUCH.
+  // Used only once stick_touch_from_deflection is off; until then a deflected
+  // stick counts as touched (the real unit reports touch with the thumb resting).
+  bool stick_touch[2] {};
   bool pad_touched[2] {};
   std::uint16_t pad_x[2] {};
   std::uint16_t pad_y[2] {};
@@ -566,6 +570,8 @@ inline constexpr std::int32_t stick_touch_deflection = 3276;
   if (st.pad_touched[1]) bits |= btn_right_pad_touch;
   if (st.grip_touch[0]) bits |= btn_left_grip_touch;
   if (st.grip_touch[1]) bits |= btn_right_grip_touch;
+  if (st.stick_touch[0]) bits |= btn_left_stick_touch;
+  if (st.stick_touch[1]) bits |= btn_right_stick_touch;
   if (st.stick_touch_from_deflection) {
     const auto deflected = [](const std::int16_t x, const std::int16_t y) {
       const std::int32_t ax = x < 0 ? -static_cast<std::int32_t>(x) : x;
