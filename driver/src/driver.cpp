@@ -187,6 +187,7 @@ EVT_WDF_OBJECT_CONTEXT_CLEANUP evt_device_cleanup;
 void start_sc26_keepalive(device_context *context) noexcept;
 void stop_sc26_keepalive(device_context *context) noexcept;
 void arm_sc26_keepalive(device_context *context) noexcept;
+void wait_for_submits(device_context *context, controller_slot &slot) noexcept;
 
 // Defined below with the PlayStation submit helpers; create_controller needs it
 // to decide whether to register the feature-report callbacks.
