@@ -70,8 +70,9 @@ void sc26_tick(sc26_state *state, std::uint64_t now_us) noexcept;
                                      std::uint64_t now_us) noexcept;
 [[nodiscard]] bool apply_sc26_battery(const battery_state_request &battery, sc26_state *state) noexcept;
 
-// Output reports 0x80 (rumble) and 0x81 (pulse) become a generic_rumble
-// feedback event. Returns false for other reports.
+// Haptic output reports 0x80..0x85 become a steam_haptic feedback event that
+// carries the report verbatim (the host renders or replays it). Returns false
+// for anything else, including the 0x86..0x89 reports of unknown purpose.
 [[nodiscard]] bool apply_sc26_output(
   const std::uint8_t *data,
   std::size_t size,

@@ -379,6 +379,17 @@ int main() {
     std::uint8_t other[10] {haptic_lfo_id};
     check(!decode_haptic_output(other, sizeof(other), r), "LFO report is not rumble");
     check(!decode_haptic_output(out, 5, r), "short rumble report refused");
+
+    std::uint8_t ack[6] {};
+    check(encode_haptic_ack(stop, sizeof(stop), ack, sizeof(ack)) == 6 && ack[0] == haptic_ack_report_id &&
+            ack[1] == 0x03 && ack[2] == 0x02 && ack[3] == 0 && ack[4] == 0 && ack[5] == 0,
+          "zero-repeat pulse on side 1 is answered with 44 03 02 00 00 00");
+    std::uint8_t stop0[8] {haptic_pulse_id, 0, 0, 0, 0, 0, 0, 0};
+    check(encode_haptic_ack(stop0, sizeof(stop0), ack, sizeof(ack)) == 6 && ack[1] == 0x04,
+          "zero-repeat pulse on side 0 is answered with 44 04 02 00 00 00");
+    check(encode_haptic_ack(click, sizeof(click), ack, sizeof(ack)) == 0, "a real pulse is not answered");
+    check(encode_haptic_ack(command, sizeof(command), ack, sizeof(ack)) == 0, "a haptic command is not answered");
+    check(encode_haptic_ack(stop, sizeof(stop), ack, 5) == 0, "ack needs a 6-byte buffer");
   }
 
   if (failures == 0) std::printf("PASS: sc26 usb contract\n");

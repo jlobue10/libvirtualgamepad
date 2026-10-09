@@ -914,4 +914,25 @@ struct rumble {
   return false;
 }
 
+// The unit answers a zero-repeat pulse (Steam's per-side "stop") with a 6-byte
+// 0x44 report: 44 04 02 00 00 00 for side 0, 44 03 02 00 00 00 for side 1
+// (captures/sc26-steam-interrupt.tsv; other haptic reports get no answer).
+// Writes that report to `ack` and returns its size, or 0 when `data` is not
+// such a pulse.
+[[nodiscard]] inline std::size_t encode_haptic_ack(const std::uint8_t *data, const std::size_t size,
+                                                   std::uint8_t *ack, const std::size_t capacity) noexcept {
+  if (data == nullptr || ack == nullptr || capacity < 6 || size < haptic_pulse_report_size ||
+      data[0] != haptic_pulse_id) {
+    return 0;
+  }
+  if (get_le16(data + 2) != 0 || get_le16(data + 4) != 0 || get_le16(data + 6) != 0) {
+    return 0;
+  }
+  ack[0] = haptic_ack_report_id;
+  ack[1] = data[1] == 0 ? 0x04 : 0x03;
+  ack[2] = 0x02;
+  ack[3] = ack[4] = ack[5] = 0;
+  return 6;
+}
+
 }  // namespace lvg::sc26_usb

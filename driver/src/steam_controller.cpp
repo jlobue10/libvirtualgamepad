@@ -231,19 +231,25 @@ bool apply_sc26_output(
   const std::uint32_t controller_id,
   sc26_state *const state,
   feedback_event *const event) noexcept {
-  if (state == nullptr || event == nullptr) {
+  if (state == nullptr || event == nullptr || data == nullptr || size < 2 ||
+      !sc::is_output_report(data[0]) || data[0] > sc::haptic_script_id) {
     return false;
   }
-  if (!sc::decode_haptic_output(data, size, state->rumble)) {
+  const std::size_t declared = sc::report_size(data[0]);
+  const std::size_t length = size < declared ? size : declared;
+  steam_haptic_feedback payload {};
+  if (length > sizeof(payload.report)) {
     return false;
   }
+  // Keep the per-side rumble totals current for anyone reading the state.
+  static_cast<void>(sc::decode_haptic_output(data, size, state->rumble));
+  payload.length = static_cast<std::uint8_t>(length);
+  std::memcpy(payload.report, data, length);
   *event = {};
   event->header.size = sizeof(*event);
   event->header.version = k_protocol_version;
   event->controller_id = controller_id;
-  // Rumble-only: a haptic report says nothing about a light.
-  event->type = feedback_type::generic_rumble;
-  const generic_rumble_rgb_feedback payload {state->rumble.left, state->rumble.right, 0, 0, 0, 0};
+  event->type = feedback_type::steam_haptic;
   event->payload_size = sizeof(payload);
   std::memcpy(event->payload, &payload, sizeof(payload));
   return true;

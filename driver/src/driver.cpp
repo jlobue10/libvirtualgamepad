@@ -1194,6 +1194,8 @@ void evt_vhf_write_report(
   if (slot != nullptr && slot->parent != nullptr && transfer != nullptr &&
       is_steam_controller(slot->selected_profile)) {
     auto *const context = slot->parent;
+    std::uint8_t ack[6] {};
+    std::size_t ack_size = 0;
     lock_context(context);
     if (context->stopping || slot->state != slot_state::active) {
       status = STATUS_DEVICE_NOT_READY;
@@ -1202,22 +1204,33 @@ void evt_vhf_write_report(
       if (transfer->reportBuffer != nullptr &&
           lvg::driver::apply_sc26_output(transfer->reportBuffer, transfer->reportBufferLen,
                                          slot->controller_id, &slot->sc26, &event)) {
+        // One pending slot per controller: a newer haptic report replaces an
+        // older one the host has not collected yet, as the actuator state would.
         slot->feedback = event;
-        slot->feedback_pending = true;  // Coalesce to the current actuator state.
+        slot->feedback_pending = true;
+        ack_size = lvg::sc26_usb::encode_haptic_ack(transfer->reportBuffer, transfer->reportBufferLen,
+                                                    ack, sizeof(ack));
         status = STATUS_SUCCESS;
       } else if (transfer->reportBuffer != nullptr && transfer->reportBufferLen > 0 &&
                  lvg::sc26_usb::is_output_report(transfer->reportBuffer[0])) {
-        // Haptic command (Steam sends 0x82 with every UI click), LFO, sweep,
-        // script or one of the 0x86..0x89 reports the real descriptor declares:
-        // nothing to render on a client actuator, but refusing them would make
-        // Steam log write failures.
+        // One of the 0x86..0x89 reports the real descriptor declares (purpose
+        // unknown, never seen): nothing to forward, but refusing them would
+        // make Steam log write failures.
         status = STATUS_SUCCESS;
       } else {
         status = STATUS_INVALID_PARAMETER;
       }
     }
+    const VHFHANDLE vhf = slot->vhf;
     unlock_context(context);
 
+    // The unit answers a stop pulse on the input pipe. Submitting from inside
+    // the callback is safe without the lifetime gate (see the Switch reply below).
+    if (ack_size != 0 && vhf != nullptr) {
+      std::ignore = pump_report(context, *slot, ack, static_cast<ULONG>(ack_size),
+                                lvg::sc26_usb::haptic_ack_report_id,
+                                lvg::driver::report_kind::transition);
+    }
     if (operation_handle != nullptr) {
       VhfAsyncOperationComplete(operation_handle, status);
     }

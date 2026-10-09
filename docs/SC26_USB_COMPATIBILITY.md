@@ -59,7 +59,7 @@ Interrupt traffic in the same capture:
 | --- | --- | --- | --- |
 | 0x42 state | in | 29 953 | 54 bytes, ~250 Hz, sequence byte increments by 1; buttons u32 at offset 2 used all 30 bits; triggers 0..32767 at 6/8; sticks at 10..16; pads at 18..28; microsecond timestamp at 30 (3.8 ms steps); accel at 34/36/38 with 1 g on Z at rest; gyro at 40/42/44; quaternion at 46 constant identity (32767, 0, 0, 0) |
 | 0x43 battery | in | 34 | every ~3.5 s: `04 64` (done, 100 %), 4122 mV cell, 4160 mV system, 4980 mV input, 157 mA, 239 mA, temperature 0x76ED |
-| 0x44 | in | 42 | 6 bytes, one after every haptic output report (`04 02 00..` / `03 02 00..`) |
+| 0x44 | in | 42 | 6 bytes, one after each zero-repeat 0x81 pulse (Steam's per-side stop): `04 02 00..` for side 0, `03 02 00..` for side 1; no answer to other haptic reports |
 | 0x40 / 0x41 | in | 3 each | lizard-mode mouse and keyboard, all zero |
 | 0x81 pulse | out | 96 | 8 bytes. Steam's UI click is `81 <side> 90 01 00 00 01 00` (400 us on, repeat 1) followed by all-zero stop reports; pairs 0.7 ms apart, bursts every 11 to 20 ms |
 | 0x82 command | out | 66 | 4 bytes: `82 <side> 02 F2` or `82 <side> 01 FD` |
@@ -77,11 +77,12 @@ Interrupt traffic in the same capture:
 | 0xED keyed values | `esb/bond` answers `00` (no bonded puck); other keys answer empty | same |
 | 0xC1, 0xDC, 0xE2 | acknowledged, no reply payload, not counted as unknown | same |
 | Unknown commands | acknowledged with an empty reply and counted (`feature_state.unknown_commands`) | same |
-| Output 0x80 rumble, 0x81 pulse | decoded into a `generic_rumble` feedback event (pulse duty cycle becomes a magnitude) | `apply_sc26_output` |
+| Output 0x80 rumble, 0x81 pulse, 0x82 command, 0x83 LFO, 0x84 sweep, 0x85 script | forwarded verbatim as a `steam_haptic` feedback event (beta.108); the host replays it on a client with the real pads or renders rumble from it (`vhf_gamepad_policy.cpp` `synthesize_steam_rumble`) | `apply_sc26_output` |
 | Output 0x82..0x89 | accepted (STATUS_SUCCESS), nothing rendered | `driver.cpp` write path |
 | Input 0x42 | 54 bytes at hid-steam's Ibex offsets, sequence byte, identity quaternion | `sc26_usb::encode_input` |
 | Input 0x43 | battery figures shaped like the unit's | `sc26_usb::encode_battery` |
-| Input 0x40, 0x41, 0x44, 0x45, 0x79, 0x7B | never sent (lizard mode off, no BLE, no haptic acks) | n/a |
+| Input 0x44 | sent after each zero-repeat 0x81 pulse, as the unit does (`encode_haptic_ack`) | `evt_vhf_write_report` |
+| Input 0x40, 0x41, 0x45, 0x79, 0x7B | never sent (lizard mode off, no BLE) | n/a |
 
 ## Capability table
 
@@ -94,7 +95,7 @@ Interrupt traffic in the same capture:
 | Motion | accelerometer and gyroscope at SDL scaling, device axes | quaternion fixed at identity, as on the real unit |
 | Battery | report 0x43 with level and charge state | emitted on battery updates |
 | LEDs | none | the controller has no host-controlled LED |
-| Rumble | 0x80 rumble and 0x81 pulse → `generic_rumble` | 0x82..0x89 accepted, not rendered |
+| Rumble / haptics | 0x80..0x85 → `steam_haptic` (verbatim) | 0x86..0x89 accepted, not forwarded |
 | Trigger rumble | none | not a feature of the device |
 | Feature reports | report 1 control channel as above; report 2 declared, never used by Steam | the driver refuses Get/SetFeature on report 2 |
 

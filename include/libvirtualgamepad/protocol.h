@@ -106,6 +106,12 @@ enum class feedback_type : std::uint16_t {
   // adaptive trigger programs, player LEDs, and microphone LED. One report
   // carries all of it, so one event does too.
   playstation_output = 5,
+  // A Steam Controller (2026) haptic output report exactly as the host wrote
+  // it (steam_haptic_feedback): 0x80 rumble, 0x81 pulse, 0x82 command, 0x83
+  // LFO, 0x84 sweep or 0x85 script. Steam's UI drives the pads with 0x81 and
+  // 0x82, games with 0x80. A client with the real pads replays the report; one
+  // without renders rumble from it.
+  steam_haptic = 6,
 };
 
 // DualSense adaptive trigger modes, as the console's output report encodes them.
@@ -292,6 +298,14 @@ inline constexpr std::uint8_t ps_output_triggers_valid = 0x02;
 inline constexpr std::uint8_t ps_output_player_leds_valid = 0x04;
 inline constexpr std::uint8_t ps_output_microphone_led_valid = 0x08;
 
+// The report id first, then the payload the descriptor declares for it; at most
+// 10 bytes on the wire (sc26_usb::report_size).
+struct steam_haptic_feedback {
+  std::uint8_t length;  // bytes valid in report, id included
+  std::uint8_t reserved[3];
+  std::uint8_t report[12];
+};
+
 struct raw_hid_report_feedback {
   raw_hid_operation operation;
   std::uint8_t report_id;
@@ -324,6 +338,7 @@ static_assert(sizeof(xbox_rumble_feedback) == 8);
 static_assert(sizeof(raw_hid_report_feedback) == 16);
 static_assert(sizeof(trigger_effect_feedback) == 11);
 static_assert(sizeof(playstation_output_feedback) == 32);
+static_assert(sizeof(steam_haptic_feedback) == 16);
 // Exactly fills the payload; anything larger needs another version bump.
 static_assert(sizeof(playstation_output_feedback) <= sizeof(feedback_event::payload));
 static_assert(sizeof(feedback_event) == 48);
