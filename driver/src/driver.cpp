@@ -1723,61 +1723,74 @@ void evt_pid_tick(WDFTIMER timer) {
   }
 }
 
-// Keeps every active Steam Controller slot streaming at the real unit's cadence
-// while the client is quiet. Runs without the lifetime gate, like evt_pid_tick;
-// submit_profile_report checks the slot state under state_lock itself.
-// One keep-alive pass: resends the state of every active Steam Controller whose
-// last report is older than k_sc26_resend_after_us. Returns false once no Steam
-// Controller is active or the device is stopping; the worker exits on that.
+// Capture each keep-alive under state_lock, including its VHF handle and
+// in-flight reference. A slot must not be destroyed/reused between selection
+// and submission; callbacks cannot take lifetime_gate because VhfDelete waits
+// for them while holding that gate.
 bool sc26_keepalive_tick(device_context *const context) noexcept {
-  controller_slot *due[lvg::k_max_controllers] {};
-  std::size_t due_count = 0;
+  struct pending_submit {
+    controller_slot *slot;
+    lvg::driver::report_buffer report;
+    VHFHANDLE vhf;
+  } pending[lvg::k_max_controllers] {};
+  std::size_t count = 0;
   bool any_active = false;
   lock_context(context);
-  // Read the clock under the lock: a submit that lands between the read and
-  // the lock would otherwise look stale (unsigned wrap) and get a resend.
   const std::uint64_t now = now_us();
-  const bool stopping = context->stopping;
-  for (auto &slot : context->controllers) {
-    if (slot.state != slot_state::active || !is_steam_controller(slot.selected_profile)) {
-      continue;
-    }
-    any_active = true;
-    if (slot.have_last_input && now > slot.sc26.last_report_us &&
-        now - slot.sc26.last_report_us >= k_sc26_resend_after_us) {
-      due[due_count++] = &slot;
+  if (!context->stopping) {
+    for (auto &slot : context->controllers) {
+      if (slot.state != slot_state::active || !is_steam_controller(slot.selected_profile) ||
+          slot.vhf == nullptr || !slot.have_last_input) {
+        continue;
+      }
+      any_active = true;
+      if (now >= slot.sc26.last_report_us && now - slot.sc26.last_report_us >= k_sc26_resend_after_us) {
+        lvg::driver::sc26_tick(&slot.sc26, now);
+        const auto report = lvg::driver::encode_sc26_input(slot.last_input, &slot.sc26);
+        auto &item = pending[count];
+        bool have_next = false;
+        const auto status = pump_report_locked(context, slot, &report, sizeof(report),
+          lvg::driver::k_sc26_input_report_id, lvg::driver::report_kind::continuous,
+          &item.report, &have_next, &item.vhf);
+        if (NT_SUCCESS(status) && have_next) {
+          item.slot = &slot;
+          ++count;
+        }
+      }
     }
   }
-  const bool keep_running = any_active && !stopping;
-  if (!keep_running) {
-    context->sc26_timer_running = false;
-  } else if (due_count == 0) {
-    // Woke early, or a submit re-armed the timer just before it fired: keep
-    // the cadence going from here.
+  if (any_active) {
+    // Also re-arm when VHF is busy and reports were only queued.
     arm_sc26_keepalive(context);
+  } else {
+    context->sc26_timer_running = false;
   }
   unlock_context(context);
-
-  if (!keep_running) {
-    return false;
+  for (std::size_t i = 0; i < count; ++i) {
+    std::ignore = submit_taken(context, *pending[i].slot, pending[i].report, pending[i].vhf);
   }
-  // Each resend re-arms the timer for 4 ms after itself through the pump.
-  for (std::size_t i = 0; i < due_count; ++i) {
-    std::ignore = submit_profile_report(context, *due[i]);
-  }
-  return true;
+  return any_active;
 }
 
-// Fires the keep-alive k_sc26_tick_ms from now: called whenever a Steam
-// Controller state report goes out, so the wire carries one report every 4 ms
-// after whatever was sent last, with no double sends or 7 ms holes from a
-// free-running period. A kernel timer call, fine under state_lock.
+// Caller holds state_lock. Schedule the earliest per-controller deadline:
+// traffic from one controller must not postpone another controller's reports.
 void arm_sc26_keepalive(device_context *const context) noexcept {
   if (context->sc26_keepalive_timer == nullptr || !context->sc26_timer_running) {
     return;
   }
+  const std::uint64_t now = now_us();
+  std::uint64_t delay_us = k_sc26_resend_after_us;
+  for (const auto &slot : context->controllers) {
+    if (slot.state != slot_state::active || !is_steam_controller(slot.selected_profile) ||
+        slot.vhf == nullptr || !slot.have_last_input) {
+      continue;
+    }
+    const std::uint64_t elapsed = now >= slot.sc26.last_report_us ? now - slot.sc26.last_report_us : 0;
+    const std::uint64_t remaining = elapsed >= k_sc26_resend_after_us ? 1 : k_sc26_resend_after_us - elapsed;
+    delay_us = (std::min)(delay_us, remaining);
+  }
   LARGE_INTEGER due {};
-  due.QuadPart = -static_cast<LONGLONG>(k_sc26_tick_ms) * 10000;  // relative, 100 ns units
+  due.QuadPart = -static_cast<LONGLONG>(delay_us) * 10;  // relative, 100 ns units
   SetWaitableTimer(context->sc26_keepalive_timer, &due, 0, nullptr, nullptr, FALSE);
 }
 
@@ -1811,6 +1824,11 @@ void start_sc26_keepalive(device_context *const context) noexcept {
     CloseHandle(context->sc26_keepalive_thread);
     context->sc26_keepalive_thread = nullptr;
   }
+  // The old worker clears this flag as it exits. Publish the new generation
+  // only after joining it, so its final store cannot disable our re-arming.
+  lock_context(context);
+  context->sc26_timer_running = true;
+  unlock_context(context);
   ResetEvent(context->sc26_keepalive_stop);
   LARGE_INTEGER first_due {};
   first_due.QuadPart = -static_cast<LONGLONG>(k_sc26_tick_ms) * 10000;  // relative, 100 ns units
