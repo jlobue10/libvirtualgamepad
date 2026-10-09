@@ -8,6 +8,15 @@
 namespace lvg::driver {
 namespace sc = lvg::sc26_usb;
 
+// Every haptic report the driver forwards has to fit the feedback payload.
+static_assert(sc::report_size(sc::haptic_rumble_id) <= sizeof(steam_haptic_feedback::report));
+static_assert(sc::report_size(sc::haptic_pulse_id) <= sizeof(steam_haptic_feedback::report));
+static_assert(sc::report_size(sc::haptic_command_id) <= sizeof(steam_haptic_feedback::report));
+static_assert(sc::report_size(sc::haptic_lfo_id) <= sizeof(steam_haptic_feedback::report));
+static_assert(sc::report_size(sc::haptic_sweep_id) <= sizeof(steam_haptic_feedback::report));
+static_assert(sc::report_size(sc::haptic_script_id) <= sizeof(steam_haptic_feedback::report));
+static_assert(sizeof(steam_haptic_feedback) <= sizeof(feedback_event::payload));
+
 void sc26_state::reset() noexcept {
   device.reset();
   features.reset();
@@ -169,7 +178,6 @@ void sc26_tick(sc26_state *const state, const std::uint64_t now_us) noexcept {
     return;
   }
   state->device.imu_timestamp = static_cast<std::uint32_t>(now_us);
-  state->last_report_us = now_us;
   // Grips are reported only when the client reports them. The earlier motion
   // heuristic ("held while motion samples flow") turned both grips on for the
   // whole session, since a streaming client forwards IMU samples continuously,
@@ -195,8 +203,9 @@ bool apply_sc26_motion(const motion_state_request &motion, sc26_state *const sta
     default:
       return false;
   }
+  // The sample waits for the next report (input state or keep-alive); stamping
+  // the clock here would make the keep-alive think a report just went out.
   state->last_motion_us = now_us != 0 ? now_us : 1;
-  sc26_tick(state, now_us);
   return true;
 }
 

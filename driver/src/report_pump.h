@@ -45,6 +45,10 @@ enum class report_kind : std::uint8_t {
   continuous,
   transition,
   priority,
+  // Ordered like a transition (never overwritten, sent in sequence) but
+  // about something other than controller state, so it does not supersede
+  // the pending continuous snapshot: a Steam Controller haptic ack.
+  aside,
 };
 
 class report_pump {

@@ -72,7 +72,14 @@ constexpr LONG k_pid_tick_ms = 10;
 // state once nothing has gone out for a tick. It runs only while a Steam
 // Controller slot is active and stops itself when none is left.
 constexpr LONG k_sc26_tick_ms = 4;
-constexpr std::uint64_t k_sc26_resend_after_us = 3500;
+// The keep-alive is armed for k_sc26_tick_ms after every state report that
+// goes out, so a tick normally finds the state exactly that old; the lower
+// threshold only tolerates an early wake.
+constexpr std::uint64_t k_sc26_resend_after_us = 3000;
+// Steam Controller haptic reports are kept in order and in number (a pulse's
+// two per-side stops arrive 0.7 ms apart; a click is repeated to keep a pad
+// buzzing), which one pending feedback slot would coalesce.
+constexpr std::uint8_t k_haptic_queue_capacity = 8;
 
 enum class slot_state : std::uint8_t {
   empty,
@@ -92,6 +99,16 @@ struct controller_slot {
   slot_state state;
   bool feedback_pending;
   lvg::feedback_event feedback;
+  // Haptic reports of a Steam Controller, oldest first; drained one per poll
+  // ahead of `feedback`. The oldest is dropped when full.
+  lvg::feedback_event haptic_queue[k_haptic_queue_capacity];
+  std::uint8_t haptic_head;
+  std::uint8_t haptic_count;
+  // Submissions that copied `vhf` under state_lock and are still inside
+  // VhfReadReportSubmit. Teardown nulls `vhf`, waits for zero, then deletes:
+  // VhfDelete only waits for VHF's own callbacks, not for the keep-alive
+  // worker or an IOCTL that already holds the handle.
+  std::uint32_t submits_in_flight;
   // Output reports update independently enabled fields. Keep the full state
   // across polls so coalescing never drops rumble or the other trigger.
   lvg::playstation_output_feedback playstation_feedback;
@@ -169,6 +186,7 @@ EVT_WDF_TIMER evt_pid_tick;
 EVT_WDF_OBJECT_CONTEXT_CLEANUP evt_device_cleanup;
 void start_sc26_keepalive(device_context *context) noexcept;
 void stop_sc26_keepalive(device_context *context) noexcept;
+void arm_sc26_keepalive(device_context *context) noexcept;
 
 // Defined below with the PlayStation submit helpers; create_controller needs it
 // to decide whether to register the feature-report callbacks.
@@ -321,11 +339,13 @@ void destroy_owned_controller(
 
   slot.state = slot_state::stopping;
   slot.feedback_pending = false;
+  slot.haptic_count = 0;
   vhf = slot.vhf;
   slot.vhf = nullptr;
   unlock_context(context);
 
   if (vhf != nullptr) {
+    wait_for_submits(context, slot);
     VhfDelete(vhf, TRUE);
   }
 
@@ -537,11 +557,84 @@ void stamp_sc26_sequence(controller_slot &slot, lvg::driver::report_buffer &repo
   }
 }
 
+// Spins until no submission that copied this slot's handle is still inside
+// VhfReadReportSubmit. Called without state_lock after slot.vhf was nulled,
+// so nothing new can start; a submit is a few microseconds.
+void wait_for_submits(device_context *const context, controller_slot &slot) noexcept {
+  for (;;) {
+    lock_context(context);
+    const bool busy = slot.submits_in_flight != 0;
+    unlock_context(context);
+    if (!busy) {
+      return;
+    }
+    SwitchToThread();
+  }
+}
+
+// The queueing half of pump_report, for a caller that already holds
+// state_lock: queues `data` (if any) and takes the next report VHF can accept
+// into `next`, capturing the handle and counting the submission in flight. The
+// caller releases the lock and finishes with submit_taken(). Encoding and
+// queueing under one lock hold keeps a resend of older state from landing
+// behind a newer input that was encoded in between. A Steam Controller state
+// report also marks the clock the keep-alive goes by and re-arms it.
+[[nodiscard]] NTSTATUS pump_report_locked(
+  device_context *const context,
+  controller_slot &slot,
+  const void *const data,
+  const ULONG length,
+  const UCHAR report_id,
+  const lvg::driver::report_kind kind,
+  lvg::driver::report_buffer *const next,
+  bool *const have_next,
+  VHFHANDLE *const vhf) noexcept {
+  *have_next = false;
+  *vhf = nullptr;
+  if (context->stopping || slot.state != slot_state::active || slot.vhf == nullptr) {
+    return STATUS_DEVICE_NOT_READY;
+  }
+  if (data != nullptr) {
+    std::ignore = slot.pump.enqueue(data, length, report_id, kind);
+    if (report_id == lvg::driver::k_sc26_input_report_id && is_steam_controller(slot.selected_profile)) {
+      slot.sc26.last_report_us = now_us();
+      arm_sc26_keepalive(context);
+    }
+  }
+  *have_next = slot.pump.take(next);
+  if (*have_next) {
+    stamp_sc26_sequence(slot, *next);
+    *vhf = slot.vhf;
+    ++slot.submits_in_flight;
+  }
+  return STATUS_SUCCESS;
+}
+
+// Submits a report taken by pump_report_locked(). Called without state_lock.
+NTSTATUS submit_taken(
+  device_context *const context,
+  controller_slot &slot,
+  const lvg::driver::report_buffer &next,
+  const VHFHANDLE vhf) noexcept {
+  HID_XFER_PACKET transfer {const_cast<PUCHAR>(next.data), next.length, next.report_id};
+  const NTSTATUS status = VhfReadReportSubmit(vhf, &transfer);
+  lock_context(context);
+  --slot.submits_in_flight;
+  if (!NT_SUCCESS(status)) {
+    // The report was consumed from the pump; put readiness back so the next
+    // submission is not stranded behind a failure that has already passed.
+    slot.pump.set_ready();
+  }
+  unlock_context(context);
+  return status;
+}
+
 // Hands one report to VHF if it can take it now, otherwise leaves it queued for
 // the readiness callback. Takes state_lock itself and must be called without
 // it. The lifetime gate is deliberately not taken: this also runs from inside
 // VHF callbacks, where the handle is already guaranteed alive because VhfDelete
-// waits for the callback, and taking the gate there would deadlock that wait.
+// waits for the callback, and taking the gate there would deadlock that wait;
+// the in-flight count covers the other callers.
 NTSTATUS pump_report(
   device_context *const context,
   controller_slot &slot,
@@ -554,34 +647,13 @@ NTSTATUS pump_report(
   VHFHANDLE vhf = nullptr;
 
   lock_context(context);
-  if (context->stopping || slot.state != slot_state::active || slot.vhf == nullptr) {
-    unlock_context(context);
-    return STATUS_DEVICE_NOT_READY;
-  }
-  if (data != nullptr) {
-    std::ignore = slot.pump.enqueue(data, length, report_id, kind);
-  }
-  have_next = slot.pump.take(&next);
-  if (have_next) {
-    stamp_sc26_sequence(slot, next);
-  }
-  vhf = slot.vhf;
+  const NTSTATUS queued = pump_report_locked(context, slot, data, length, report_id, kind, &next, &have_next, &vhf);
   unlock_context(context);
 
-  if (!have_next) {
-    return STATUS_SUCCESS;
+  if (!NT_SUCCESS(queued) || !have_next) {
+    return queued;
   }
-
-  HID_XFER_PACKET transfer {next.data, next.length, next.report_id};
-  const NTSTATUS status = VhfReadReportSubmit(vhf, &transfer);
-  if (!NT_SUCCESS(status)) {
-    // The report was consumed from the pump; put readiness back so the next
-    // submission is not stranded behind a failure that has already passed.
-    lock_context(context);
-    slot.pump.set_ready();
-    unlock_context(context);
-  }
-  return status;
+  return submit_taken(context, slot, next, vhf);
 }
 
 // VHF can accept another report. Drain one, preferring initialization replies,
@@ -599,22 +671,18 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
   auto *const context = slot->parent;
   lock_context(context);
   slot->pump.set_ready();
-  if (!context->stopping && slot->state == slot_state::active) {
+  if (!context->stopping && slot->state == slot_state::active && slot->vhf != nullptr) {
     have_next = slot->pump.take(&next);
     if (have_next) {
       stamp_sc26_sequence(*slot, next);
+      vhf = slot->vhf;
+      ++slot->submits_in_flight;
     }
-    vhf = slot->vhf;
   }
   unlock_context(context);
 
-  if (have_next && vhf != nullptr) {
-    HID_XFER_PACKET transfer {next.data, next.length, next.report_id};
-    if (!NT_SUCCESS(VhfReadReportSubmit(vhf, &transfer))) {
-      lock_context(context);
-      slot->pump.set_ready();
-      unlock_context(context);
-    }
+  if (have_next) {
+    std::ignore = submit_taken(context, *slot, next, vhf);
   }
 }
 
@@ -699,9 +767,17 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
     lvg::driver::sc26_tick(&slot.sc26, now_us());
     const lvg::driver::sc26_input_report report =
       lvg::driver::encode_sc26_input(slot.last_input, &slot.sc26);
+    lvg::driver::report_buffer next {};
+    bool have_next = false;
+    VHFHANDLE vhf = nullptr;
+    const NTSTATUS queued = pump_report_locked(context, slot, &report, sizeof(report),
+                                               lvg::driver::k_sc26_input_report_id, kind,
+                                               &next, &have_next, &vhf);
     unlock_context(context);
-    return pump_report(context, slot, &report, sizeof(report),
-                       lvg::driver::k_sc26_input_report_id, kind);
+    if (!NT_SUCCESS(queued) || !have_next) {
+      return queued;
+    }
+    return submit_taken(context, slot, next, vhf);
   }
   if (slot.selected_profile != lvg::profile::switch_pro) {
     return submit_playstation_report(context, slot, kind);
@@ -954,14 +1030,21 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
     if (start_keepalive) {
       context->sc26_timer_running = true;
     }
+    lvg::driver::report_buffer next {};
+    bool have_next = false;
+    VHFHANDLE vhf = nullptr;
+    const NTSTATUS queued = pump_report_locked(context, slot, &sc26_report, sizeof(sc26_report),
+                                               lvg::driver::k_sc26_input_report_id, sc26_kind,
+                                               &next, &have_next, &vhf);
     unlock_context(context);
     if (start_keepalive) {
       // Started outside the lock: the worker takes state_lock on every tick.
       start_sc26_keepalive(context);
     }
-    const NTSTATUS sc26_status =
-      pump_report(context, slot, &sc26_report, sizeof(sc26_report),
-                  lvg::driver::k_sc26_input_report_id, sc26_kind);
+    NTSTATUS sc26_status = queued;
+    if (NT_SUCCESS(queued) && have_next) {
+      sc26_status = submit_taken(context, slot, next, vhf);
+    }
     unlock_lifetime(context);
     return sc26_status;
   }
@@ -1038,6 +1121,10 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
     status = STATUS_ACCESS_DENIED;
   } else if (slot.state != slot_state::active) {
     status = STATUS_DEVICE_NOT_READY;
+  } else if (slot.haptic_count != 0) {
+    *output = slot.haptic_queue[slot.haptic_head];
+    slot.haptic_head = static_cast<std::uint8_t>((slot.haptic_head + 1) % k_haptic_queue_capacity);
+    --slot.haptic_count;
   } else if (!slot.feedback_pending) {
     status = STATUS_NO_MORE_ENTRIES;
   } else {
@@ -1204,10 +1291,15 @@ void evt_vhf_write_report(
       if (transfer->reportBuffer != nullptr &&
           lvg::driver::apply_sc26_output(transfer->reportBuffer, transfer->reportBufferLen,
                                          slot->controller_id, &slot->sc26, &event)) {
-        // One pending slot per controller: a newer haptic report replaces an
-        // older one the host has not collected yet, as the actuator state would.
-        slot->feedback = event;
-        slot->feedback_pending = true;
+        // Kept in order and in number: Steam's per-side stops arrive 0.7 ms
+        // apart and a repeated click keeps a pad buzzing; coalescing them would
+        // lose a stop or a click. Oldest dropped if the host stops polling.
+        if (slot->haptic_count == k_haptic_queue_capacity) {
+          slot->haptic_head = static_cast<std::uint8_t>((slot->haptic_head + 1) % k_haptic_queue_capacity);
+          --slot->haptic_count;
+        }
+        slot->haptic_queue[(slot->haptic_head + slot->haptic_count) % k_haptic_queue_capacity] = event;
+        ++slot->haptic_count;
         ack_size = lvg::sc26_usb::encode_haptic_ack(transfer->reportBuffer, transfer->reportBufferLen,
                                                     ack, sizeof(ack));
         status = STATUS_SUCCESS;
@@ -1225,11 +1317,13 @@ void evt_vhf_write_report(
     unlock_context(context);
 
     // The unit answers a stop pulse on the input pipe. Submitting from inside
-    // the callback is safe without the lifetime gate (see the Switch reply below).
+    // the callback is safe without the lifetime gate (see the Switch reply
+    // below). An aside: ordered after any button change already waiting, but
+    // it must not discard the pending state snapshot the way a transition does.
     if (ack_size != 0 && vhf != nullptr) {
       std::ignore = pump_report(context, *slot, ack, static_cast<ULONG>(ack_size),
                                 lvg::sc26_usb::haptic_ack_report_id,
-                                lvg::driver::report_kind::transition);
+                                lvg::driver::report_kind::aside);
     }
     if (operation_handle != nullptr) {
       VhfAsyncOperationComplete(operation_handle, status);
@@ -1638,31 +1732,52 @@ bool sc26_keepalive_tick(device_context *const context) noexcept {
   controller_slot *due[lvg::k_max_controllers] {};
   std::size_t due_count = 0;
   bool any_active = false;
-  const std::uint64_t now = now_us();
   lock_context(context);
+  // Read the clock under the lock: a submit that lands between the read and
+  // the lock would otherwise look stale (unsigned wrap) and get a resend.
+  const std::uint64_t now = now_us();
   const bool stopping = context->stopping;
   for (auto &slot : context->controllers) {
     if (slot.state != slot_state::active || !is_steam_controller(slot.selected_profile)) {
       continue;
     }
     any_active = true;
-    if (slot.have_last_input && now - slot.sc26.last_report_us >= k_sc26_resend_after_us) {
+    if (slot.have_last_input && now > slot.sc26.last_report_us &&
+        now - slot.sc26.last_report_us >= k_sc26_resend_after_us) {
       due[due_count++] = &slot;
     }
   }
   const bool keep_running = any_active && !stopping;
   if (!keep_running) {
     context->sc26_timer_running = false;
+  } else if (due_count == 0) {
+    // Woke early, or a submit re-armed the timer just before it fired: keep
+    // the cadence going from here.
+    arm_sc26_keepalive(context);
   }
   unlock_context(context);
 
   if (!keep_running) {
     return false;
   }
+  // Each resend re-arms the timer for 4 ms after itself through the pump.
   for (std::size_t i = 0; i < due_count; ++i) {
     std::ignore = submit_profile_report(context, *due[i]);
   }
   return true;
+}
+
+// Fires the keep-alive k_sc26_tick_ms from now: called whenever a Steam
+// Controller state report goes out, so the wire carries one report every 4 ms
+// after whatever was sent last, with no double sends or 7 ms holes from a
+// free-running period. A kernel timer call, fine under state_lock.
+void arm_sc26_keepalive(device_context *const context) noexcept {
+  if (context->sc26_keepalive_timer == nullptr || !context->sc26_timer_running) {
+    return;
+  }
+  LARGE_INTEGER due {};
+  due.QuadPart = -static_cast<LONGLONG>(k_sc26_tick_ms) * 10000;  // relative, 100 ns units
+  SetWaitableTimer(context->sc26_keepalive_timer, &due, 0, nullptr, nullptr, FALSE);
 }
 
 DWORD WINAPI sc26_keepalive_thread(LPVOID parameter) {
@@ -1678,6 +1793,11 @@ DWORD WINAPI sc26_keepalive_thread(LPVOID parameter) {
     }
   }
   CancelWaitableTimer(context->sc26_keepalive_timer);
+  // However it left (idle, stop event, failed wait), the next input state
+  // may start a new worker.
+  lock_context(context);
+  context->sc26_timer_running = false;
+  unlock_context(context);
   return 0;
 }
 
@@ -1693,7 +1813,7 @@ void start_sc26_keepalive(device_context *const context) noexcept {
   ResetEvent(context->sc26_keepalive_stop);
   LARGE_INTEGER first_due {};
   first_due.QuadPart = -static_cast<LONGLONG>(k_sc26_tick_ms) * 10000;  // relative, 100 ns units
-  if (!SetWaitableTimer(context->sc26_keepalive_timer, &first_due, k_sc26_tick_ms, nullptr, nullptr, FALSE)) {
+  if (!SetWaitableTimer(context->sc26_keepalive_timer, &first_due, 0, nullptr, nullptr, FALSE)) {
     lock_context(context);
     context->sc26_timer_running = false;
     unlock_context(context);
@@ -2018,6 +2138,7 @@ void stop_owned_controllers(device_context *const context, const bool forget_tar
   for (std::uint32_t index = 0; index < lvg::k_max_controllers; ++index) {
     auto &slot = context->controllers[index];
     slot.feedback_pending = false;
+    slot.haptic_count = 0;
     if (slot.state == slot_state::active && slot.vhf != nullptr) {
       slot.state = slot_state::stopping;
       handles[index] = slot.vhf;
@@ -2028,9 +2149,10 @@ void stop_owned_controllers(device_context *const context, const bool forget_tar
   }
   unlock_context(context);
 
-  for (const auto handle : handles) {
-    if (handle != nullptr) {
-      VhfDelete(handle, TRUE);
+  for (std::uint32_t index = 0; index < lvg::k_max_controllers; ++index) {
+    if (handles[index] != nullptr) {
+      wait_for_submits(context, context->controllers[index]);
+      VhfDelete(handles[index], TRUE);
     }
   }
 

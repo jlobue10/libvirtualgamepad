@@ -1298,6 +1298,34 @@ int main() {
   }
 
   {
+    // An aside (a Steam Controller haptic ack) keeps its place among the
+    // ordered reports but does not discard the pending state snapshot the
+    // way a transition does.
+    report_pump pump;
+    pump.reset();
+    const std::uint8_t state[4] = {7, 0, 0, 0};
+    const std::uint8_t press[4] = {8, 0, 0, 0};
+    const std::uint8_t ack[6] = {0x44, 4, 2, 0, 0, 0};
+    report_buffer out {};
+    check(pump.enqueue(state, sizeof(state), 0x42, report_kind::continuous) && pump.take(&out),
+          "a state report goes out and consumes readiness");
+    check(pump.enqueue(state, sizeof(state), 0x42, report_kind::continuous), "a snapshot waits");
+    check(pump.enqueue(ack, sizeof(ack), 0x44, report_kind::aside), "an ack is queued");
+    pump.set_ready();
+    check(pump.take(&out) && out.report_id == 0x44 && out.length == 6, "the ack goes out first");
+    pump.set_ready();
+    check(pump.take(&out) && out.report_id == 0x42 && out.data[0] == 7, "the snapshot survived the aside");
+    pump.set_ready();
+    check(!pump.take(&out), "nothing else waits");
+    check(pump.enqueue(state, sizeof(state), 0x42, report_kind::continuous), "another snapshot waits");
+    check(pump.enqueue(press, sizeof(press), 0x42, report_kind::transition), "a press is queued");
+    pump.set_ready();
+    check(pump.take(&out) && out.data[0] == 8, "the press goes out");
+    pump.set_ready();
+    check(!pump.take(&out), "whereas a transition discards the snapshot");
+  }
+
+  {
     // Transitions must survive: dropping one loses a press or a release.
     report_pump pump;
     pump.reset();

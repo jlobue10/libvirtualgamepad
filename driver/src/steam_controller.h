@@ -34,8 +34,10 @@ struct sc26_state {
   lvg::sc26_usb::rumble rumble;
   // Driver clock (microseconds) of the last motion sample; 0 = never.
   std::uint64_t last_motion_us {};
-  // Driver clock of the last report handed to the pump (sc26_tick); the
-  // keep-alive timer resends the state when this goes stale.
+  // Driver clock of the last state report queued for VHF (written by the
+  // driver's pump, not by sc26_tick); the keep-alive resends the state when
+  // this goes stale. A motion sample or a host's input-report read must not
+  // touch it: neither puts a report on the wire.
   std::uint64_t last_report_us {};
   // Set once the client has sent a grip-touch bit (button_mask::left/right_grip_touch):
   // from then on the grips follow the client. Until then they read released;
@@ -48,8 +50,9 @@ struct sc26_state {
   void reset() noexcept;
 };
 
-// Stamps the report clock (microseconds, truncated to 32 bits like the unit's)
-// and clears the grips while no client has reported them. Call before encoding a report.
+// Stamps the report's IMU clock (microseconds, truncated to 32 bits like the
+// unit's) and clears the grips while no client has reported them. Call before
+// encoding a report; it does not mark anything as sent.
 void sc26_tick(sc26_state *state, std::uint64_t now_us) noexcept;
 
 [[nodiscard]] const std::uint8_t *sc26_descriptor(std::size_t *size) noexcept;
