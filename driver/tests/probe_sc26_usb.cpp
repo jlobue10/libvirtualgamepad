@@ -26,6 +26,9 @@
 // the sticks (magnitude range, sector coverage, largest jump between reports),
 // the grip and stick touch bits, and the report cadence.
 // Never installs drivers or modifies existing controllers.
+#ifndef NOMINMAX
+#define NOMINMAX  // windows.h min/max macros would break std::min/std::max below (MSVC C2589)
+#endif
 #include <windows.h>
 #include <hidsdi.h>
 #include <setupapi.h>
