@@ -228,6 +228,9 @@ int monitor(int seconds) {
   double max_gap_ms = 0; LARGE_INTEGER freq, last {}; QueryPerformanceFrequency(&freq);
   unsigned grips = 0, stick_touch = 0;
   std::uint32_t last_buttons = 0;
+  // Reports whose button word differs from the previous report's: a held button that flickers
+  // (Steam's "hold B to exit" needs a steady hold) shows as changes while nothing is pressed.
+  bool have_buttons = false; unsigned button_changes = 0;
   // The unit's sequence byte advances by exactly 1 per report and its imu_timestamp by ~4 ms;
   // a virtual device that drops or reorders reports shows here.
   int last_seq = -1; unsigned seq_gaps = 0, seq_lost = 0, seq_gaps_all = 0, seq_lost_all = 0;
@@ -263,7 +266,8 @@ int monitor(int seconds) {
         last_ts = ts; have_ts = true;
       }
       const std::uint32_t buttons = ule32(report.data() + 2);
-      last_buttons = buttons;
+      if (have_buttons && buttons != last_buttons) ++button_changes;
+      last_buttons = buttons; have_buttons = true;
       if (buttons & sc::btn_left_grip_touch) grips |= 1;
       if (buttons & sc::btn_right_grip_touch) grips |= 2;
       if (buttons & sc::btn_left_stick_touch) stick_touch |= 1;
@@ -281,13 +285,13 @@ int monitor(int seconds) {
     }
     if (GetTickCount64() >= next_print) {
       next_print += 1000;
-      std::printf("[%3llus] %3u rep/s gap %5.1f ms seq gaps %u (%u lost) ts max %5.1f ms back %u stick upd L %u R %u buttons 0x%08x grips %s%s touch %s%s | ",
+      std::printf("[%3llus] %3u rep/s gap %5.1f ms seq gaps %u (%u lost) ts max %5.1f ms back %u stick upd L %u R %u buttons 0x%08x (%u changes) grips %s%s touch %s%s | ",
                   (GetTickCount64() - (end - static_cast<ULONGLONG>(seconds) * 1000)) / 1000, count, max_gap_ms, seq_gaps, seq_lost,
-                  ts_max_ms, ts_back, left_updates, right_updates, last_buttons,
+                  ts_max_ms, ts_back, left_updates, right_updates, last_buttons, button_changes,
                   (grips & 1) ? "L" : "-", (grips & 2) ? "R" : "-", (stick_touch & 1) ? "L" : "-", (stick_touch & 2) ? "R" : "-");
       left.print("left"); std::printf(" | "); right.print("right"); std::printf("\n");
       count = other = 0; max_gap_ms = 0; seq_gaps = seq_lost = 0; ts_max_ms = 0; ts_back = 0; left_updates = right_updates = 0;
-      grips = stick_touch = 0; left = stick_stats {}; right = stick_stats {};
+      grips = stick_touch = 0; button_changes = 0; left = stick_stats {}; right = stick_stats {};
     }
   }
   CloseHandle(handle);
