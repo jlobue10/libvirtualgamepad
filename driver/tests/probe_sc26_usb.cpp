@@ -15,7 +15,9 @@
 //   4  as 2 with a 100 ms gap every second, as a Wi-Fi hiccup leaves (a jump)
 //   5  everything: clipped shape, 60/s, motion, gaps
 // --rate N sets the stick-phase report rate, --turn S the seconds per turn,
-// --update N how many times a second the stick value may change, and
+// --update N how many times a second the stick value may change,
+// --scale S the magnification of the clipped shape (modes 1 and 5; default 1.2,
+// the BLE stream measures 1.11..1.16 at the diagonals), and
 // --burst N sends the reports in back-to-back groups of N with the value
 // changing once per group, as a stream does when Vibepollo submits the input
 // state plus two motion states for every BLE packet (--rate 200 --burst 3 is
@@ -296,7 +298,7 @@ int monitor(int seconds) {
 int main(int argc, char **argv) {
   constexpr unsigned slot = 7;
   int hold_seconds = 0, monitor_seconds = 0, circle_mode = 0, stick_rate = 0, stick_update_rate = 0, burst = 1;
-  double turn_seconds = 3.0;
+  double turn_seconds = 3.0, circle_scale = 1.2;
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--hold") == 0) hold_seconds = (i + 1 < argc) ? std::atoi(argv[++i]) : 600;
     if (std::strcmp(argv[i], "--monitor") == 0) monitor_seconds = (i + 1 < argc) ? std::atoi(argv[++i]) : 120;
@@ -305,6 +307,7 @@ int main(int argc, char **argv) {
     if (std::strcmp(argv[i], "--turn") == 0) turn_seconds = (i + 1 < argc) ? std::atof(argv[++i]) : 3.0;
     if (std::strcmp(argv[i], "--update") == 0) stick_update_rate = (i + 1 < argc) ? std::atoi(argv[++i]) : 0;
     if (std::strcmp(argv[i], "--burst") == 0) burst = (i + 1 < argc) ? std::atoi(argv[++i]) : 3;
+    if (std::strcmp(argv[i], "--scale") == 0) circle_scale = (i + 1 < argc) ? std::atof(argv[++i]) : 1.2;
   }
   circle_mode = std::clamp(circle_mode, 0, 5);
   // Seconds per stick turn (the wired unit's owner took ~0.9 s per turn in the Steam capture) and
@@ -316,6 +319,9 @@ int main(int argc, char **argv) {
   // Stick-circle submit rate in reports per second: 0 = the mode's default (20 for modes 0 and 1,
   // 60 for the fast modes), otherwise 20..250 in steps of 20 (the real unit streams at 250).
   if (stick_rate != 0) stick_rate = std::clamp(stick_rate, 20, 250);
+  // --scale S: magnification of the clipped shape (modes 1 and 5) before the per-axis clip. 1.2 is the
+  // wired unit's shape; the BLE stream measures 1.11..1.16 at the diagonals, so 1.1..1.15 stages it.
+  circle_scale = std::clamp(circle_scale, 1.0, 2.0);
   // Sleep() granularity is 15.6 ms by default, which makes a 16 ms sleep last up to 31 ms; the
   // hold's cadences depend on 4..50 ms sleeps being honoured, so ask for 1 ms timer resolution.
   timeBeginPeriod(1);
@@ -618,7 +624,7 @@ int main(int argc, char **argv) {
               const double t = static_cast<double>(i % turn_ticks) + static_cast<double>(k) / sub;
               const double angle = t * (2.0 * 3.14159265358979 / turn_ticks);
               double fx = std::cos(angle), fy = std::sin(angle);
-              if (circle_clipped) { fx = std::clamp(1.2 * fx, -1.0, 1.0); fy = std::clamp(1.2 * fy, -1.0, 1.0); }
+              if (circle_clipped) { fx = std::clamp(circle_scale * fx, -1.0, 1.0); fy = std::clamp(circle_scale * fy, -1.0, 1.0); }
               short cx = static_cast<short>(std::lround(32767.0 * fx));
               short cy = static_cast<short>(std::lround(32767.0 * fy));
               // --update: keep repeating the last value between value changes, as a stream does
