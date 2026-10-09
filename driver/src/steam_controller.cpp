@@ -245,11 +245,14 @@ bool apply_sc26_output(
     return false;
   }
   const std::size_t declared = sc::report_size(data[0]);
-  const std::size_t length = size < declared ? size : declared;
+  const std::size_t length = declared;
   steam_haptic_feedback payload {};
-  if (length > sizeof(payload.report)) {
+  if (size < declared || length > sizeof(payload.report)) {
     return false;
   }
+  // HID reports have the descriptor's fixed length. Ignore trailing transport
+  // padding, but never turn a truncated write into a successful feedback event:
+  // it would occupy a queue slot while the client cannot replay it.
   // Keep the per-side rumble totals current for anyone reading the state.
   static_cast<void>(sc::decode_haptic_output(data, size, state->rumble));
   payload.length = static_cast<std::uint8_t>(length);

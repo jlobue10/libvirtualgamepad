@@ -903,6 +903,31 @@ int main() {
             (lvg::sc26_usb::btn_r4 | lvg::sc26_usb::btn_l4 | lvg::sc26_usb::btn_r5 | lvg::sc26_usb::btn_l5),
           "sc26 paddles 1..4 are R4, L4, R5, L5");
 
+    // Every output report is fixed-size in the captured HID descriptor. A
+    // truncated report must not enter the feedback queue or mutate rumble state.
+    for (std::uint8_t id = lvg::sc26_usb::haptic_rumble_id;
+         id <= lvg::sc26_usb::haptic_script_id; ++id) {
+      const auto declared = lvg::sc26_usb::report_size(id);
+      std::uint8_t report[32] {};
+      report[0] = id;
+      for (std::size_t length = 0; length < declared; ++length) {
+        feedback_event event {};
+        event.controller_id = 99;
+        check(!apply_sc26_output(report, length, 0, &state, &event),
+              "sc26 truncated haptic report rejected: " + std::to_string(id) + "/" + std::to_string(length));
+        check(event.controller_id == 99, "sc26 rejected haptics leave feedback untouched");
+      }
+      for (const auto length : {declared, sizeof(report)}) {
+        feedback_event event {};
+        check(apply_sc26_output(report, length, 0, &state, &event),
+              "sc26 complete or padded haptic report accepted");
+        steam_haptic_feedback payload {};
+        std::memcpy(&payload, event.payload, sizeof(payload));
+        check(payload.length == declared && payload.report[0] == id,
+              "sc26 forwards the declared report without trailing padding");
+      }
+    }
+
     // Grip sense: released until the client sends a grip bit, then explicit. Motion
     // samples never imply a held grip (a streaming client sends them continuously).
     {

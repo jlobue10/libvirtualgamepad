@@ -1306,6 +1306,7 @@ void evt_vhf_write_report(
                                                     ack, sizeof(ack));
         status = STATUS_SUCCESS;
       } else if (transfer->reportBuffer != nullptr && transfer->reportBufferLen > 0 &&
+                 transfer->reportBuffer[0] > lvg::sc26_usb::haptic_script_id &&
                  lvg::sc26_usb::is_output_report(transfer->reportBuffer[0])) {
         // One of the 0x86..0x89 reports the real descriptor declares (purpose
         // unknown, never seen): nothing to forward, but refusing them would
