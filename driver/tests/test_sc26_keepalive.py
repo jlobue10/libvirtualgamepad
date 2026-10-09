@@ -53,6 +53,7 @@ namespace driver {
 enum class slot_state{active,free};
 struct controller_slot {slot_state state=slot_state::active; int selected_profile=1;
  bool have_last_input=true; VHFHANDLE vhf=(void*)1; int last_input=42;
+ struct {bool ready() const {return ready_;} bool ready_=true;} pump;
  lvg::driver::sc26_state sc26; int submits_in_flight=0;};
 struct device_context {controller_slot controllers[2]; bool stopping=false,sc26_timer_running=true;
  HANDLE sc26_keepalive_timer=(void*)1,sc26_keepalive_thread=nullptr,sc26_keepalive_stop=(void*)1;};
@@ -89,6 +90,10 @@ int main(){int failures=0;
  check(timer_due==-10000,"busy controller preserves idle controller's 4ms deadline");
  clock_us=8000;inspect_release=true;sc26_keepalive_tick(&c);
  check(protected_release && submitted==2,"VHF handles have in-flight references before unlocking");
+ clock_us=20000;c.controllers[0].pump.ready_=false;c.controllers[0].sc26.last_report_us=0;c.controllers[1].sc26.last_report_us=20000;
+ submitted=0;sc26_keepalive_tick(&c);
+ check(submitted==0 && timer_due==-40000,"a slot without a pending VHF read is skipped and the timer idles at the tick");
+ c.controllers[0].pump.ready_=true;
  c.sc26_keepalive_thread=(void*)1;joining=&c;start_sc26_keepalive(&c);
  check(c.sc26_timer_running,"exiting worker cannot clear replacement worker's running flag");
  return failures!=0;}
