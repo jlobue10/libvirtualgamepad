@@ -342,12 +342,13 @@ bool apply_switch_battery(const battery_state_request &battery, switch_state *co
   state->charging = reported == lvg::battery_state::charging;
 
   if (battery.percent <= 100) {
-    // Reported in even steps from 0 (empty) to 8 (full).
-    const std::uint32_t level = (static_cast<std::uint32_t>(battery.percent) * 8u + 50u) / 100u;
-    state->battery_level = static_cast<std::uint8_t>((level > 8u ? 8u : level) & 0x0Eu);
-    if (battery.percent >= 88) {
-      state->battery_level = 8;
-    }
+    // Reported in even steps: 0 empty, 2 critical, 4 low, 6 medium, 8 full.
+    // Quartiles of the percentage, so a battery with any charge left never
+    // reads as empty (rounding to the nearest level and then masking the low
+    // bit floored 1..18 % to 0).
+    state->battery_level = battery.percent == 0
+      ? 0u
+      : static_cast<std::uint8_t>(2u * ((static_cast<std::uint32_t>(battery.percent) + 24u) / 25u));
   }
   return true;
 }

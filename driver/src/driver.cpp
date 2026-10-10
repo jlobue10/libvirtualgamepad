@@ -1175,7 +1175,11 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
   auto &slot = context->controllers[request.controller_id];
   lock_context(context);
   NTSTATUS status = STATUS_SUCCESS;
-  if (!is_owned_by(slot, owner)) {
+  // As in destroy_controller: a slot the client never created has no owner, so
+  // test emptiness first or the caller is told it belongs to someone else.
+  if (slot.state == slot_state::empty) {
+    status = STATUS_NOT_FOUND;
+  } else if (!is_owned_by(slot, owner)) {
     status = STATUS_ACCESS_DENIED;
   } else if (slot.state != slot_state::active) {
     status = STATUS_DEVICE_NOT_READY;

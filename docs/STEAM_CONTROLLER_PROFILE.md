@@ -36,7 +36,7 @@ Mirrors the DualSense profile (`driver/src/dualsense.{h,cpp}`, `include/libvirtu
 | `profile::steam_controller = 9` | `include/libvirtualgamepad/protocol.h` | next free value; mask bit 0x100; update `k_public_profile_mask` in `driver/tests/test_pid_descriptor.cpp` (0x7C → 0x17C) |
 | `include/libvirtualgamepad/sc26_usb.h` | new, portable | report descriptor of the **real wired controller** (from the owner's device dump, see §4), report ids, sizes, feature-report framing, `offsetof` pins |
 | `driver/src/steam_controller.{h,cpp}` | new | input encoder, touch/motion/battery folding, feature-report responder, output-report decoder |
-| `profile_definition` | `driver/src/profile.cpp` | VID 0x28DE, PID 0x1302 (`USB_DEVICE_ID_STEAM_CONTROLLER_IBEX`), version from the dump, `force_feedback=false`, `hardware_ids=null`; add to `find_profile()` and `k_candidates[]` |
+| `profile_definition` | `driver/src/profile.cpp` | VID 0x28DE, PID 0x1302 (`USB_DEVICE_ID_STEAM_CONTROLLER_IBEX`), version from the dump, `force_feedback=false`, `hardware_ids="HID\\VID_28DE&PID_1302"` (GameInput identity, as for the PlayStation pads); add to `find_profile()` and `k_candidates[]` |
 | Slot state | `driver/src/driver.cpp` `controller_slot` | `steam_controller_state sc;` + reset in `create_controller` |
 | Feature callbacks | `driver.cpp` ~407 | condition becomes `force_feedback \|\| is_playstation(id) \|\| id == profile::steam_controller` |
 | Input submit | `driver.cpp` `submit_input_state` | new branch → `encode_sc26_input()` → `pump_report(..., 0x42, kind)` |
@@ -141,10 +141,11 @@ still acknowledged and counted.
 (plus 0x86: 4 and 0x87–0x89: 64). Steam re-sends 0x80 every ≤50 ms while rumbling (firmware safety
 timeout). In the capture Steam's UI used only 0x81 (`81 <side> 90 01 00 00 01 00`: 400 µs on,
 repeat 1, then an all-zero stop) and 0x82 (`82 <side> 02 F2` / `01 FD`); the unit answered each with
-an input report 0x44. v1 maps 0x80 → `generic_rumble` (speed L/R → low/high) and 0x81 → a
-`generic_rumble` magnitude from the duty cycle; 0x82–0x89 are accepted and dropped. The Moonlight
-client turns rumble back into pad pulse trains. A dedicated `feedback_type::steam_haptic` can follow
-once the basics work.
+an input report 0x44. The driver forwards 0x80–0x85 verbatim as a `feedback_type::steam_haptic`
+event (`apply_sc26_output`) and answers a zero-repeat 0x81 with the 0x44 ack the unit sends
+(`evt_vhf_write_report`); 0x86–0x89 are accepted without being forwarded. The host replays the
+event on a client with the real pads or renders rumble from it (`synthesize_steam_rumble`); see
+`SC26_USB_COMPATIBILITY.md` for the per-report table.
 
 ## 3. Vibepollo side (fork `jlobue10/Vibepollo`, branch `fork/2.0.0`)
 - `vhf_profile_e::steam_controller`; `vhf_gamepad::offers(client, lvg::profile::steam_controller)`.
