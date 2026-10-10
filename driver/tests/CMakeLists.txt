@@ -43,3 +43,8 @@ endif()
 
 # Include native PnP identity checks in the existing CI test entry point.
 add_subdirectory(gameinput)
+
+add_executable(test_steam_haptic_queue test_steam_haptic_queue.cpp)
+target_compile_features(test_steam_haptic_queue PRIVATE cxx_std_20)
+target_include_directories(test_steam_haptic_queue PRIVATE ../../include)
+add_test(NAME steam_haptic_queue COMMAND test_steam_haptic_queue)

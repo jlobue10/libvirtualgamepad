@@ -20,6 +20,7 @@
 #include "libvirtualgamepad/protocol.h"
 #include "dualsense.h"
 #include "steam_controller.h"
+#include "steam_haptic_queue.h"
 #include "dualshock4.h"
 #include "pid_ff.h"
 #include "profile.h"
@@ -1293,15 +1294,9 @@ void evt_vhf_write_report(
       if (transfer->reportBuffer != nullptr &&
           lvg::driver::apply_sc26_output(transfer->reportBuffer, transfer->reportBufferLen,
                                          slot->controller_id, &slot->sc26, &event)) {
-        // Kept in order and in number: Steam's per-side stops arrive 0.7 ms
-        // apart and a repeated click keeps a pad buzzing; coalescing them would
-        // lose a stop or a click. Oldest dropped if the host stops polling.
-        if (slot->haptic_count == k_haptic_queue_capacity) {
-          slot->haptic_head = static_cast<std::uint8_t>((slot->haptic_head + 1) % k_haptic_queue_capacity);
-          --slot->haptic_count;
-        }
-        slot->haptic_queue[(slot->haptic_head + slot->haptic_count) % k_haptic_queue_capacity] = event;
-        ++slot->haptic_count;
+        // Preserve explicit actuator stops under backpressure. Ordinary repeated
+        // effects remain ordered; an equivalent newer stop moves to the tail.
+        lvg::driver::enqueue_haptic(slot->haptic_queue, slot->haptic_head, slot->haptic_count, event);
         ack_size = lvg::sc26_usb::encode_haptic_ack(transfer->reportBuffer, transfer->reportBufferLen,
                                                     ack, sizeof(ack));
         status = STATUS_SUCCESS;
