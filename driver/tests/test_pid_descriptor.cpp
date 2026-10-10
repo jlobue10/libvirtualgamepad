@@ -870,6 +870,30 @@ int main() {
     motion.motion_type = static_cast<std::uint8_t>(motion_kind::gyroscope);
     motion.x_milli = 1000;
     check(apply_ds5_motion(motion, &calibrated_state), "ds5 calibration accepts a one-degree/s sample");
+    {
+      // Battery level floors into tens like the DualShock 4 (hosts read n*10+5 %).
+      ds5_state bstate {};
+      battery_state_request battery {};
+      battery.header.size = sizeof(battery);
+      battery.header.version = k_protocol_version;
+      battery.flags = static_cast<std::uint8_t>(lvg::battery_state::discharging);
+      const std::uint8_t percents[] = {0, 5, 9, 10, 15, 19, 55, 99, 100};
+      const std::uint8_t levels[] = {0, 0, 0, 1, 1, 1, 5, 9, 10};
+      bool floors = true;
+      for (std::size_t i = 0; i < sizeof(percents); ++i) {
+        battery.percent = percents[i];
+        floors = floors && apply_ds5_battery(battery, &bstate) && bstate.battery_level == levels[i];
+      }
+      check(floors, "ds5 battery level floors into tens (15 % -> 1, 99 % -> 9, 100 % -> 10)");
+      check(!bstate.cable_connected && !bstate.battery_full, "ds5 discharging is neither cabled nor full");
+      battery.flags = static_cast<std::uint8_t>(lvg::battery_state::full);
+      check(apply_ds5_battery(battery, &bstate) && bstate.cable_connected && bstate.battery_full,
+            "ds5 full reports cable and full");
+      battery.percent = 101;
+      battery.flags = static_cast<std::uint8_t>(lvg::battery_state::discharging);
+      check(apply_ds5_battery(battery, &bstate) && bstate.battery_level == 10,
+            "ds5 out-of-range percent keeps the previous level");
+    }
     const auto sample = encode_ds5_input(input, &calibrated_state);
     check(fill_ds5_feature(k_ds5_feature_calibration_id, buffer, sizeof(buffer)) == 41,
           "ds5 motion calibration reply is available");

@@ -308,9 +308,10 @@ bool apply_ds5_battery(const battery_state_request &battery, ds5_state *const st
   state->battery_full = reported == lvg::battery_state::full;
 
   if (battery.percent <= 100) {
-    // The DualSense reports battery in 0..10 steps.
-    state->battery_level =
-      static_cast<std::uint8_t>((static_cast<std::uint32_t>(battery.percent) * 10u + 50u) / 100u);
+    // The DualSense reports battery in 0..10 steps with floor semantics, like the
+    // DualShock 4: hosts decode the nibble as n*10+5 %, so rounding to nearest
+    // showed a 15 % battery as 25 %. 10 is reserved for a full pack.
+    state->battery_level = static_cast<std::uint8_t>(battery.percent >= 100 ? 10u : battery.percent / 10u);
   }
   return true;
 }

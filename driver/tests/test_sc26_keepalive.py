@@ -97,13 +97,21 @@ int submit_profile_report(device_context*,controller_slot&){++submitted;return 0
 using WDFFILEOBJECT=void*; int lifetime_locks=0;
 void lock_lifetime(device_context*){++lifetime_locks;} void unlock_lifetime(device_context*){--lifetime_locks;}
 NTSTATUS begin_state_update(device_context* c,WDFFILEOBJECT,int id,controller_slot** out){*out=&c->controllers[id];return 0;}
+int pumped_asides=0;
+NTSTATUS pump_report(device_context*,controller_slot&,const void*,ULONG,UCHAR id,lvg::driver::report_kind k){
+ assert(id==lvg::driver::k_sc26_battery_report_id&&k==lvg::driver::report_kind::aside);++pumped_asides;return 0;}
 namespace lvg { enum class profile {xbox_360,dualshock_4,dualsense,switch_pro,steam_controller};
  struct motion_state_request {int controller_id;};
+ struct battery_state_request {int controller_id;};
  namespace driver {
   bool apply_ds4_motion(const motion_state_request&,ds4_state*){return true;}
   bool apply_ds5_motion(const motion_state_request&,ds5_state*){return true;}
   bool apply_switch_motion(const motion_state_request&,switch_state*){return true;}
-  bool apply_sc26_motion(const motion_state_request&,sc26_state*,uint64_t){return true;} } }
+  bool apply_sc26_motion(const motion_state_request&,sc26_state*,uint64_t){return true;}
+  bool apply_ds4_battery(const battery_state_request&,ds4_state*){return true;}
+  bool apply_ds5_battery(const battery_state_request&,ds5_state*){return true;}
+  bool apply_sc26_battery(const battery_state_request&,sc26_state*){return true;}
+  bool apply_switch_battery(const battery_state_request&,switch_state*){return true;} } }
 void SwitchToThread(){}
 void WaitForSingleObject(HANDLE,unsigned){joining->sc26_timer_running=false;}
 void CloseHandle(HANDLE){} void ResetEvent(HANDLE){} void CancelWaitableTimer(HANDLE){}
@@ -185,6 +193,21 @@ int main(){int failures=0;
   m.controllers[0].selected_profile=(int)lvg::profile::switch_pro; m.sc26_keepalive_timer=(void*)1;
   check(NT_SUCCESS(submit_motion_state(&m,nullptr,req)) && submitted==3,
         "non-SC26 profiles always submit the motion sample");}
+ {// D16-02: the client's battery update is queued as an aside only while a reader exists;
+  // without one the period is cleared so the first ready tick sends the fresh value.
+  device_context b; lvg::battery_state_request req{0}; pumped_asides=0; clock_us=10'000'000;
+  b.controllers[0].pump.ready_=true;
+  check(NT_SUCCESS(submit_battery_state(&b,nullptr,req)) && pumped_asides==1 && b.controllers[0].sc26.last_battery_us==clock_us,
+        "a battery update with a pending read goes out as an aside and restarts the period");
+  b.controllers[0].pump.ready_=false;
+  check(NT_SUCCESS(submit_battery_state(&b,nullptr,req)) && pumped_asides==1 && b.controllers[0].sc26.last_battery_us==0,
+        "a battery update without a reader is not queued and clears the period");
+  b.controllers[1].pump.ready_=false; batteries_enqueued=0; b.controllers[0].pump.ready_=true;
+  sc26_keepalive_tick(&b);
+  check(batteries_enqueued==1,"the first ready tick after a reader-less update carries the battery");
+  b.controllers[0].selected_profile=(int)lvg::profile::switch_pro; submitted=0;
+  check(NT_SUCCESS(submit_battery_state(&b,nullptr,req)) && submitted==1 && pumped_asides==1,
+        "non-SC26 profiles fold battery into a full report");}
  return failures!=0;}
 '''
 signatures = [
@@ -207,7 +230,10 @@ with tempfile.TemporaryDirectory(prefix='sc26-keepalive-') as directory:
     motion = function('[[nodiscard]] NTSTATUS submit_motion_state(\n  device_context *const context,\n'
                       '  const WDFFILEOBJECT owner,\n  const lvg::motion_state_request &request) noexcept')
     motion = motion.replace('slot->selected_profile == lvg::profile::', 'slot->selected_profile == (int)lvg::profile::')
-    (work/'test.cpp').write_text(prefix+'\n'.join(map(function, signatures))+'\n'+motion+suffix)
+    battery = function('[[nodiscard]] NTSTATUS submit_battery_state(\n  device_context *const context,\n'
+                       '  const WDFFILEOBJECT owner,\n  const lvg::battery_state_request &request) noexcept')
+    battery = battery.replace('slot->selected_profile == lvg::profile::', 'slot->selected_profile == (int)lvg::profile::')
+    (work/'test.cpp').write_text(prefix+'\n'.join(map(function, signatures))+'\n'+motion+'\n'+battery+suffix)
     subprocess.run(['g++','-std=c++17','-Wall','-Wextra','-fsanitize=address,undefined',
                     str(work/'test.cpp'),'-o',str(work/'test')],check=True)
     raise SystemExit(subprocess.run([str(work/'test')]).returncode)
