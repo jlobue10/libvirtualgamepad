@@ -724,6 +724,15 @@ int main(int argc, char **argv) {
     CloseHandle(handle);
   }
   check(client.destroy_controller(slot) == ERROR_SUCCESS, "release test controller");
+  {
+    // A released slot is "not found", not "someone else's" (as destroy_controller
+    // already answers), so a client holding a stale id is not sent after a
+    // permission problem.
+    lvg::feedback_event stale {};
+    const DWORD polled = client.poll_feedback(slot, &stale);
+    check(polled == ERROR_NOT_FOUND,
+          "poll_feedback on a released slot is ERROR_NOT_FOUND, got " + std::to_string(polled));
+  }
   std::printf("%s\n", failures ? "PROBE FAILED" : "PROBE PASSED");
   timeEndPeriod(1);
   return failures ? 1 : 0;

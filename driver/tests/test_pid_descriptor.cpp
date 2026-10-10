@@ -892,6 +892,38 @@ int main() {
     // constant names put the two buttons on each other's bit.
     sc26_state state {};
     state.reset();
+    {
+      // A hover never creates a pad contact (the pads are capacitive and hover
+      // is also the value of a zero-initialised request); it only moves one
+      // that is already down, as on the PlayStation pads.
+      input_state_request input {};
+      input.header.size = sizeof(input);
+      input.header.version = k_protocol_version;
+      touch_state_request touch {};
+      touch.header.size = sizeof(touch);
+      touch.header.version = k_protocol_version;
+      touch.contact_index = 0;
+      touch.event_type = static_cast<std::uint8_t>(touch_event::hover);
+      touch.x = 1000;
+      touch.y = 2000;
+      check(!apply_sc26_touch(touch, &state), "sc26 hover without a contact is refused");
+      check((encode_sc26_input(input, &state).buttons & lvg::sc26_usb::btn_left_pad_touch) == 0,
+            "sc26 hover without a contact leaves the pad untouched");
+      touch.event_type = static_cast<std::uint8_t>(touch_event::down);
+      check(apply_sc26_touch(touch, &state), "sc26 touch down accepted");
+      const auto down_x = encode_sc26_input(input, &state).left_pad_x;
+      touch.event_type = static_cast<std::uint8_t>(touch_event::hover);
+      touch.x = 60000;
+      check(apply_sc26_touch(touch, &state), "sc26 hover moves an active contact");
+      const auto hovered = encode_sc26_input(input, &state);
+      check((hovered.buttons & lvg::sc26_usb::btn_left_pad_touch) != 0,
+            "sc26 hover keeps the contact down");
+      check(hovered.left_pad_x != down_x && hovered.left_pad_x > 0,
+            "sc26 hover updates the contact position");
+      touch.event_type = static_cast<std::uint8_t>(touch_event::up);
+      check(apply_sc26_touch(touch, &state), "sc26 touch up accepted");
+      state.reset();
+    }
     check(sc26_buttons(button_mask::start, state) == lvg::sc26_usb::btn_view,
           "sc26 start is the 0x40 bit SDL calls START");
     check(sc26_buttons(button_mask::back, state) == lvg::sc26_usb::btn_menu,
@@ -1122,6 +1154,34 @@ int main() {
 
     switch_input_report report = encode_switch_input(input, &state);
     check(report.report_id == k_switch_input_report_id, "switch report id");
+
+    {
+      // Battery level is a quartile step 0/2/4/6/8; any charge at all is at
+      // least "critical" (2), never "empty".
+      battery_state_request battery {};
+      battery.header.size = sizeof(battery);
+      battery.header.version = k_protocol_version;
+      battery.flags = static_cast<std::uint8_t>(lvg::battery_state::discharging);
+      const auto level = [&](std::uint8_t percent) {
+        battery.percent = percent;
+        check(apply_switch_battery(battery, &state), "switch battery accepted");
+        return static_cast<int>(encode_switch_input(input, &state).connection_battery >> 4);
+      };
+      check(level(0) == 0, "switch 0 % is empty");
+      check(level(1) == 2, "switch 1 % is critical, not empty");
+      check(level(10) == 2, "switch 10 % is critical, not empty");
+      check(level(25) == 2, "switch 25 % is critical");
+      check(level(26) == 4, "switch 26 % is low");
+      check(level(50) == 4, "switch 50 % is low");
+      check(level(51) == 6, "switch 51 % is medium");
+      check(level(75) == 6, "switch 75 % is medium");
+      check(level(76) == 8, "switch 76 % is full");
+      check(level(100) == 8, "switch 100 % is full");
+      battery.percent = 101;
+      check(apply_switch_battery(battery, &state), "switch unknown percentage accepted");
+      check((encode_switch_input(input, &state).connection_battery >> 4) == 8,
+            "switch unknown percentage keeps the last level");
+    }
 
     const auto axis = [](const std::uint8_t *st) {
       return static_cast<std::uint16_t>(st[0] | ((st[1] & 0x0F) << 8));
