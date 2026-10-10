@@ -995,9 +995,14 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
   const bool steam = is_steam_controller(slot->selected_profile);
   const lvg::driver::sc26_battery_report battery_report =
     steam ? lvg::driver::encode_sc26_battery(slot->sc26) : lvg::driver::sc26_battery_report {};
+  // Same rule as the keep-alive tick: a battery aside only goes out while someone
+  // reads. Queued for a reader that may never come, it took a transition-ring slot
+  // and a readiness round trip when Steam reopened the device. Without a reader the
+  // period is cleared so the first ready tick carries the fresh value.
+  const bool steam_reader = steam && slot->pump.ready();
   if (steam) {
     // The client's own update restarts the keep-alive's 3.5 s battery period.
-    slot->sc26.last_battery_us = now_us();
+    slot->sc26.last_battery_us = steam_reader ? now_us() : 0;
   }
   unlock_context(context);
 
@@ -1011,6 +1016,10 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
     // the state report. It goes out in order and in number like a transition
     // but must not discard a pending state snapshot (a transition clears the
     // latest continuous report), so it travels as an aside, like the 0x44 ack.
+    if (!steam_reader) {
+      unlock_lifetime(context);
+      return STATUS_SUCCESS;
+    }
     status = pump_report(context, *slot, &battery_report, sizeof(battery_report),
                          lvg::driver::k_sc26_battery_report_id,
                          lvg::driver::report_kind::aside);
