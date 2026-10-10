@@ -10,6 +10,14 @@
 namespace lvg::driver {
 namespace {
 
+// The factory motion calibration this driver serves at SPI 0x6020 (zero
+// offsets, nominal sensitivity). Hosts decode the IMU with it: SDL and
+// hid-nintendo use 936 / (gyro_sensitivity - offset) deg/s per count and
+// 4 / (accel_sensitivity - offset) g per count, so the conversions below must
+// use the same numbers or the host reads a different rate than the client sent.
+constexpr std::int64_t k_switch_accel_sensitivity = 16384;  // 4096 counts/g
+constexpr std::int64_t k_switch_gyro_sensitivity = 13371;   // 936/13371 deg/s per count, ~14.28 counts per deg/s
+
 // The Pro Controller's USB report descriptor: a vendor collection carrying the
 // console's own protocol. Everything interesting is vendor-defined, because the
 // host drives this device by report id and byte offset rather than by HID
@@ -125,8 +133,8 @@ std::size_t read_spi(const std::uint32_t address, const std::uint8_t length, std
         return length;
       }
       std::memset(out, 0, length);
-      const std::uint16_t accel_scale = 16384;
-      const std::uint16_t gyro_scale = 13371;
+      const auto accel_scale = static_cast<std::uint16_t>(k_switch_accel_sensitivity);
+      const auto gyro_scale = static_cast<std::uint16_t>(k_switch_gyro_sensitivity);
       for (int axis = 0; axis < 3; ++axis) {
         out[6 + axis * 2] = static_cast<std::uint8_t>(accel_scale & 0xFFu);
         out[7 + axis * 2] = static_cast<std::uint8_t>(accel_scale >> 8);
@@ -158,6 +166,7 @@ void switch_state::reset() noexcept {
   timer = 0;
   battery_level = 8;  // Full; the console reports this in even steps 0..8.
   cable_connected = true;
+  charging = false;
   for (int axis = 0; axis < 3; ++axis) {
     gyro[axis] = 0;
     accel[axis] = 0;
@@ -187,8 +196,10 @@ switch_input_report encode_switch_input(
     report.timer = state->timer;
     // High nibble battery, low nibble connection: 0 means a wired Pro
     // Controller rather than a Joy-Con on a rail.
+    // Bit 4 of the status byte is "charging"; the console shows it next to the level.
     report.connection_battery =
-      static_cast<std::uint8_t>((state->battery_level & 0x0Eu) << 4 | (state->cable_connected ? 0x01u : 0x00u));
+      static_cast<std::uint8_t>((state->battery_level & 0x0Eu) << 4 | (state->charging ? 0x10u : 0x00u) |
+                                (state->cable_connected ? 0x01u : 0x00u));
     report.vibrator_report = 0x0C;
   } else {
     report.connection_battery = 0x81;
@@ -302,10 +313,12 @@ bool apply_switch_motion(const motion_state_request &motion, switch_state *const
       return true;
     }
     case motion_kind::gyroscope: {
-      // And roughly 79 counts per degree per second.
+      // Counts per degree per second as the served calibration implies:
+      // sensitivity / 936 (about 14.28). The previous 79 made every host read
+      // the gyro about 5.5x too fast.
       const auto convert = [](const std::int64_t milli) {
         return clamp_i16(static_cast<std::int32_t>(
-          std::clamp<std::int64_t>((milli * 79) / 1000, INT32_MIN, INT32_MAX)));
+          std::clamp<std::int64_t>((milli * k_switch_gyro_sensitivity) / (936 * 1000), INT32_MIN, INT32_MAX)));
       };
       state->gyro[0] = convert(motion.x_milli);
       state->gyro[1] = convert(motion.y_milli);
@@ -326,6 +339,7 @@ bool apply_switch_battery(const battery_state_request &battery, switch_state *co
   state->cable_connected =
     reported == lvg::battery_state::charging || reported == lvg::battery_state::full ||
     reported == lvg::battery_state::not_charging;
+  state->charging = reported == lvg::battery_state::charging;
 
   if (battery.percent <= 100) {
     // Reported in even steps from 0 (empty) to 8 (full).

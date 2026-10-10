@@ -105,7 +105,8 @@ const std::uint8_t *ds5_descriptor(std::size_t *const size) noexcept {
 
 ds5_input_report encode_ds5_input(
   const input_state_request &input,
-  ds5_state *const state) noexcept {
+  ds5_state *const state,
+  const std::uint64_t now_us) noexcept {
   ds5_input_report report {};
   report.report_id = k_ds5_input_report_id;
 
@@ -174,9 +175,14 @@ ds5_input_report encode_ds5_input(
     state->sequence = static_cast<std::uint8_t>(state->sequence + 1);
     report.sequence = state->sequence;
 
-    // The console's sensor clock runs at roughly 3 microsecond ticks; a
-    // consumer only needs it to advance monotonically between samples.
-    state->sensor_timestamp += 1333;
+    // The sensor clock runs at 0.33 us ticks and hosts integrate the gyro with
+    // its delta; reports are event driven here, so derive it from the driver
+    // clock when the caller has one (a fixed step per report warped the delta).
+    if (now_us != 0) {
+      state->sensor_timestamp = static_cast<std::uint32_t>(now_us * 3);
+    } else {
+      state->sensor_timestamp += 1333;
+    }
     report.sensor_timestamp = state->sensor_timestamp;
 
     for (int axis = 0; axis < 3; ++axis) {

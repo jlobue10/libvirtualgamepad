@@ -143,6 +143,7 @@ struct switch_state {
   std::uint8_t timer;
   std::uint8_t battery_level;   // 0..8, even values, high nibble of the status byte.
   bool cable_connected;
+  bool charging;                // bit 4 of the status byte
   std::int16_t gyro[3];
   std::int16_t accel[3];
   std::uint8_t player_lights;

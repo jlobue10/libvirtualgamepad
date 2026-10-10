@@ -49,16 +49,40 @@ def gh(*args, data=None):
 
 
 def current_pins(cmake_text):
-    """Old (tag, sha256, revision, driver_ver) from the CMake contract, where each is unambiguous."""
-    def grab(name, pattern):
-        m = re.search(r'set\(' + name + r'\s+"(' + pattern + r')"', cmake_text)
+    """Old (tag, sha256, revision, driver_ver, protocol) from the CMake contract, where each is unambiguous."""
+    def grab(name, pattern, quoted=True):
+        q = '"' if quoted else ''
+        m = re.search(r'set\(' + name + r'\s+' + q + '(' + pattern + ')' + q, cmake_text)
         if not m:
             sys.exit(f'{name} not found in the CMake contract')
         return m.group(1)
     return (grab('SUNSHINE_VHF_GAMEPAD_RELEASE_TAG', r'v0\.1\.0-beta\.\d+'),
             grab('SUNSHINE_VHF_GAMEPAD_RELEASE_ASSET_SHA256', r'[0-9a-f]{64}'),
             grab('SUNSHINE_VHF_GAMEPAD_SOURCE_REVISION', r'[0-9a-f]{40}'),
-            grab('SUNSHINE_VHF_GAMEPAD_DRIVER_VER', r'\d\d/\d\d/\d{4},0\.1\.0\.\d+'))
+            grab('SUNSHINE_VHF_GAMEPAD_DRIVER_VER', r'\d\d/\d\d/\d{4},0\.1\.0\.\d+'),
+            grab('SUNSHINE_VHF_GAMEPAD_PROTOCOL_VERSION', r'\d+', quoted=False))
+
+
+def rewrite_protocol(path, text, old, new):
+    """The protocol version is hard-coded at several sites that carry no other pin."""
+    if old == new:
+        return text
+    subs = {
+        'cmake/packaging/windows_virtual_gamepad_contract.cmake': [
+            (rf'(set\(SUNSHINE_VHF_GAMEPAD_PROTOCOL_VERSION ){old}( CACHE)', rf'\g<1>{new}\g<2>')],
+        'src_assets/windows/drivers/vhf-gamepad/install.ps1': [
+            (rf'(\$expectedProtocolVersion = ){old}\b', rf'\g<1>{new}')],
+        '.github/workflows/ci-windows.yml': [
+            (rf"(VHF_PROTOCOL_VERSION: '){old}(')", rf'\g<1>{new}\g<2>'),
+            (rf'(-DSUNSHINE_VHF_GAMEPAD_PROTOCOL_VERSION=){old}\b', rf'\g<1>{new}'),
+            (rf'(-ExpectedProtocolVersion ){old}\b', rf'\g<1>{new}'),
+            (rf'(protocol_version -ne ){old}( -or)', rf'\g<1>{new}\g<2>')],
+    }
+    for pattern, repl in subs.get(path, []):
+        text, n = re.subn(pattern, repl, text)
+        if n == 0:
+            sys.exit(f'{path}: protocol site {pattern!r} not found; update the tool before pinning')
+    return text
 
 
 def main():
@@ -84,7 +108,8 @@ def main():
     if lock['tag'] != args.tag:
         sys.exit(f"lock is for {lock['tag']}, not {args.tag}")
     new = dict(tag=lock['tag'], sha=lock['archive']['sha256'], rev=lock['source_revision'],
-               ver=lock['driver_ver'], asset=lock['archive']['name'])
+               ver=lock['driver_ver'], asset=lock['archive']['name'],
+               protocol=str(lock['protocol_version']))
     print('new pins:', json.dumps(new, indent=2))
 
     head = gh(f'repos/{VIBEPOLLO_REPO}/git/ref/heads/{VIBEPOLLO_BRANCH}')['object']['sha']
@@ -95,9 +120,11 @@ def main():
     for path in FILES:
         blob = gh(f'repos/{VIBEPOLLO_REPO}/contents/{path}?ref={VIBEPOLLO_BRANCH}')
         contents[path] = base64.b64decode(blob['content']).decode('utf-8')
-    old_tag, old_sha, old_rev, old_ver = current_pins(contents[FILES[1]])
+    old_tag, old_sha, old_rev, old_ver, old_protocol = current_pins(contents[FILES[1]])
     old_repo = re.search(r'set\(SUNSHINE_VHF_GAMEPAD_REPOSITORY "([^"]+)"', contents[FILES[1]]).group(1)
-    print(f'old pins: {old_repo} {old_tag} sha {old_sha[:12]} rev {old_rev[:12]} ver {old_ver}')
+    print(f'old pins: {old_repo} {old_tag} sha {old_sha[:12]} rev {old_rev[:12]} ver {old_ver} protocol {old_protocol}')
+    if old_protocol != new['protocol']:
+        print(f'protocol version changes {old_protocol} -> {new["protocol"]}: rewriting the hard-coded sites too')
     already_pinned = old_rev == new['rev'] and old_sha == new['sha']
     if already_pinned:
         print('pins already match this release; only repository-name changes will be committed')
@@ -110,6 +137,7 @@ def main():
                    .replace(old_ver, new['ver']).replace(old_tag, new['tag'])
                    .replace(old_tag[1:], new['tag'][1:]).replace(old_repo, args.repository)
                    .replace(UPSTREAM_DRIVER_REPO, args.repository))
+        updated = rewrite_protocol(path, updated, old_protocol, new['protocol'])
         counts = {k: updated.count(v) for k, v in
                   (('tag', new['tag']), ('sha', new['sha']), ('rev', new['rev']), ('ver', new['ver']),
                    ('repository', args.repository))}

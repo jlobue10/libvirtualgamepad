@@ -1102,6 +1102,18 @@ int main() {
 
   {
     switch_state state {};
+    {
+      // The gyro conversion must agree with the calibration the driver serves at
+      // SPI 0x6020 (sensitivity 13371, offset 0): hosts decode 936/13371 deg/s per
+      // count, so 100 deg/s is about 1428 counts, not the 7900 of the old scale.
+      switch_state gyro_state {};
+      motion_state_request gyro {};
+      gyro.motion_type = static_cast<std::uint8_t>(motion_kind::gyroscope);
+      gyro.x_milli = 100000;  // 100 deg/s
+      std::ignore = apply_switch_motion(gyro, &gyro_state);
+      check(gyro_state.gyro[0] >= 1420 && gyro_state.gyro[0] <= 1436,
+            "switch gyro: 100 deg/s encodes to ~1428 counts (936/13371 deg/s per count)");
+    }
     state.reset();
 
     input_state_request input {};
