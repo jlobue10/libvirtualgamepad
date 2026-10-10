@@ -338,6 +338,21 @@ int main() {
     std::memset(cmd, 0, sizeof(cmd));
     cmd[0] = 1; cmd[1] = cmd_load_default_settings;
     check(set_feature(cmd, sizeof(cmd), fs) && fs.lizard_mode && fs.imu_mode == 0, "load defaults");
+    {
+      // The settings table agrees with the flags: id 9 reads back as 1 after the load and
+      // GET_SETTINGS_DEFAULTS answers the same value.
+      std::uint8_t q[64] {};
+      std::uint8_t r[64] {};
+      q[0] = 1; q[1] = cmd_get_settings_values; q[2] = 2; q[3] = setting_lizard_mode; q[4] = setting_imu_mode;
+      check(set_feature(q, sizeof(q), fs) && get_feature(r, sizeof(r), fs) == 64 &&
+              r[3] == setting_lizard_mode && r[4] == 1 && r[5] == 0 && r[6] == setting_imu_mode && r[7] == 0,
+            "after load defaults the settings table reports lizard mode on and IMU off");
+      q[1] = cmd_get_settings_defaults;
+      check(set_feature(q, sizeof(q), fs) && get_feature(r, sizeof(r), fs) == 64 && r[4] == 1 && r[7] == 0,
+            "GET_SETTINGS_DEFAULTS answers the same values the load restores");
+      feature_state fresh {};
+      check(fresh.settings[setting_lizard_mode] == 1 && fresh.lizard_mode, "a fresh unit's table and flag agree");
+    }
   }
 
   // Replay of the commands Steam sent the author's unit on connect

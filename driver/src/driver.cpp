@@ -954,6 +954,14 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
     // "full circle" calibration step stalled over the stream and passed against
     // the probe at the same rate and value cadence; the burst timing was the
     // one stream property left (2026-10-08, probe --burst stages it).
+    if (context->sc26_keepalive_timer == nullptr || !context->sc26_timer_running) {
+      // No worker to carry the sample (the timer or its event could not be created, or
+      // no state report has started the cadence yet): send it now rather than leave the
+      // IMU frozen until the next input state change.
+      status = submit_profile_report(context, *slot);
+      unlock_lifetime(context);
+      return status;
+    }
     unlock_lifetime(context);
     return STATUS_SUCCESS;
   }

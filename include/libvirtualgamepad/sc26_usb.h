@@ -173,7 +173,23 @@ inline constexpr std::uint8_t string_attr_reply_length = 20;
 
 inline constexpr std::uint8_t setting_lizard_mode = 9;
 inline constexpr std::uint8_t setting_imu_mode = 48;
+
+// What the unit reports after LOAD_DEFAULT_SETTINGS and for GET_SETTINGS_DEFAULTS:
+// lizard mode on, everything else zero.
+[[nodiscard]] constexpr std::uint16_t default_setting(const std::uint8_t id) noexcept {
+  return id == setting_lizard_mode ? 1u : 0u;
+}
+
 inline constexpr std::uint8_t setting_count = 99;  // SETTING_COUNT in controller_constants.h
+
+// The settings table of a fresh unit (and after LOAD_DEFAULT_SETTINGS).
+[[nodiscard]] constexpr std::array<std::uint16_t, setting_count> default_settings() noexcept {
+  std::array<std::uint16_t, setting_count> table {};
+  for (std::size_t id = 0; id < setting_count; ++id) {
+    table[id] = default_setting(static_cast<std::uint8_t>(id));
+  }
+  return table;
+}
 
 // Charge states of the battery report (EChargeState).
 inline constexpr std::uint8_t charge_reset = 0;
@@ -685,7 +701,10 @@ struct feature_state {
   // Synthetic here; never a real unit's.
   std::array<char, 16> unit_serial {"LVGSC260000"};
   std::array<char, 16> board_serial {"LVGSC26BOARD0"};
-  std::uint16_t settings[setting_count] {};
+  // The settings table is the source of truth; lizard_mode/imu_mode mirror entries 9 and
+  // 48 so a GET_SETTINGS_VALUES answer and the flags never disagree (a fresh unit and a
+  // LOAD_DEFAULT_SETTINGS both report lizard mode on).
+  std::array<std::uint16_t, setting_count> settings {default_settings()};
   bool lizard_mode {true};
   std::uint8_t imu_mode {};
   // Reply to the most recent command, read back with GetFeature.
@@ -741,7 +760,7 @@ inline void put_le32(std::uint8_t *p, const std::uint32_t v) noexcept {
     case cmd_set_default_digital_mappings:
       return true;
     case cmd_load_default_settings:
-      std::memset(fs.settings, 0, sizeof(fs.settings));
+      fs.settings = default_settings();
       fs.lizard_mode = true;
       fs.imu_mode = 0;
       return true;
@@ -750,6 +769,7 @@ inline void put_le32(std::uint8_t *p, const std::uint32_t v) noexcept {
         const std::uint8_t id = payload[i];
         const std::uint16_t value = get_le16(payload + i + 1);
         if (id < setting_count) fs.settings[id] = value;
+
         if (id == setting_lizard_mode) fs.lizard_mode = value != 0;
         if (id == setting_imu_mode) fs.imu_mode = static_cast<std::uint8_t>(value);
       }
@@ -766,14 +786,15 @@ inline void put_le32(std::uint8_t *p, const std::uint32_t v) noexcept {
         for (std::uint8_t id = 0; id < setting_count && n < max_triples; ++id, ++n) {
           out[n * 3] = id;
           put_le16(out + n * 3 + 1, type == cmd_get_settings_values ? fs.settings[id]
-                                     : type == cmd_get_settings_maxs ? 0xFFFFu : 0u);
+                                     : type == cmd_get_settings_maxs ? 0xFFFFu : default_setting(id));
         }
       } else {
         for (std::size_t i = 0; i < length && n < max_triples; ++i, ++n) {
           const std::uint8_t id = payload[i];
           out[n * 3] = id;
           const std::uint16_t v = id < setting_count && type == cmd_get_settings_values ? fs.settings[id]
-                                  : type == cmd_get_settings_maxs ? 0xFFFFu : 0u;
+                                  : type == cmd_get_settings_maxs ? 0xFFFFu
+                                  : id < setting_count ? default_setting(id) : 0u;
           put_le16(out + n * 3 + 1, v);
         }
       }
