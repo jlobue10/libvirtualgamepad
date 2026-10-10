@@ -547,11 +547,13 @@ void destroy_owned_controller(
   const bool exists = slot.state != slot_state::empty;
   unlock_context(context);
 
-  if (!owned) {
-    return STATUS_ACCESS_DENIED;
-  }
+  // reset_slot clears the owner, so test for emptiness first: a controller the
+  // client never created is "not found", not "someone else's".
   if (!exists) {
     return STATUS_NOT_FOUND;
+  }
+  if (!owned) {
+    return STATUS_ACCESS_DENIED;
   }
 
   destroy_owned_controller(context, owner, request.controller_id);
@@ -653,6 +655,12 @@ NTSTATUS submit_taken(
     // The report was consumed from the pump; put readiness back so the next
     // submission is not stranded behind a failure that has already passed.
     slot.pump.set_ready();
+    // No readiness callback follows a failed submit, so if the worker parked
+    // while this one was in flight nothing else would arm it again.
+    if (context->sc26_timer_parked && slot.have_last_input &&
+        is_steam_controller(slot.selected_profile)) {
+      arm_sc26_keepalive(context);
+    }
   }
   unlock_context(context);
   return status;
@@ -1110,6 +1118,9 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
   }
 
   if (is_xbox(slot.selected_profile)) {
+    // Kept for IOCTL_HID_GET_INPUT_REPORT, which answers from the last state.
+    slot.last_input = request;
+    slot.have_last_input = true;
     // The two reports differ only in length, so the shorter one is built from
     // the same encoder and both travel the same path.
     lvg::driver::xbox_series_input_report xbox_report {};
@@ -1139,6 +1150,8 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
     return STATUS_NOT_SUPPORTED;
   }
 
+  slot.last_input = request;
+  slot.have_last_input = true;
   const generic_input_report report = encode_generic_input(request);
   const auto kind =
     slot.pump.classify(request.buttons, request.left_trigger, request.right_trigger);
@@ -1761,6 +1774,21 @@ void evt_pid_tick(WDFTIMER timer) {
     // A timer may stop itself; passing FALSE keeps this from waiting on the
     // callback it is already running inside.
     WdfTimerStop(timer, FALSE);
+    if (stopping) {
+      return;
+    }
+    // A write callback may have started an effect (and the timer) between the
+    // unlock above and the stop; the stop just dequeued that start. Look again.
+    bool restarted = false;
+    lock_context(context);
+    for (auto &slot : context->controllers) {
+      restarted = restarted ||
+        (slot.state == slot_state::active && slot.force_feedback && slot.pid.needs_tick());
+    }
+    unlock_context(context);
+    if (restarted) {
+      WdfTimerStart(timer, WDF_REL_TIMEOUT_IN_MS(k_pid_tick_ms));
+    }
   }
 }
 

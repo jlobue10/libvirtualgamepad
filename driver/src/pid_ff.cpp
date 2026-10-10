@@ -860,7 +860,12 @@ void pid_engine::advance(const std::uint32_t elapsed_ms) noexcept {
       continue;
     }
 
-    if (slot.loop_count > 0) {
+    // Loop Count is the total number of plays (1 = once); 0xFF plays until stopped.
+    if (slot.loop_count == 0xFF) {
+      slot.elapsed_ms = slot.start_delay_ms;
+      continue;
+    }
+    if (slot.loop_count > 1) {
       --slot.loop_count;
       slot.elapsed_ms = slot.start_delay_ms;
       continue;
