@@ -65,11 +65,23 @@ $cat = Join-Path $PackageDir 'driver\VibeshineVhfGamepad.cat'
 $setup = Join-Path $PackageDir 'tools\VibeshineVhfGamepadDeviceSetup.exe'
 foreach ($f in $cer, $inf, $cat, $setup) { if (-not (Test-Path $f)) { throw "missing $f" } }
 
+# Trust the bundled certificate only after proving it signed this package's catalog and setup
+# tool (the same gate as tools/trust-test-certificate.ps1); a swapped or mismatched .cer must
+# never land in LocalMachine\Root.
+$certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($cer)
+$thumbprint = $certificate.Thumbprint.Replace(' ', '').ToUpperInvariant()
+foreach ($signed in @(@{ Path = $cat; Name = 'catalog' }, @{ Path = $setup; Name = 'setup tool' })) {
+    $sig = Get-AuthenticodeSignature -LiteralPath $signed.Path
+    if ($null -eq $sig.SignerCertificate) { throw "the package $($signed.Name) has no signer certificate" }
+    if ($sig.Status -eq [System.Management.Automation.SignatureStatus]::HashMismatch) { throw "the package $($signed.Name) has a hash mismatch" }
+    if ($sig.SignerCertificate.Thumbprint.Replace(' ', '').ToUpperInvariant() -ne $thumbprint) {
+        throw "the bundled certificate ($thumbprint) did not sign the package $($signed.Name) ($($sig.SignerCertificate.Thumbprint))"
+    }
+    Log "$($signed.Name) signature: $($sig.Status) ($($sig.SignerCertificate.Subject))"
+}
 Log 'trusting the test certificate (Root + TrustedPublisher)'
 certutil -addstore -f Root $cer | Select-Object -Last 1 | ForEach-Object { Log "  $_" }
 certutil -addstore -f TrustedPublisher $cer | Select-Object -Last 1 | ForEach-Object { Log "  $_" }
-$sig = Get-AuthenticodeSignature $cat
-Log "catalog signature: $($sig.Status) ($($sig.SignerCertificate.Subject))"
 
 Log 'driver status before:'
 & $setup status 2>&1 | ForEach-Object { Log "  $_" }

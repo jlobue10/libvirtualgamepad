@@ -111,6 +111,14 @@ struct ds5_output_report {
 
 static_assert(sizeof(ds5_touch_point) == 4);
 static_assert(sizeof(ds5_input_report) == 64);
+// Input offsets as hid-playstation's dualsense_input_report reads them.
+static_assert(offsetof(ds5_input_report, sequence) == 7);
+static_assert(offsetof(ds5_input_report, buttons) == 8);
+static_assert(offsetof(ds5_input_report, gyro) == 16);
+static_assert(offsetof(ds5_input_report, accel) == 22);
+static_assert(offsetof(ds5_input_report, sensor_timestamp) == 28);
+static_assert(offsetof(ds5_input_report, touch) == 33);
+static_assert(offsetof(ds5_input_report, status) == 53);
 static_assert(sizeof(ds5_trigger_effect) == 11);
 static_assert(sizeof(ds5_output_report) == 48);
 

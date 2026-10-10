@@ -201,7 +201,7 @@ struct input_report {
   std::int16_t left_y;
   std::int16_t right_x;
   std::int16_t right_y;
-  std::int16_t left_pad_x;     // +/-32767, zero when untouched
+  std::int16_t left_pad_x;     // full int16 range (x reaches -32768 at the left edge), zero when untouched
   std::int16_t left_pad_y;
   std::uint16_t left_pressure; // 0..32767
   std::int16_t right_pad_x;
@@ -325,7 +325,7 @@ inline constexpr std::uint8_t report_descriptor[] = {
   0x05, 0x01,                   //     Usage Page (Generic Desktop)
   0x09, 0x30,                   //     Usage (0x30)
   0x09, 0x31,                   //     Usage (0x31)
-  0x15, 0x81,                   //     Logical Minimum (129)
+  0x15, 0x81,                   //     Logical Minimum (-127)
   0x25, 0x7f,                   //     Logical Maximum (127)
   0x75, 0x08,                   //     Report Size (8)
   0x95, 0x02,                   //     Report Count (2)
@@ -643,7 +643,7 @@ inline void apply_gyro_milli(state &st, const std::int32_t x, const std::int32_t
   // 4160 mV system, 4980 mV input, 157 mA, 239 mA input, temperature 0x76ED.
   // Nothing on the host side acts on them.
   const bool on_usb = st.charge_state == charge_charging || st.charge_state == charge_done;
-  r.battery_voltage_mv = static_cast<std::uint16_t>(3500 + (r.battery_level * 6));
+  r.battery_voltage_mv = static_cast<std::uint16_t>(3522 + (r.battery_level * 6));  // 4122 at 100 %
   r.system_voltage_mv = 4160;
   r.input_voltage_mv = on_usb ? 4980 : 0;
   r.current_ma = on_usb ? 157 : 0;

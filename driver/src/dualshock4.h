@@ -107,6 +107,15 @@ struct ds4_output_report {
 static_assert(sizeof(ds4_touch_point) == 4);
 static_assert(sizeof(ds4_touch_packet) == 9);
 static_assert(sizeof(ds4_input_report) == 64);
+// Input offsets as hid-playstation's dualshock4_input_report_common reads them.
+static_assert(offsetof(ds4_input_report, buttons0) == 5);
+static_assert(offsetof(ds4_input_report, left_trigger) == 8);
+static_assert(offsetof(ds4_input_report, timestamp) == 10);
+static_assert(offsetof(ds4_input_report, gyro_x) == 13);
+static_assert(offsetof(ds4_input_report, accel_x) == 19);
+static_assert(offsetof(ds4_input_report, battery_status) == 30);
+static_assert(offsetof(ds4_input_report, touch_packet_count) == 33);
+static_assert(offsetof(ds4_input_report, touch) == 34);
 static_assert(sizeof(ds4_output_report) == 32);
 
 // As with the DualSense, these are the controller's byte offsets, not ours.

@@ -137,6 +137,14 @@ struct switch_usb_reply {
 
 static_assert(sizeof(switch_input_report) == 64);
 static_assert(sizeof(switch_subcommand_reply) == 64);
+// Offsets as hid-nintendo reads the 0x30 report and the 0x21 subcommand reply.
+static_assert(offsetof(switch_input_report, buttons_right) == 3);
+static_assert(offsetof(switch_input_report, left_stick) == 6);
+static_assert(offsetof(switch_input_report, right_stick) == 9);
+static_assert(offsetof(switch_input_report, imu) == 13);
+static_assert(offsetof(switch_subcommand_reply, ack) == 13);
+static_assert(offsetof(switch_subcommand_reply, subcommand) == 14);
+static_assert(offsetof(switch_subcommand_reply, data) == 15);
 static_assert(sizeof(switch_usb_reply) == 64);
 
 struct switch_state {

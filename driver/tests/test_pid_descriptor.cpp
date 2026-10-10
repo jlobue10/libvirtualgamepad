@@ -711,6 +711,15 @@ int main() {
     check(apply_ds4_touch(touch, &state), "ds4 touch down accepted");
 
     ds4_input_report report = encode_ds4_input(input, &state);
+    {
+      // Wire layout pinned at literal byte indices, independent of the struct.
+      const auto *b = reinterpret_cast<const std::uint8_t *>(&report);
+      check(b[0] == report.report_id && b[8] == report.left_trigger && b[9] == report.right_trigger,
+            "ds4 triggers sit at bytes 8 and 9");
+      check(b[33] == report.touch_packet_count && b[30] == report.battery_status, "ds4 battery byte 30, touch count byte 33");
+      check((b[34 + 1] & 0x80) == 0 && b[34] == report.touch[0].timestamp,
+            "ds4 first touch packet starts at byte 34");
+    }
     check((report.touch[0].points[0].tracking_id & 0x80) == 0, "ds4 contact reads as active");
     const std::uint16_t x = static_cast<std::uint16_t>(
       report.touch[0].points[0].coordinates[0] |

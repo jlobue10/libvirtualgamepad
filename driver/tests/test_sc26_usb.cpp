@@ -200,6 +200,10 @@ int main() {
     st.charge_state = charge_discharging;
     const battery_report d = encode_battery(st);
     check(d.input_voltage_mv == 0 && d.current_ma == 0, "discharging report has no input figures");
+    st.battery_percent = 100;
+    st.charge_state = charge_charging;
+    const battery_report full = encode_battery(st);
+    check(full.battery_voltage_mv == 4122, "full charging report carries the captured 4122 mV cell voltage");
   }
 
   // The driver keeps the state in zero-initialised WDF memory: reset() has to
