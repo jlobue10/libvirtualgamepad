@@ -3,6 +3,8 @@
 
 #include "switch_pro.h"
 
+#include <algorithm>
+#include <cstdint>
 #include <cstring>
 
 namespace lvg::driver {
@@ -289,8 +291,10 @@ bool apply_switch_motion(const motion_state_request &motion, switch_state *const
   switch (static_cast<motion_kind>(motion.motion_type)) {
     case motion_kind::accelerometer: {
       // The console's accelerometer reads 4096 counts per gravity.
-      const auto convert = [](const std::int32_t milli) {
-        return clamp_i16((milli * 4096) / 9807);
+      // 64-bit product: INT32-range input from a rogue client must saturate, not wrap.
+      const auto convert = [](const std::int64_t milli) {
+        return clamp_i16(static_cast<std::int32_t>(
+          std::clamp<std::int64_t>((milli * 4096) / 9807, INT32_MIN, INT32_MAX)));
       };
       state->accel[0] = convert(motion.x_milli);
       state->accel[1] = convert(motion.y_milli);
@@ -299,8 +303,9 @@ bool apply_switch_motion(const motion_state_request &motion, switch_state *const
     }
     case motion_kind::gyroscope: {
       // And roughly 79 counts per degree per second.
-      const auto convert = [](const std::int32_t milli) {
-        return clamp_i16((milli * 79) / 1000);
+      const auto convert = [](const std::int64_t milli) {
+        return clamp_i16(static_cast<std::int32_t>(
+          std::clamp<std::int64_t>((milli * 79) / 1000, INT32_MIN, INT32_MAX)));
       };
       state->gyro[0] = convert(motion.x_milli);
       state->gyro[1] = convert(motion.y_milli);

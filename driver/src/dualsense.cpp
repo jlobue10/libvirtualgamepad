@@ -3,6 +3,8 @@
 
 #include "dualsense.h"
 
+#include <algorithm>
+#include <cstdint>
 #include <cstring>
 
 #include "dualshock4.h"  // Shared motion scaling and the feedback encoder.
@@ -263,8 +265,10 @@ bool apply_ds5_motion(const motion_state_request &motion, ds5_state *const state
 
   switch (static_cast<motion_kind>(motion.motion_type)) {
     case motion_kind::accelerometer: {
-      const auto convert = [](const std::int32_t milli) {
-        return clamp_i16((milli * k_ds4_accel_counts_per_g) / k_milli_g);
+      // 64-bit product: INT32-range input from a rogue client must saturate, not wrap.
+      const auto convert = [](const std::int64_t milli) {
+        return clamp_i16(static_cast<std::int32_t>(
+          std::clamp<std::int64_t>((milli * k_ds4_accel_counts_per_g) / k_milli_g, INT32_MIN, INT32_MAX)));
       };
       state->accel[0] = convert(motion.x_milli);
       state->accel[1] = convert(motion.y_milli);
@@ -272,8 +276,9 @@ bool apply_ds5_motion(const motion_state_request &motion, ds5_state *const state
       return true;
     }
     case motion_kind::gyroscope: {
-      const auto convert = [](const std::int32_t milli) {
-        return clamp_i16((milli * k_ds4_gyro_counts_per_dps) / 1000);
+      const auto convert = [](const std::int64_t milli) {
+        return clamp_i16(static_cast<std::int32_t>(
+          std::clamp<std::int64_t>((milli * k_ds4_gyro_counts_per_dps) / 1000, INT32_MIN, INT32_MAX)));
       };
       state->gyro[0] = convert(motion.x_milli);
       state->gyro[1] = convert(motion.y_milli);

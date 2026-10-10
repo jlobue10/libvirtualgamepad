@@ -3,6 +3,8 @@
 
 #include "dualshock4.h"
 
+#include <algorithm>
+#include <cstdint>
 #include <cstring>
 
 namespace lvg::driver {
@@ -284,8 +286,10 @@ bool apply_ds4_motion(const motion_state_request &motion, ds4_state *const state
   switch (static_cast<motion_kind>(motion.motion_type)) {
     case motion_kind::accelerometer: {
       // Milli-metres per second squared into counts, via gravity.
-      const auto convert = [](const std::int32_t milli) {
-        return clamp_i16((milli * k_ds4_accel_counts_per_g) / k_milli_g);
+      // 64-bit product: INT32-range input from a rogue client must saturate, not wrap.
+      const auto convert = [](const std::int64_t milli) {
+        return clamp_i16(static_cast<std::int32_t>(
+          std::clamp<std::int64_t>((milli * k_ds4_accel_counts_per_g) / k_milli_g, INT32_MIN, INT32_MAX)));
       };
       state->accel[0] = convert(motion.x_milli);
       state->accel[1] = convert(motion.y_milli);
@@ -294,8 +298,9 @@ bool apply_ds4_motion(const motion_state_request &motion, ds4_state *const state
     }
     case motion_kind::gyroscope: {
       // Milli-degrees per second into counts.
-      const auto convert = [](const std::int32_t milli) {
-        return clamp_i16((milli * k_ds4_gyro_counts_per_dps) / 1000);
+      const auto convert = [](const std::int64_t milli) {
+        return clamp_i16(static_cast<std::int32_t>(
+          std::clamp<std::int64_t>((milli * k_ds4_gyro_counts_per_dps) / 1000, INT32_MIN, INT32_MAX)));
       };
       state->gyro[0] = convert(motion.x_milli);
       state->gyro[1] = convert(motion.y_milli);
