@@ -85,6 +85,26 @@ def rewrite_protocol(path, text, old, new):
     return text
 
 
+def tag_pattern(tag):
+    # The tag with or without its leading 'v' (asset file names carry the bare version), as a
+    # whole token: not preceded by a word character or dot, not followed by a digit or dot.
+    return re.compile(r'(?<![\w.])(v?)' + re.escape(tag[1:]) + r'(?![\d.])')
+
+
+def rewrite_tag(text, old_tag, new_tag):
+    """Replaces every occurrence of old_tag (and its bare version) in one anchored pass.
+
+    Two substring passes (full tag, then bare version) re-matched inside the text the first pass
+    wrote whenever the old number was a decimal prefix of the new one (beta.12 -> beta.120 became
+    beta.1200), and the same substring test made the survival guard fire for those pairs.
+    """
+    return tag_pattern(old_tag).sub(lambda m: m.group(1) + new_tag[1:], text)
+
+
+def tag_survives(text, old_tag):
+    return tag_pattern(old_tag).search(text) is not None
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--tag', required=True, help='driver fork release tag, e.g. v0.1.0-beta.101')
@@ -94,7 +114,8 @@ def main():
     args = ap.parse_args()
 
     if args.lock:
-        lock = json.load(open(args.lock, encoding='utf-8'))
+        # utf-8-sig: Windows PowerShell 5.1 writes a BOM for -Encoding utf8
+        lock = json.load(open(args.lock, encoding='utf-8-sig'))
     else:
         assets = gh(f'repos/{args.repository}/releases/tags/{args.tag}')['assets']
         lock_asset = [a for a in assets if a['name'].endswith('.release-lock.json')]
@@ -104,7 +125,7 @@ def main():
                               '-p', '*.release-lock.json', '-O', '-'], capture_output=True, text=True)
         if out.returncode != 0:
             sys.exit(out.stderr)
-        lock = json.loads(out.stdout)
+        lock = json.loads(out.stdout.lstrip('\ufeff'))
     if lock['tag'] != args.tag:
         sys.exit(f"lock is for {lock['tag']}, not {args.tag}")
     new = dict(tag=lock['tag'], sha=lock['archive']['sha256'], rev=lock['source_revision'],
@@ -132,16 +153,15 @@ def main():
     tree_entries = []
     for path in FILES:
         text = contents[path]
-        # Replace the full tag and the bare version (asset file names: libvirtualgamepad-0.1.0-beta.N-...).
         updated = (text.replace(old_sha, new['sha']).replace(old_rev, new['rev'])
-                   .replace(old_ver, new['ver']).replace(old_tag, new['tag'])
-                   .replace(old_tag[1:], new['tag'][1:]).replace(old_repo, args.repository)
+                   .replace(old_ver, new['ver']).replace(old_repo, args.repository)
                    .replace(UPSTREAM_DRIVER_REPO, args.repository))
+        updated = rewrite_tag(updated, old_tag, new['tag'])
         updated = rewrite_protocol(path, updated, old_protocol, new['protocol'])
         counts = {k: updated.count(v) for k, v in
                   (('tag', new['tag']), ('sha', new['sha']), ('rev', new['rev']), ('ver', new['ver']),
                    ('repository', args.repository))}
-        if not already_pinned and (old_rev in updated or old_sha in updated or old_tag in updated):
+        if not already_pinned and (old_rev in updated or old_sha in updated or tag_survives(updated, old_tag)):
             sys.exit(f'{path}: an old pin survived')
         print(f'  {path}: {old_tag} -> {new["tag"]}, occurrences {counts}')
         if path.endswith('install.ps1') and new['asset'] not in updated:
