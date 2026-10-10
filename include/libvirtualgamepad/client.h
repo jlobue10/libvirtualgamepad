@@ -34,6 +34,25 @@ class client final {
   [[nodiscard]] std::uint32_t available_features() const noexcept;
   [[nodiscard]] std::uint32_t maximum_controllers() const noexcept;
 
+  // Error contract shared by every call below (Win32 codes):
+  //   ERROR_INVALID_HANDLE     not connected
+  //   ERROR_INVALID_PARAMETER  controller_id >= maximum_controllers(), a null
+  //                            output pointer, or a submit whose header was
+  //                            not initialised for this protocol version
+  //   ERROR_NOT_SUPPORTED      the requested profile is not in
+  //                            available_profiles()
+  //   ERROR_REVISION_MISMATCH  the driver rejected a request we built
+  //                            (STATUS_INVALID_BUFFER_SIZE): a different
+  //                            protocol generation
+  //   ERROR_BUSY               create: the slot is occupied (by this or another
+  //                            handle, or still stopping)
+  //   ERROR_NOT_FOUND          the slot has no controller (destroy, submit,
+  //                            poll_feedback)
+  //   ERROR_ACCESS_DENIED      the slot belongs to another handle
+  //   ERROR_NOT_READY          the device is stopping or stopped
+  //   ERROR_INVALID_DATA       poll_feedback: the driver's event failed
+  //                            validation
+  //   ERROR_NO_MORE_ITEMS      poll_feedback: nothing fresh
   [[nodiscard]] DWORD create_controller(
     std::uint32_t controller_id,
     profile requested_profile) noexcept;

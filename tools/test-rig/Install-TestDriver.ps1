@@ -86,18 +86,24 @@ certutil -addstore -f TrustedPublisher $cer | Select-Object -Last 1 | ForEach-Ob
 Log 'driver status before:'
 & $setup status 2>&1 | ForEach-Object { Log "  $_" }
 Log 'installing the driver'
-$p = Start-Process -FilePath $setup -ArgumentList @('install', '--inf', $inf) -Wait -PassThru -NoNewWindow
-Log "setup exit code $($p.ExitCode) (0 = installed, 3010 = reboot then run again)"
+# The call operator quotes each argument (Start-Process -ArgumentList does not, so a kit under a
+# path with a space made the setup tool print its usage and the script carry on to the probe).
+& $setup install --inf $inf 2>&1 | ForEach-Object { Log "  $_" }
+$setupExit = $LASTEXITCODE
+Log "setup exit code $setupExit (0 = installed, 3010 = reboot then run again)"
 Log 'driver status after:'
 & $setup status 2>&1 | ForEach-Object { Log "  $_" }
 $drv = Get-CimInstance Win32_PnPSignedDriver | Where-Object { $_.DeviceID -like 'ROOT\VIBESHINE*' } | Select-Object -First 1
 if ($drv) { Log "installed: $($drv.InfName) $($drv.DriverVersion) $($drv.DriverDate)" }
-if ($p.ExitCode -eq 3010) { exit 3010 }
+if ($setupExit -eq 3010) { exit 3010 }
+if ($setupExit -ne 0) { throw "driver install failed (setup exit code $setupExit); see $LogPath" }
 
 if ($Probe) {
     if (-not (Test-Path $ProbePath)) { throw "missing $ProbePath" }
     Log 'running probe_sc26_usb'
     & $ProbePath 2>&1 | ForEach-Object { Log "  $_" }
-    Log "probe exit code $LASTEXITCODE (0 = PROBE PASSED)"
+    $probeExit = $LASTEXITCODE
+    Log "probe exit code $probeExit (0 = PROBE PASSED)"
+    if ($probeExit -ne 0) { throw "probe failed (exit code $probeExit); see $LogPath" }
 }
 Log 'done'

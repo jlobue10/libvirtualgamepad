@@ -122,6 +122,22 @@ int main() {
     check(buttons & btn_right_stick_touch, "deflected right stick counts as touched");
     check(!(buttons & btn_left_stick_touch), "centred-ish left stick is not touched");
     check(le16(b + 6) == 32767, "left trigger 255 -> 32767 at offset 6");
+    {
+      // The click bit appears exactly at trigger_click_threshold (0xF0): the host ends an
+      // input batch when a trigger crosses that value, so both ends must agree on it.
+      state edge {};
+      edge.reset();
+      const input_report below = encode_input(0, 0, 0, 0, 0, 0xEF, 0xEF, edge);
+      const input_report at = encode_input(0, 0, 0, 0, 0, 0xF0, 0xF0, edge);
+      const auto *pb = reinterpret_cast<const std::uint8_t *>(&below);
+      const auto *pa = reinterpret_cast<const std::uint8_t *>(&at);
+      check(trigger_click_threshold == 0xF0, "trigger click threshold is 0xF0");
+      check(!(ule32(pb + 2) & (btn_left_trigger_click | btn_right_trigger_click)),
+            "0xEF does not click either trigger");
+      check((ule32(pa + 2) & (btn_left_trigger_click | btn_right_trigger_click)) ==
+              (btn_left_trigger_click | btn_right_trigger_click),
+            "0xF0 clicks both triggers");
+    }
     check(le16(b + 8) == (10 * 32767) / 255, "right trigger scaled at offset 8");
     check(le16(b + 10) == 1000 && le16(b + 12) == -2000, "left stick at 10/12, positive up kept");
     check(le16(b + 14) == 3000 && le16(b + 16) == 32767, "right stick at 14/16");
