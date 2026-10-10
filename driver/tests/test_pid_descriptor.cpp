@@ -918,6 +918,12 @@ int main() {
       check(!apply_sc26_touch(touch, &state), "sc26 hover without a contact is refused");
       check((encode_sc26_input(input, &state).buttons & lvg::sc26_usb::btn_left_pad_touch) == 0,
             "sc26 hover without a contact leaves the pad untouched");
+      // A move is sent as a continuous report, which the next transition may
+      // discard: it must not be the report that creates the contact either.
+      touch.event_type = static_cast<std::uint8_t>(touch_event::move);
+      check(!apply_sc26_touch(touch, &state), "sc26 move without a contact is refused");
+      check((encode_sc26_input(input, &state).buttons & lvg::sc26_usb::btn_left_pad_touch) == 0,
+            "sc26 move without a contact leaves the pad untouched");
       touch.event_type = static_cast<std::uint8_t>(touch_event::down);
       check(apply_sc26_touch(touch, &state), "sc26 touch down accepted");
       const auto down_x = encode_sc26_input(input, &state).left_pad_x;
@@ -929,6 +935,13 @@ int main() {
             "sc26 hover keeps the contact down");
       check(hovered.left_pad_x != down_x && hovered.left_pad_x > 0,
             "sc26 hover updates the contact position");
+      touch.event_type = static_cast<std::uint8_t>(touch_event::move);
+      touch.x = 30000;
+      check(apply_sc26_touch(touch, &state), "sc26 move updates an active contact");
+      const auto moved = encode_sc26_input(input, &state);
+      check((moved.buttons & lvg::sc26_usb::btn_left_pad_touch) != 0 &&
+              moved.left_pad_x != hovered.left_pad_x,
+            "sc26 move keeps the contact down and updates its position");
       touch.event_type = static_cast<std::uint8_t>(touch_event::up);
       check(apply_sc26_touch(touch, &state), "sc26 touch up accepted");
       state.reset();
@@ -1539,6 +1552,24 @@ int main() {
     check(pump.classify(0, 40, 0) == report_kind::transition, "a trigger leaving rest is discrete");
     check(pump.classify(0, 200, 0) == report_kind::continuous, "further travel is continuous");
     check(pump.classify(0, 0, 0) == report_kind::transition, "a trigger returning to rest is discrete");
+    // The driver classifies SC26 reports on the encoded button word, so the
+    // synthesised full-pull click (>= 0xF0, the value the host ends a batch at)
+    // is a transition while travel below it stays continuous.
+    sc26_state clicks {};
+    clicks.reset();
+    input_state_request pull {};
+    pull.header.size = sizeof(pull);
+    pull.header.version = k_protocol_version;
+    const auto sc26_classify = [&](const std::uint8_t lt) {
+      pull.left_trigger = lt;
+      const auto word = encode_sc26_input(pull, &clicks).buttons;
+      return pump.classify(static_cast<std::uint32_t>(word), lt, pull.right_trigger);
+    };
+    check(sc26_classify(0x10) == report_kind::transition, "sc26 trigger leaving rest is discrete");
+    check(sc26_classify(0xEF) == report_kind::continuous, "sc26 travel to 0xEF is continuous");
+    check(sc26_classify(0xF0) == report_kind::transition, "sc26 full pull at 0xF0 is a transition");
+    check(sc26_classify(0xFF) == report_kind::continuous, "sc26 travel past the click is continuous");
+    check(sc26_classify(0xEF) == report_kind::transition, "sc26 click release at 0xEF is a transition");
   }
 
   {

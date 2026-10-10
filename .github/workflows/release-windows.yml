@@ -40,6 +40,9 @@ jobs:
       - name: Validate case-sensitive release layout
         run: ./tools/tests/test-release-package-case.ps1
 
+      - name: Test the kit installer's argument quoting and exit gates
+        run: ./tools/tests/test-install-testdriver-gates.ps1
+
       - name: Resolve hosted MSBuild
         id: msbuild
         run: |

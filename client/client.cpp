@@ -151,8 +151,13 @@ std::uint32_t client::maximum_controllers() const noexcept {
 DWORD client::create_controller(
   const std::uint32_t controller_id,
   const profile requested_profile) noexcept {
-  if (!connected() || controller_id >= maximum_controllers() ||
-      (available_profiles() & profile_bit(requested_profile)) == 0) {
+  if (!connected()) {
+    return ERROR_INVALID_HANDLE;
+  }
+  if (controller_id >= maximum_controllers()) {
+    return ERROR_INVALID_PARAMETER;
+  }
+  if ((available_profiles() & profile_bit(requested_profile)) == 0) {
     return ERROR_NOT_SUPPORTED;
   }
   create_controller_request request {};
@@ -163,7 +168,10 @@ DWORD client::create_controller(
 }
 
 DWORD client::destroy_controller(const std::uint32_t controller_id) noexcept {
-  if (!connected() || controller_id >= maximum_controllers()) {
+  if (!connected()) {
+    return ERROR_INVALID_HANDLE;
+  }
+  if (controller_id >= maximum_controllers()) {
     return ERROR_INVALID_PARAMETER;
   }
   controller_id_request request {};
@@ -252,13 +260,6 @@ DWORD client::query_info() noexcept {
     &response,
     sizeof(response),
     &bytes);
-  if (status == ERROR_INVALID_USER_BUFFER) {
-    // The driver pins every request, this one included, to its own protocol
-    // version and size before it can answer with its supported range. We built
-    // the buffer ourselves, so the only way it is "invalid" is a driver from a
-    // different protocol generation: report that rather than a buffer fault.
-    return ERROR_REVISION_MISMATCH;
-  }
   if (status != ERROR_SUCCESS) {
     return status;
   }
@@ -294,7 +295,12 @@ DWORD client::issue(
         output_size,
         &bytes,
         nullptr)) {
-    return GetLastError();
+    const DWORD error = GetLastError();
+    // The driver pins every request to its own protocol version and size. We
+    // built every buffer ourselves, so the only way one is "invalid" is a driver
+    // from a different protocol generation: report that rather than a buffer
+    // fault, on every IOCTL and not only the handshake.
+    return error == ERROR_INVALID_USER_BUFFER ? ERROR_REVISION_MISMATCH : error;
   }
   if (bytes_returned != nullptr) {
     *bytes_returned = bytes;

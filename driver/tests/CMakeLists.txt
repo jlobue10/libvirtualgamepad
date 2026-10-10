@@ -39,6 +39,13 @@ if(WIN32)
     target_include_directories(probe_sc26_usb PRIVATE ../../include)
     target_link_libraries(probe_sc26_usb PRIVATE setupapi hid winmm)
     # Deliberately not a CTest: creates a controller on the installed driver.
+
+    # The client library's error contract against a fake DeviceIoControl.
+    add_executable(test_client_contract test_client_contract.cpp)
+    target_compile_features(test_client_contract PRIVATE cxx_std_20)
+    target_include_directories(test_client_contract PRIVATE ../../include)
+    target_link_libraries(test_client_contract PRIVATE setupapi)
+    add_test(NAME client_contract COMMAND test_client_contract)
 endif()
 
 # Include native PnP identity checks in the existing CI test entry point.

@@ -49,6 +49,7 @@ using NTSTATUS=int; struct LARGE_INTEGER{long long QuadPart;};
 #define THREAD_PRIORITY_HIGHEST 2
 #define STATUS_SUCCESS 0
 #define STATUS_DEVICE_NOT_READY (-1)
+#define STATUS_INVALID_PARAMETER (-2)
 #define NT_SUCCESS(s) ((s)==0)
 struct HID_XFER_PACKET{PUCHAR reportBuffer; ULONG reportBufferLen; UCHAR reportId;};
 int batteries_enqueued=0,states_enqueued=0,submitted=0; NTSTATUS vhf_submit_status=0; UCHAR last_submitted_id=0;
@@ -58,6 +59,7 @@ namespace driver {
  enum class report_kind {continuous,transition,aside};
  struct report_buffer {std::uint8_t data[64]; std::uint32_t length; std::uint8_t report_id;};
  struct sc26_state {uint64_t last_report_us=0; uint64_t last_battery_us=0;};
+ struct ds4_state{}; struct ds5_state{}; struct switch_state{};
  using sc26_input_report=int; struct sc26_battery_report{int value;};
  void sc26_tick(sc26_state*, uint64_t){} int encode_sc26_input(int state,sc26_state*){return state;}
  sc26_battery_report encode_sc26_battery(const sc26_state&){return {7};}
@@ -77,7 +79,8 @@ namespace driver {
 enum class slot_state{active,free};
 struct controller_slot {slot_state state=slot_state::active; int selected_profile=1;
  bool have_last_input=true; VHFHANDLE vhf=(void*)1; int last_input=42; std::uint8_t sc26_wire_sequence=0;
- lvg::driver::fake_pump pump; lvg::driver::sc26_state sc26; int submits_in_flight=0;};
+ lvg::driver::fake_pump pump; lvg::driver::sc26_state sc26; int submits_in_flight=0;
+ lvg::driver::ds4_state ds4; lvg::driver::ds5_state ds5; lvg::driver::switch_state switch_pro;};
 struct device_context {controller_slot controllers[2]; bool stopping=false,sc26_timer_running=true,sc26_timer_parked=false;
  HANDLE sc26_keepalive_timer=(void*)1,sc26_keepalive_thread=nullptr,sc26_keepalive_stop=(void*)1;};
 // PRODUCTION_TIMING_CONSTANTS
@@ -90,6 +93,17 @@ void unlock_context(device_context* c){assert(locked);locked=false;
 bool SetWaitableTimer(HANDLE,LARGE_INTEGER* d,int,void*,void*,int){timer_due=d->QuadPart;++arms;return true;}
 void arm_sc26_keepalive(device_context *const context) noexcept;
 int submit_profile_report(device_context*,controller_slot&){++submitted;return 0;}
+// submit_motion_state scaffolding: the fold always applies; the slot is the SC26 one.
+using WDFFILEOBJECT=void*; int lifetime_locks=0;
+void lock_lifetime(device_context*){++lifetime_locks;} void unlock_lifetime(device_context*){--lifetime_locks;}
+NTSTATUS begin_state_update(device_context* c,WDFFILEOBJECT,int id,controller_slot** out){*out=&c->controllers[id];return 0;}
+namespace lvg { enum class profile {xbox_360,dualshock_4,dualsense,switch_pro,steam_controller};
+ struct motion_state_request {int controller_id;};
+ namespace driver {
+  bool apply_ds4_motion(const motion_state_request&,ds4_state*){return true;}
+  bool apply_ds5_motion(const motion_state_request&,ds5_state*){return true;}
+  bool apply_switch_motion(const motion_state_request&,switch_state*){return true;}
+  bool apply_sc26_motion(const motion_state_request&,sc26_state*,uint64_t){return true;} } }
 void SwitchToThread(){}
 void WaitForSingleObject(HANDLE,unsigned){joining->sc26_timer_running=false;}
 void CloseHandle(HANDLE){} void ResetEvent(HANDLE){} void CancelWaitableTimer(HANDLE){}
@@ -157,6 +171,20 @@ int main(){int failures=0;
   vhf_submit_status=0;c.sc26_timer_parked=false;}
  c.sc26_keepalive_thread=(void*)1;joining=&c;start_sc26_keepalive(&c);
  check(c.sc26_timer_running,"exiting worker cannot clear replacement worker's running flag");
+ {// D14-01: with a running worker a motion sample is folded and carried by the next tick;
+  // without one (no timer, or the cadence not started) it is sent immediately.
+  device_context m; lvg::motion_state_request req{0}; submitted=0;
+  check(NT_SUCCESS(submit_motion_state(&m,nullptr,req)) && submitted==0 && lifetime_locks==0,
+        "motion sample with a running keep-alive worker is folded, not submitted");
+  m.sc26_timer_running=false;
+  check(NT_SUCCESS(submit_motion_state(&m,nullptr,req)) && submitted==1 && lifetime_locks==0,
+        "motion sample without a running worker is submitted at once");
+  m.sc26_timer_running=true; m.sc26_keepalive_timer=nullptr;
+  check(NT_SUCCESS(submit_motion_state(&m,nullptr,req)) && submitted==2 && lifetime_locks==0,
+        "motion sample without a keep-alive timer is submitted at once");
+  m.controllers[0].selected_profile=(int)lvg::profile::switch_pro; m.sc26_keepalive_timer=(void*)1;
+  check(NT_SUCCESS(submit_motion_state(&m,nullptr,req)) && submitted==3,
+        "non-SC26 profiles always submit the motion sample");}
  return failures!=0;}
 '''
 signatures = [
@@ -176,7 +204,10 @@ prefix = prefix.replace('// PRODUCTION_TIMING_CONSTANTS', '\n'.join(
     constant(name) for name in ('k_sc26_tick_ms', 'k_sc26_resend_after_us', 'k_sc26_battery_period_us')))
 with tempfile.TemporaryDirectory(prefix='sc26-keepalive-') as directory:
     work = pathlib.Path(directory)
-    (work/'test.cpp').write_text(prefix+'\n'.join(map(function, signatures))+suffix)
+    motion = function('[[nodiscard]] NTSTATUS submit_motion_state(\n  device_context *const context,\n'
+                      '  const WDFFILEOBJECT owner,\n  const lvg::motion_state_request &request) noexcept')
+    motion = motion.replace('slot->selected_profile == lvg::profile::', 'slot->selected_profile == (int)lvg::profile::')
+    (work/'test.cpp').write_text(prefix+'\n'.join(map(function, signatures))+'\n'+motion+suffix)
     subprocess.run(['g++','-std=c++17','-Wall','-Wextra','-fsanitize=address,undefined',
                     str(work/'test.cpp'),'-o',str(work/'test')],check=True)
     raise SystemExit(subprocess.run([str(work/'test')]).returncode)

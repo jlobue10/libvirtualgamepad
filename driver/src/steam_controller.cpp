@@ -156,15 +156,18 @@ bool apply_sc26_touch(const touch_state_request &touch, sc26_state *const state)
   const std::uint8_t pad = touch.contact_index;
   switch (event) {
     case touch_event::hover:
+    case touch_event::move:
       // The pads are capacitive and have no hover state. Like the PlayStation
-      // pads, a hover only moves a contact that is already down; it never
-      // creates one (hover is also the value of a zero-initialised request).
+      // pads, a hover or move only updates a contact that is already down; it
+      // never creates one (hover is also the value of a zero-initialised
+      // request). A move that created the contact would travel as a continuous
+      // report, and the next transition (the up) discards a pending continuous
+      // snapshot, so the touch edge could never reach Steam.
       if (!st.pad_touched[pad]) {
         return false;
       }
       [[fallthrough]];
     case touch_event::down:
-    case touch_event::move:
       st.pad_touched[pad] = true;
       st.pad_x[pad] = touch.x;
       st.pad_y[pad] = touch.y;

@@ -35,6 +35,8 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Test the kit installer's argument quoting and exit gates
+        run: ./tools/tests/test-install-testdriver-gates.ps1
       - name: Build and verify the unsigned driver package with the WDK
         run: |
           $ErrorActionPreference = 'Stop'

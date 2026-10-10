@@ -82,7 +82,8 @@ function Stop-ConsoleProcess {
     if ($Process.HasExited) { return }
     $helper = Join-Path $env:TEMP "sc26-ctrlc-$PID.ps1"
     Set-Content -Path $helper -Value $script:CtrlCHelper -Encoding ascii
-    $h = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $helper, '-TargetPid', $Process.Id) -WindowStyle Hidden -PassThru -Wait
+    # Start-Process does not quote its arguments: $env:TEMP carries the user name, which may hold a space.
+    $h = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $helper), '-TargetPid', $Process.Id) -WindowStyle Hidden -PassThru -Wait
     $sent = ($h.ExitCode -eq 0)
     if (-not $sent) { Write-Warning "Ctrl+C helper failed (exit $($h.ExitCode)) for pid $($Process.Id)." }
     if ($sent -and $Process.WaitForExit($TimeoutSeconds * 1000)) { return }
@@ -111,7 +112,8 @@ function Get-UsbPcapInterfaces {
 
 function Start-UsbCapture {
     param([string] $Interface, [string] $OutFile, [switch] $InjectDescriptors)
-    $args = @('-d', $Interface, '-o', $OutFile, '-A')
+    # Start-Process does not quote its arguments; a capture path with a space would be split.
+    $args = @('-d', $Interface, '-o', ('"{0}"' -f $OutFile), '-A')
     if ($InjectDescriptors) { $args += '--inject-descriptors' }
     # USBPcapCMD opens -o with CREATE_NEW: an existing file makes it print "Thread started with
     # invalid write handle!" and exit 0 without capturing anything.
