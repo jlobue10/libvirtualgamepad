@@ -214,7 +214,11 @@ bool apply_sc26_battery(const battery_state_request &battery, sc26_state *const 
     return false;
   }
   auto &st = state->device;
-  st.battery_percent = battery.percent > 100 ? 100 : battery.percent;
+  // 0xFF is LI_BATTERY_PERCENTAGE_UNKNOWN on the wire: keep the last known level
+  // rather than reporting a full battery (the DualShock profile does the same).
+  if (battery.percent <= 100) {
+    st.battery_percent = battery.percent;
+  }
   switch (static_cast<lvg::battery_state>(battery.flags)) {
     case lvg::battery_state::charging:
       st.charge_state = sc::charge_charging;

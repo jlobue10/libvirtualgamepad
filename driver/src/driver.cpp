@@ -956,10 +956,12 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
 
   if (steam) {
     // The Steam Controller carries battery in its own report rather than in
-    // the state report, as a transition so it is not dropped by pacing.
+    // the state report. It goes out in order and in number like a transition
+    // but must not discard a pending state snapshot (a transition clears the
+    // latest continuous report), so it travels as an aside, like the 0x44 ack.
     status = pump_report(context, *slot, &battery_report, sizeof(battery_report),
                          lvg::driver::k_sc26_battery_report_id,
-                         lvg::driver::report_kind::transition);
+                         lvg::driver::report_kind::aside);
     unlock_lifetime(context);
     return status;
   }
@@ -1025,8 +1027,12 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
     lvg::driver::sc26_tick(&slot.sc26, now_us());
     const lvg::driver::sc26_input_report sc26_report =
       lvg::driver::encode_sc26_input(request, &slot.sc26);
+    // Classify on the encoded button word: the trigger-click bits (set at >= 0xF0),
+    // pad touch, grip and stick-touch latches only exist there, and an edge on any
+    // of them must travel as a transition rather than be overwritten by the next
+    // continuous snapshot while VHF has no read pending.
     const auto sc26_kind =
-      slot.pump.classify(request.buttons, request.left_trigger, request.right_trigger);
+      slot.pump.classify(sc26_report.buttons, request.left_trigger, request.right_trigger);
     // First input state of a Steam Controller: start the keep-alive cadence.
     const bool start_keepalive =
       context->sc26_keepalive_timer != nullptr && !context->sc26_timer_running;
@@ -1940,6 +1946,15 @@ void evt_vhf_get_input_report(
           break;
         }
         case lvg::profile::steam_controller: {
+          if (transfer->reportId == k_sc26_battery_report_id) {
+            // The descriptor declares 0x43 as an input report too; answer it from
+            // the current state instead of refusing the id.
+            const sc26_battery_report report = encode_sc26_battery(slot->sc26);
+            std::memcpy(buffer, &report, sizeof(report));
+            length = sizeof(report);
+            report_id = k_sc26_battery_report_id;
+            break;
+          }
           sc26_tick(&slot->sc26, now_us());
           const sc26_input_report report = encode_sc26_input(slot->last_input, &slot->sc26);
           std::memcpy(buffer, &report, sizeof(report));
