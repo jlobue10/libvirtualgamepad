@@ -157,9 +157,12 @@ struct ds5_state {
 
 [[nodiscard]] const std::uint8_t *ds5_descriptor(std::size_t *size) noexcept;
 
+// now_us: the driver clock the sensor timestamp derives from (0.33 us
+// units); 0 keeps a fixed step per report.
 [[nodiscard]] ds5_input_report encode_ds5_input(
   const input_state_request &input,
-  ds5_state *state) noexcept;
+  ds5_state *state,
+  std::uint64_t now_us = 0) noexcept;
 
 [[nodiscard]] bool apply_ds5_touch(const touch_state_request &touch, ds5_state *state) noexcept;
 [[nodiscard]] bool apply_ds5_motion(const motion_state_request &motion, ds5_state *state) noexcept;

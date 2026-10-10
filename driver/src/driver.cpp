@@ -775,12 +775,12 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
   UCHAR report_id = 0;
 
   if (slot.selected_profile == lvg::profile::dualshock_4) {
-    ds4_report = encode_ds4_input(slot.last_input, &slot.ds4);
+    ds4_report = encode_ds4_input(slot.last_input, &slot.ds4, now_us());
     data = &ds4_report;
     length = sizeof(ds4_report);
     report_id = k_ds4_input_report_id;
   } else {
-    ds5_report = encode_ds5_input(slot.last_input, &slot.ds5);
+    ds5_report = encode_ds5_input(slot.last_input, &slot.ds5, now_us());
     data = &ds5_report;
     length = sizeof(ds5_report);
     report_id = k_ds5_input_report_id;
@@ -1048,12 +1048,12 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
     ULONG ps_length = 0;
     UCHAR ps_report_id = 0;
     if (slot.selected_profile == lvg::profile::dualshock_4) {
-      ds4_report = encode_ds4_input(request, &slot.ds4);
+      ds4_report = encode_ds4_input(request, &slot.ds4, now_us());
       ps_data = &ds4_report;
       ps_length = sizeof(ds4_report);
       ps_report_id = k_ds4_input_report_id;
     } else {
-      ds5_report = encode_ds5_input(request, &slot.ds5);
+      ds5_report = encode_ds5_input(request, &slot.ds5, now_us());
       ps_data = &ds5_report;
       ps_length = sizeof(ds5_report);
       ps_report_id = k_ds5_input_report_id;
@@ -2002,14 +2002,14 @@ void evt_vhf_get_input_report(
 
       switch (slot->selected_profile) {
         case lvg::profile::dualshock_4: {
-          const ds4_input_report report = encode_ds4_input(slot->last_input, &slot->ds4);
+          const ds4_input_report report = encode_ds4_input(slot->last_input, &slot->ds4, now_us());
           std::memcpy(buffer, &report, sizeof(report));
           length = sizeof(report);
           report_id = k_ds4_input_report_id;
           break;
         }
         case lvg::profile::dualsense: {
-          const ds5_input_report report = encode_ds5_input(slot->last_input, &slot->ds5);
+          const ds5_input_report report = encode_ds5_input(slot->last_input, &slot->ds5, now_us());
           std::memcpy(buffer, &report, sizeof(report));
           length = sizeof(report);
           report_id = k_ds5_input_report_id;

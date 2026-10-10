@@ -146,9 +146,12 @@ struct ds4_state {
 
 [[nodiscard]] const std::uint8_t *ds4_descriptor(std::size_t *size) noexcept;
 
+// now_us: the driver clock the report's sensor timestamp derives from
+// (5.33 us units); 0 keeps a fixed step per report.
 [[nodiscard]] ds4_input_report encode_ds4_input(
   const input_state_request &input,
-  ds4_state *state) noexcept;
+  ds4_state *state,
+  std::uint64_t now_us = 0) noexcept;
 
 // Folds a touch, motion, or battery event into the accumulated state. Returns
 // false when the event cannot be represented by this profile.
