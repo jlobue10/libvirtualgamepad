@@ -83,6 +83,7 @@ bool report_pump::enqueue(
       if (kind == report_kind::transition) {
         have_latest_ = false;
       }
+      bool dropped_now = false;
       if (transition_count_ == k_transition_capacity) {
         // Drop the oldest rather than the newest. Losing an old press whose
         // release is still queued leaves a button reading released, which is
@@ -90,12 +91,13 @@ bool report_pump::enqueue(
         transition_head_ = static_cast<std::uint8_t>((transition_head_ + 1) % k_transition_capacity);
         --transition_count_;
         ++dropped_;
+        dropped_now = true;
       }
       const std::uint8_t tail =
         static_cast<std::uint8_t>((transition_head_ + transition_count_) % k_transition_capacity);
       store(&transitions_[tail], data, length, report_id);
       ++transition_count_;
-      return dropped_ == 0;
+      return !dropped_now;  // per call, as the header promises; dropped_ keeps the total
     }
     case report_kind::continuous:
     default: {

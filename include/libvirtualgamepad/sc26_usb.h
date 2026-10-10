@@ -806,8 +806,10 @@ inline void put_le32(std::uint8_t *p, const std::uint32_t v) noexcept {
       const std::uint8_t tag = length >= 1 ? payload[0] : string_attr_unit_serial;
       out[0] = tag;
       const char *text = tag == string_attr_board_serial ? fs.board_serial.data() : fs.unit_serial.data();
+      const std::size_t text_size = tag == string_attr_board_serial ? fs.board_serial.size() : fs.unit_serial.size();
       std::size_t n = 0;
-      while (text[n] != '\0' && n + 1 < string_attr_reply_length && n < fs.unit_serial.size()) {
+      // Bound first, then read: a serial that fills its array has no terminator to find.
+      while (n < text_size && n + 1 < string_attr_reply_length && text[n] != '\0') {
         out[1 + n] = static_cast<std::uint8_t>(text[n]);
         ++n;
       }
@@ -820,12 +822,14 @@ inline void put_le32(std::uint8_t *p, const std::uint32_t v) noexcept {
       // Steam writes these once per connect and reads nothing back.
       return true;
     case cmd_get_keyed_value: {
-      // Payload is an ASCII key. The unit answered "esb/bond" with one byte (0:
-      // no bonded puck), "esb/bond_2" with a 24-byte record and
-      // "user/wireless_transport" with nothing. A wired-only virtual unit has
-      // no bond, so every key but the first gets an empty reply.
-      constexpr char k_bond[] = "esb/bond";
-      if (length == sizeof(k_bond) && std::memcmp(payload, k_bond, sizeof(k_bond)) == 0) {
+      // Payload is an ASCII key (NUL included). In the capture
+      // (sc26-steam-control.tsv, decoded in sc26-steam-handshake.txt) the unit
+      // answered "user/wireless_transport" with one byte (0: USB), "esb/bond"
+      // with a 24-byte bond record naming its puck, and "esb/bond_2" with
+      // nothing. A wired-only virtual unit has no puck, so both bond keys get
+      // the empty reply and only the transport key answers.
+      constexpr char k_transport[] = "user/wireless_transport";
+      if (length == sizeof(k_transport) && std::memcmp(payload, k_transport, sizeof(k_transport)) == 0) {
         out[0] = 0;
         fs.reply[2] = 1;
       }

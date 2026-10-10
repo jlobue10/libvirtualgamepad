@@ -252,6 +252,13 @@ DWORD client::query_info() noexcept {
     &response,
     sizeof(response),
     &bytes);
+  if (status == ERROR_INVALID_USER_BUFFER) {
+    // The driver pins every request, this one included, to its own protocol
+    // version and size before it can answer with its supported range. We built
+    // the buffer ourselves, so the only way it is "invalid" is a driver from a
+    // different protocol generation: report that rather than a buffer fault.
+    return ERROR_REVISION_MISMATCH;
+  }
   if (status != ERROR_SUCCESS) {
     return status;
   }
