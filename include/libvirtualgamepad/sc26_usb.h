@@ -526,7 +526,7 @@ struct state {
   void reset() noexcept { *this = state {}; }
 };
 
-[[nodiscard]] inline std::int16_t clamp_i16(const std::int32_t value) noexcept {
+[[nodiscard]] inline std::int16_t clamp_i16(const std::int64_t value) noexcept {
   return static_cast<std::int16_t>(value > 32767 ? 32767 : (value < -32768 ? -32768 : value));
 }
 
@@ -616,7 +616,7 @@ inline void apply_accel_milli(state &st, const std::int32_t x, const std::int32_
                               const std::int32_t z) noexcept {
   // Takes a 64-bit value so negating INT32_MIN (a rogue client) is not signed overflow.
   const auto convert = [](const std::int64_t milli) {
-    return clamp_i16(static_cast<std::int32_t>((milli * accel_counts_per_g) / milli_g));
+    return clamp_i16((milli * accel_counts_per_g) / milli_g);
   };
   st.accel[0] = convert(x);
   st.accel[2] = convert(y);
@@ -627,7 +627,7 @@ inline void apply_gyro_milli(state &st, const std::int32_t x, const std::int32_t
                              const std::int32_t z) noexcept {
   // Takes a 64-bit value so negating INT32_MIN (a rogue client) is not signed overflow.
   const auto convert = [](const std::int64_t milli) {
-    return clamp_i16(static_cast<std::int32_t>((milli * gyro_counts_per_1000_dps) / 1000000));
+    return clamp_i16((milli * gyro_counts_per_1000_dps) / 1000000);
   };
   st.gyro[0] = convert(x);
   st.gyro[2] = convert(y);
