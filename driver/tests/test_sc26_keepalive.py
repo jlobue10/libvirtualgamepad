@@ -37,7 +37,7 @@ prefix = r'''
 #include <tuple>
 #include <cstdio>
 #include <cassert>
-using HANDLE=void*; using VHFHANDLE=void*; using LONGLONG=long long; using LONG=std::int32_t;
+using HANDLE=void*; using VHFHANDLE=void*; using LONGLONG=long long; using LONG=std::int32_t; using ULONG=std::uint32_t;
 using NTSTATUS=int; struct LARGE_INTEGER{long long QuadPart;};
 #define FALSE 0
 #define INFINITE 0xffffffff
@@ -45,30 +45,36 @@ using NTSTATUS=int; struct LARGE_INTEGER{long long QuadPart;};
 #define NT_SUCCESS(s) ((s)==0)
 namespace lvg { constexpr int k_max_controllers=2;
 namespace driver {
- enum class report_kind {continuous}; struct report_buffer{int value;};
- struct sc26_state {uint64_t last_report_us=0;};
+ enum class report_kind {continuous,aside}; struct report_buffer{int value;};
+ struct sc26_state {uint64_t last_report_us=0; uint64_t last_battery_us=0;};
+ using sc26_input_report=int; struct sc26_battery_report{int value;};
  void sc26_tick(sc26_state*, uint64_t){} int encode_sc26_input(int state,sc26_state*){return state;}
- constexpr int k_sc26_input_report_id=1;
+ sc26_battery_report encode_sc26_battery(const sc26_state&){return {7};}
+ constexpr int k_sc26_input_report_id=1; constexpr int k_sc26_battery_report_id=2;
 }}
 enum class slot_state{active,free};
+int batteries_enqueued=0;
 struct controller_slot {slot_state state=slot_state::active; int selected_profile=1;
  bool have_last_input=true; VHFHANDLE vhf=(void*)1; int last_input=42;
- struct {bool ready() const {return ready_;} bool ready_=true;} pump;
+ struct {bool ready() const {return ready_;} bool ready_=true;
+  bool enqueue(const void*,unsigned,int id,lvg::driver::report_kind k){
+   assert(id==lvg::driver::k_sc26_battery_report_id && k==lvg::driver::report_kind::aside);
+   ++batteries_enqueued;return true;}} pump;
  lvg::driver::sc26_state sc26; int submits_in_flight=0;};
-struct device_context {controller_slot controllers[2]; bool stopping=false,sc26_timer_running=true;
+struct device_context {controller_slot controllers[2]; bool stopping=false,sc26_timer_running=true,sc26_timer_parked=false;
  HANDLE sc26_keepalive_timer=(void*)1,sc26_keepalive_thread=nullptr,sc26_keepalive_stop=(void*)1;};
 // PRODUCTION_TIMING_CONSTANTS
 uint64_t clock_us=0; long long timer_due=0; bool locked=false,inspect_release=false,protected_release=false;
-int submitted=0; device_context *joining=nullptr;
+int submitted=0,arms=0; device_context *joining=nullptr;
 uint64_t now_us(){return clock_us;} bool is_steam_controller(int p){return p==1;}
 void lock_context(device_context*){assert(!locked);locked=true;}
 void unlock_context(device_context* c){assert(locked);locked=false;
  if(inspect_release){protected_release=c->controllers[0].submits_in_flight>0 && c->controllers[1].submits_in_flight>0;inspect_release=false;}}
-bool SetWaitableTimer(HANDLE,LARGE_INTEGER* d,int,void*,void*,int){timer_due=d->QuadPart;return true;}
+bool SetWaitableTimer(HANDLE,LARGE_INTEGER* d,int,void*,void*,int){timer_due=d->QuadPart;++arms;return true;}
 void arm_sc26_keepalive(device_context *const context) noexcept;
-int pump_report_locked(device_context* c,controller_slot& slot,const void*,unsigned,int,
- lvg::driver::report_kind,lvg::driver::report_buffer* next,bool* have,VHFHANDLE* vhf){
- assert(locked);slot.sc26.last_report_us=clock_us;arm_sc26_keepalive(c);
+int pump_report_locked(device_context* c,controller_slot& slot,const void* data,unsigned,int,
+ lvg::driver::report_kind,lvg::driver::report_buffer* next,bool* have,VHFHANDLE* vhf,bool rearm=true){
+ assert(locked);if(data){slot.sc26.last_report_us=clock_us;if(rearm)arm_sc26_keepalive(c);}
  ++slot.submits_in_flight;*have=true;*vhf=slot.vhf;next->value=slot.last_input;return 0;}
 int submit_taken(device_context*,controller_slot& slot,const lvg::driver::report_buffer& next,VHFHANDLE vhf){
  assert(!locked && slot.submits_in_flight>0 && next.value==42 && vhf==slot.vhf);
@@ -88,12 +94,21 @@ int main(){int failures=0;
  c.controllers[1].sc26.last_report_us=0;
  lock_context(&c);arm_sc26_keepalive(&c);unlock_context(&c);
  check(timer_due==-10000,"busy controller preserves idle controller's 4ms deadline");
- clock_us=8000;inspect_release=true;sc26_keepalive_tick(&c);
+ clock_us=8000;inspect_release=true;arms=0;sc26_keepalive_tick(&c);
  check(protected_release && submitted==2,"VHF handles have in-flight references before unlocking");
+ check(arms==1,"the tick arms the timer once, not once per resent controller");
+ check(batteries_enqueued==0,"battery is not queued while the driver clock is younger than a period");
  clock_us=20000;c.controllers[0].pump.ready_=false;c.controllers[0].sc26.last_report_us=0;c.controllers[1].sc26.last_report_us=20000;
- submitted=0;sc26_keepalive_tick(&c);
+ submitted=0;batteries_enqueued=0;sc26_keepalive_tick(&c);
  check(submitted==0 && timer_due==-40000,"a slot without a pending VHF read is skipped and the timer idles at the tick");
- c.controllers[0].pump.ready_=true;
+ check(batteries_enqueued==0,"battery is not repeated inside its period");
+ clock_us=8000+k_sc26_battery_period_us;c.controllers[1].sc26.last_report_us=clock_us;submitted=0;sc26_keepalive_tick(&c);
+ check(batteries_enqueued==1 && submitted==1,"battery period elapsed: the aside is queued and taken even without a state resend");
+ c.controllers[1].pump.ready_=false;arms=0;timer_due=0;sc26_keepalive_tick(&c);
+ check(arms==0 && c.sc26_timer_parked && c.sc26_timer_running,"no reader on any controller parks the timer instead of re-arming it");
+ lock_context(&c);arm_sc26_keepalive(&c);unlock_context(&c);
+ check(!c.sc26_timer_parked && arms==1,"a readiness arm resumes a parked timer");
+ c.controllers[0].pump.ready_=true;c.controllers[1].pump.ready_=true;
  c.sc26_keepalive_thread=(void*)1;joining=&c;start_sc26_keepalive(&c);
  check(c.sc26_timer_running,"exiting worker cannot clear replacement worker's running flag");
  return failures!=0;}
@@ -103,7 +118,7 @@ signatures = [
  'void arm_sc26_keepalive(device_context *const context) noexcept',
  'void start_sc26_keepalive(device_context *const context) noexcept']
 prefix = prefix.replace('// PRODUCTION_TIMING_CONSTANTS', '\n'.join(
-    constant(name) for name in ('k_sc26_tick_ms', 'k_sc26_resend_after_us')))
+    constant(name) for name in ('k_sc26_tick_ms', 'k_sc26_resend_after_us', 'k_sc26_battery_period_us')))
 with tempfile.TemporaryDirectory(prefix='sc26-keepalive-') as directory:
     work = pathlib.Path(directory)
     (work/'test.cpp').write_text(prefix+'\n'.join(map(function, signatures))+suffix)

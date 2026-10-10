@@ -20,8 +20,8 @@ static_assert(sizeof(steam_haptic_feedback) <= sizeof(feedback_event::payload));
 void sc26_state::reset() noexcept {
   device.reset();
   features.reset();
-  rumble = {};
   last_motion_us = 0;
+  last_battery_us = 0;
   last_report_us = 0;
   grip_explicit = false;
   stick_touch_explicit = false;
@@ -257,8 +257,6 @@ bool apply_sc26_output(
   // HID reports have the descriptor's fixed length. Ignore trailing transport
   // padding, but never turn a truncated write into a successful feedback event:
   // it would occupy a queue slot while the client cannot replay it.
-  // Keep the per-side rumble totals current for anyone reading the state.
-  static_cast<void>(sc::decode_haptic_output(data, size, state->rumble));
   payload.length = static_cast<std::uint8_t>(length);
   std::memcpy(payload.report, data, length);
   *event = {};
