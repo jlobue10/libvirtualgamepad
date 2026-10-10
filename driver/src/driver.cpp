@@ -1296,7 +1296,9 @@ void evt_vhf_write_report(
                                          slot->controller_id, &slot->sc26, &event)) {
         // Preserve explicit actuator stops under backpressure. Ordinary repeated
         // effects remain ordered; an equivalent newer stop moves to the tail.
-        lvg::driver::enqueue_haptic(slot->haptic_queue, slot->haptic_head, slot->haptic_count, event);
+        // Cannot refuse at the production capacity (see the static_assert): the
+        // ring always has an evictable ordinary effect when every stop is pending.
+        std::ignore = lvg::driver::enqueue_haptic(slot->haptic_queue, slot->haptic_head, slot->haptic_count, event);
         ack_size = lvg::sc26_usb::encode_haptic_ack(transfer->reportBuffer, transfer->reportBufferLen,
                                                     ack, sizeof(ack));
         status = STATUS_SUCCESS;
