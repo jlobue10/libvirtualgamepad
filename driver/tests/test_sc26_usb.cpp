@@ -173,6 +173,20 @@ int main() {
   check(pad_axis_x(0) == -32768 && pad_axis_x(65535) == 32767, "pad x spans the range");
   check(pad_axis_y(0) == 32767 && pad_axis_y(65535) == -32767, "pad y is positive up");
 
+  // The complete signed wire range must saturate before any narrowing cast.
+  {
+    state st {};
+    apply_accel_milli(st, INT32_MAX, INT32_MIN, INT32_MIN);
+    check(st.accel[0] == 32767 && st.accel[2] == -32768 && st.accel[1] == 32767,
+          "extreme acceleration saturates with the original axis signs");
+    apply_accel_milli(st, INT32_MIN, INT32_MAX, INT32_MAX);
+    check(st.accel[0] == -32768 && st.accel[2] == 32767 && st.accel[1] == -32768,
+          "opposite extreme acceleration saturates without 32-bit wrap");
+    apply_gyro_milli(st, INT32_MAX, INT32_MIN, INT32_MIN);
+    check(st.gyro[0] == 32767 && st.gyro[2] == -32768 && st.gyro[1] == 32767,
+          "extreme gyro saturates with the original axis signs");
+  }
+
   // Battery report.
   {
     state st {};
