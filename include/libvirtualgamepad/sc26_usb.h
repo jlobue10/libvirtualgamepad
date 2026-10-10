@@ -614,22 +614,24 @@ inline constexpr std::int32_t stick_touch_deflection = 3276;
 // y, and -device Y as z, so the inverse is x->X, y->Z, -z->Y.
 inline void apply_accel_milli(state &st, const std::int32_t x, const std::int32_t y,
                               const std::int32_t z) noexcept {
-  const auto convert = [](const std::int32_t milli) {
-    return clamp_i16(static_cast<std::int32_t>((static_cast<std::int64_t>(milli) * accel_counts_per_g) / milli_g));
+  // Takes a 64-bit value so negating INT32_MIN (a rogue client) is not signed overflow.
+  const auto convert = [](const std::int64_t milli) {
+    return clamp_i16(static_cast<std::int32_t>((milli * accel_counts_per_g) / milli_g));
   };
   st.accel[0] = convert(x);
   st.accel[2] = convert(y);
-  st.accel[1] = convert(-z);
+  st.accel[1] = convert(-static_cast<std::int64_t>(z));
 }
 
 inline void apply_gyro_milli(state &st, const std::int32_t x, const std::int32_t y,
                              const std::int32_t z) noexcept {
-  const auto convert = [](const std::int32_t milli) {
-    return clamp_i16(static_cast<std::int32_t>((static_cast<std::int64_t>(milli) * gyro_counts_per_1000_dps) / 1000000));
+  // Takes a 64-bit value so negating INT32_MIN (a rogue client) is not signed overflow.
+  const auto convert = [](const std::int64_t milli) {
+    return clamp_i16(static_cast<std::int32_t>((milli * gyro_counts_per_1000_dps) / 1000000));
   };
   st.gyro[0] = convert(x);
   st.gyro[2] = convert(y);
-  st.gyro[1] = convert(-z);
+  st.gyro[1] = convert(-static_cast<std::int64_t>(z));
 }
 
 [[nodiscard]] inline battery_report encode_battery(const state &st) noexcept {
