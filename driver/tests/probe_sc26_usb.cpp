@@ -730,8 +730,11 @@ int main(int argc, char **argv) {
     // permission problem.
     lvg::feedback_event stale {};
     const DWORD polled = client.poll_feedback(slot, &stale);
-    check(polled == ERROR_NOT_FOUND,
-          "poll_feedback on a released slot is ERROR_NOT_FOUND, got " + std::to_string(polled));
+    if (polled != ERROR_NOT_FOUND) {
+      std::printf("poll_feedback on the released slot returned %lu
+", static_cast<unsigned long>(polled));
+    }
+    check(polled == ERROR_NOT_FOUND, "poll_feedback on a released slot is ERROR_NOT_FOUND");
   }
   std::printf("%s\n", failures ? "PROBE FAILED" : "PROBE PASSED");
   timeEndPeriod(1);
