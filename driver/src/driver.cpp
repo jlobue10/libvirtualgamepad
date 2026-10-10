@@ -78,6 +78,9 @@ constexpr LONG k_sc26_tick_ms = 4;
 // goes out, so a tick normally finds the state exactly that old; the lower
 // threshold only tolerates an early wake.
 constexpr std::uint64_t k_sc26_resend_after_us = 3000;
+// The real unit reports battery (0x43) unprompted about every 3.5 s; the
+// keep-alive does the same between the client's own battery updates.
+constexpr std::uint64_t k_sc26_battery_period_us = 3500000;
 // Steam Controller haptic reports are kept in order and in number (a pulse's
 // two per-side stops arrive 0.7 ms apart; a click is repeated to keep a pad
 // buzzing), which one pending feedback slot would coalesce.
@@ -161,6 +164,10 @@ struct device_context {
   HANDLE sc26_keepalive_stop;
   HANDLE sc26_keepalive_thread;
   bool sc26_timer_running;
+  // The worker found no Steam Controller with a VHF read pending and left the
+  // timer unarmed; the next readiness callback arms it again (arm_sc26_keepalive
+  // clears this). Keeps a 250 Hz wake-up from running while nobody reads.
+  bool sc26_timer_parked;
   controller_slot controllers[lvg::k_max_controllers];
 };
 
@@ -560,6 +567,27 @@ void stamp_sc26_sequence(controller_slot &slot, lvg::driver::report_buffer &repo
   }
 }
 
+// A report just taken from the pump for VHF: number it, and when it is a Steam
+// Controller state report, mark the clock the keep-alive goes by and (unless the
+// caller arms once for every slot afterwards) re-arm the timer. Stamping at take
+// time rather than at enqueue keeps the cadence measured from the report that
+// went on the wire, also when a snapshot waited for the readiness callback.
+// Call under state_lock.
+void mark_sc26_report_taken(
+  device_context *const context,
+  controller_slot &slot,
+  lvg::driver::report_buffer &report,
+  const bool rearm_keepalive) noexcept {
+  stamp_sc26_sequence(slot, report);
+  if (report.report_id == lvg::driver::k_sc26_input_report_id &&
+      is_steam_controller(slot.selected_profile)) {
+    slot.sc26.last_report_us = now_us();
+    if (rearm_keepalive) {
+      arm_sc26_keepalive(context);
+    }
+  }
+}
+
 // Spins until no submission that copied this slot's handle is still inside
 // VhfReadReportSubmit. Called without state_lock after slot.vhf was nulled,
 // so nothing new can start; a submit is a few microseconds.
@@ -581,7 +609,8 @@ void wait_for_submits(device_context *const context, controller_slot &slot) noex
 // caller releases the lock and finishes with submit_taken(). Encoding and
 // queueing under one lock hold keeps a resend of older state from landing
 // behind a newer input that was encoded in between. A Steam Controller state
-// report also marks the clock the keep-alive goes by and re-arms it.
+// report that leaves also marks the clock the keep-alive goes by and re-arms
+// it, unless the caller is the keep-alive tick, which arms once at its end.
 [[nodiscard]] NTSTATUS pump_report_locked(
   device_context *const context,
   controller_slot &slot,
@@ -591,7 +620,8 @@ void wait_for_submits(device_context *const context, controller_slot &slot) noex
   const lvg::driver::report_kind kind,
   lvg::driver::report_buffer *const next,
   bool *const have_next,
-  VHFHANDLE *const vhf) noexcept {
+  VHFHANDLE *const vhf,
+  const bool rearm_keepalive = true) noexcept {
   *have_next = false;
   *vhf = nullptr;
   if (context->stopping || slot.state != slot_state::active || slot.vhf == nullptr) {
@@ -599,14 +629,10 @@ void wait_for_submits(device_context *const context, controller_slot &slot) noex
   }
   if (data != nullptr) {
     std::ignore = slot.pump.enqueue(data, length, report_id, kind);
-    if (report_id == lvg::driver::k_sc26_input_report_id && is_steam_controller(slot.selected_profile)) {
-      slot.sc26.last_report_us = now_us();
-      arm_sc26_keepalive(context);
-    }
   }
   *have_next = slot.pump.take(next);
   if (*have_next) {
-    stamp_sc26_sequence(slot, *next);
+    mark_sc26_report_taken(context, slot, *next, rearm_keepalive);
     *vhf = slot.vhf;
     ++slot.submits_in_flight;
   }
@@ -677,9 +703,15 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
   if (!context->stopping && slot->state == slot_state::active && slot->vhf != nullptr) {
     have_next = slot->pump.take(&next);
     if (have_next) {
-      stamp_sc26_sequence(*slot, next);
+      mark_sc26_report_taken(context, *slot, next, true);
       vhf = slot->vhf;
       ++slot->submits_in_flight;
+    }
+    if (context->sc26_timer_parked && slot->have_last_input &&
+        is_steam_controller(slot->selected_profile)) {
+      // The reader is back (Steam reopened the device, or the HID child
+      // finished starting): resume the cadence the worker parked.
+      arm_sc26_keepalive(context);
     }
   }
   unlock_context(context);
@@ -947,6 +979,10 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
   const bool steam = is_steam_controller(slot->selected_profile);
   const lvg::driver::sc26_battery_report battery_report =
     steam ? lvg::driver::encode_sc26_battery(slot->sc26) : lvg::driver::sc26_battery_report {};
+  if (steam) {
+    // The client's own update restarts the keep-alive's 3.5 s battery period.
+    slot->sc26.last_battery_us = now_us();
+  }
   unlock_context(context);
 
   if (!applied) {
@@ -1740,6 +1776,7 @@ bool sc26_keepalive_tick(device_context *const context) noexcept {
   } pending[lvg::k_max_controllers] {};
   std::size_t count = 0;
   bool any_active = false;
+  bool any_ready = false;
   lock_context(context);
   const std::uint64_t now = now_us();
   if (!context->stopping) {
@@ -1752,31 +1789,56 @@ bool sc26_keepalive_tick(device_context *const context) noexcept {
       if (!slot.pump.ready()) {
         // VHF has no read pending (Steam closed the handle, or the HID child is
         // still starting): an encode would only overwrite the latest snapshot the
-        // readiness callback drains later. Move the cadence clock so the timer
-        // keeps idling at the tick instead of firing at once.
+        // readiness callback drains later. Move the cadence clock so the first
+        // resend after the reader returns is due a tick later, not at once.
         slot.sc26.last_report_us = now;
         continue;
       }
-      if (now >= slot.sc26.last_report_us && now - slot.sc26.last_report_us >= k_sc26_resend_after_us) {
+      any_ready = true;
+      // Battery goes out unprompted like the real unit's, as an aside so a
+      // pending state snapshot is kept. Only while someone reads: queued asides
+      // would otherwise pile up in the transition ring for a reader that may
+      // never come.
+      const bool battery_due = now >= slot.sc26.last_battery_us &&
+                               now - slot.sc26.last_battery_us >= k_sc26_battery_period_us;
+      if (battery_due) {
+        const auto battery = lvg::driver::encode_sc26_battery(slot.sc26);
+        std::ignore = slot.pump.enqueue(&battery, sizeof(battery),
+          lvg::driver::k_sc26_battery_report_id, lvg::driver::report_kind::aside);
+        slot.sc26.last_battery_us = now;
+      }
+      const bool resend_due =
+        now >= slot.sc26.last_report_us && now - slot.sc26.last_report_us >= k_sc26_resend_after_us;
+      if (!resend_due && !battery_due) {
+        continue;
+      }
+      lvg::driver::sc26_input_report report {};
+      if (resend_due) {
         lvg::driver::sc26_tick(&slot.sc26, now);
-        const auto report = lvg::driver::encode_sc26_input(slot.last_input, &slot.sc26);
-        auto &item = pending[count];
-        bool have_next = false;
-        const auto status = pump_report_locked(context, slot, &report, sizeof(report),
-          lvg::driver::k_sc26_input_report_id, lvg::driver::report_kind::continuous,
-          &item.report, &have_next, &item.vhf);
-        if (NT_SUCCESS(status) && have_next) {
-          item.slot = &slot;
-          ++count;
-        }
+        report = lvg::driver::encode_sc26_input(slot.last_input, &slot.sc26);
+      }
+      auto &item = pending[count];
+      bool have_next = false;
+      // The tick arms the timer once below for every slot; no per-slot re-arm.
+      const auto status = pump_report_locked(context, slot,
+        resend_due ? &report : nullptr, resend_due ? static_cast<ULONG>(sizeof(report)) : 0,
+        lvg::driver::k_sc26_input_report_id, lvg::driver::report_kind::continuous,
+        &item.report, &have_next, &item.vhf, false);
+      if (NT_SUCCESS(status) && have_next) {
+        item.slot = &slot;
+        ++count;
       }
     }
   }
-  if (any_active) {
-    // Also re-arm when VHF is busy and reports were only queued.
+  if (!any_active) {
+    context->sc26_timer_running = false;
+  } else if (any_ready) {
     arm_sc26_keepalive(context);
   } else {
-    context->sc26_timer_running = false;
+    // Nobody reads any Steam Controller: leave the timer unarmed rather than
+    // waking every tick to find that out. evt_vhf_ready_for_next_report arms
+    // it again when a read arrives.
+    context->sc26_timer_parked = true;
   }
   unlock_context(context);
   for (std::size_t i = 0; i < count; ++i) {
@@ -1795,6 +1857,7 @@ void arm_sc26_keepalive(device_context *const context) noexcept {
   if (context->sc26_keepalive_timer == nullptr || !context->sc26_timer_running) {
     return;
   }
+  context->sc26_timer_parked = false;
   constexpr std::uint64_t tick_us = static_cast<std::uint64_t>(k_sc26_tick_ms) * 1000;
   const std::uint64_t now = now_us();
   std::uint64_t delay_us = tick_us;
@@ -1846,6 +1909,7 @@ void start_sc26_keepalive(device_context *const context) noexcept {
   // only after joining it, so its final store cannot disable our re-arming.
   lock_context(context);
   context->sc26_timer_running = true;
+  context->sc26_timer_parked = false;
   unlock_context(context);
   ResetEvent(context->sc26_keepalive_stop);
   LARGE_INTEGER first_due {};

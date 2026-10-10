@@ -31,9 +31,11 @@ using sc26_battery_report = lvg::sc26_usb::battery_report;
 struct sc26_state {
   lvg::sc26_usb::state device;
   lvg::sc26_usb::feature_state features;
-  lvg::sc26_usb::rumble rumble;
   // Driver clock (microseconds) of the last motion sample; 0 = never.
   std::uint64_t last_motion_us {};
+  // Driver clock of the last battery report (0x43) queued for VHF, by the
+  // client's update or the keep-alive's periodic one; 0 = never.
+  std::uint64_t last_battery_us {};
   // Driver clock of the last state report queued for VHF (written by the
   // driver's pump, not by sc26_tick); the keep-alive resends the state when
   // this goes stale. A motion sample or a host's input-report read must not
