@@ -427,7 +427,9 @@ int main(int argc, char **argv) {
     check(got_state, "state report 0x42 (54 bytes) carries A, Steam, trigger click, stick, trigger");
     if (bytes) std::printf("  last report: id 0x%02x %lu bytes, seq %u, buttons 0x%08x\n", report[0], bytes, report[1], ule32(report.data() + 2));
 
-    // Haptic pulse as Steam's UI sends it -> generic_rumble feedback to the client.
+    // Haptic pulse as Steam's UI sends it -> a steam_haptic feedback event carrying the
+    // verbatim 0x81 report (drivers before a4a12fa decoded it to generic_rumble instead;
+    // both are accepted so the probe still runs against an older package).
     std::array<unsigned char, 64> out {};
     out[0] = sc::haptic_pulse_id; out[1] = 1; out[2] = 0x90; out[3] = 0x01; out[6] = 1;  // left, 400 us on, repeat 1
     DWORD written = 0;
@@ -439,14 +441,27 @@ int main(int argc, char **argv) {
     lvg::feedback_event event {};
     bool got_feedback = false;
     for (int attempt = 0; attempt < 20 && !got_feedback; ++attempt) {
-      if (client.poll_feedback(slot, &event) == ERROR_SUCCESS && event.type == lvg::feedback_type::generic_rumble) {
+      if (client.poll_feedback(slot, &event) != ERROR_SUCCESS) {
+        Sleep(50);
+        continue;
+      }
+      if (event.type == lvg::feedback_type::steam_haptic) {
+        lvg::steam_haptic_feedback haptic {};
+        std::memcpy(&haptic, event.payload, sizeof(haptic));
+        std::printf("  feedback: steam_haptic length=%u report=%02x %02x %02x %02x %02x %02x %02x %02x\n",
+                    haptic.length, haptic.report[0], haptic.report[1], haptic.report[2], haptic.report[3],
+                    haptic.report[4], haptic.report[5], haptic.report[6], haptic.report[7]);
+        got_feedback = event.payload_size == sizeof(haptic) && haptic.length == 8 &&
+                       haptic.report[0] == sc::haptic_pulse_id && haptic.report[1] == 1 &&
+                       haptic.report[2] == 0x90 && haptic.report[3] == 0x01 && haptic.report[6] == 1;
+      } else if (event.type == lvg::feedback_type::generic_rumble) {
         lvg::generic_rumble_rgb_feedback rumble {};
         std::memcpy(&rumble, event.payload, sizeof(rumble));
-        std::printf("  feedback: generic_rumble low=%u high=%u\n", rumble.low_frequency, rumble.high_frequency);
+        std::printf("  feedback: generic_rumble low=%u high=%u (pre-a4a12fa driver)\n", rumble.low_frequency, rumble.high_frequency);
         got_feedback = rumble.low_frequency == 65535;
-      } else Sleep(50);
+      }
     }
-    check(got_feedback, "pulse became a generic_rumble feedback event (left = full)");
+    check(got_feedback, "pulse came back as the verbatim 0x81 steam_haptic event (left, 400 us, repeat 1)");
     out.fill(0); out[0] = sc::haptic_command_id; out[2] = 0x02; out[3] = 0xf2;  // 0x82 as captured
     wop = {}; wop.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     wrote = WriteFile(handle, out.data(), 64, nullptr, &wop) != FALSE || GetLastError() == ERROR_IO_PENDING;
@@ -672,12 +687,30 @@ int main(int argc, char **argv) {
         }
         if (!skip_send) (void) client.submit_input_state(make_input(slot, buttons, lx, ly, rx, ry, lt, rt));
         while (client.poll_feedback(slot, &event) == ERROR_SUCCESS) {
-          lvg::generic_rumble_rgb_feedback rumble {};
-          std::memcpy(&rumble, event.payload, sizeof(rumble));
-          std::printf("  [%llus] feedback type %u low=%u high=%u%s\n", (GetTickCount64() - (end - static_cast<ULONGLONG>(hold_seconds) * 1000)) / 1000,
-                      static_cast<unsigned>(event.type), rumble.low_frequency, rumble.high_frequency,
-                      (rumble.low_frequency | rumble.high_frequency) ? "  -> pressing A" : "");
-          if ((rumble.low_frequency | rumble.high_frequency) != 0) haptic_ack_ticks = 6;
+          const unsigned long long at_s = (GetTickCount64() - (end - static_cast<ULONGLONG>(hold_seconds) * 1000)) / 1000;
+          bool active = false;
+          if (event.type == lvg::feedback_type::steam_haptic) {
+            // Verbatim haptic report: 0x80 with a non-zero speed, or 0x81 with a non-zero
+            // on-time and repeat, means Steam is driving the motor; the rest are stops/commands.
+            lvg::steam_haptic_feedback haptic {};
+            std::memcpy(&haptic, event.payload, sizeof(haptic));
+            const unsigned on_us = haptic.report[2] | (haptic.report[3] << 8);
+            const unsigned repeat = haptic.report[6] | (haptic.report[7] << 8);
+            const unsigned left_speed = haptic.report[4] | (haptic.report[5] << 8);
+            const unsigned right_speed = haptic.report[7] | (haptic.report[8] << 8);
+            active = (haptic.report[0] == sc::haptic_pulse_id && on_us != 0 && repeat != 0) ||
+                     (haptic.report[0] == sc::haptic_rumble_id && (left_speed | right_speed) != 0);
+            std::printf("  [%llus] feedback steam_haptic 0x%02x side=%u len=%u%s\n", at_s,
+                        haptic.report[0], haptic.report[1], haptic.length, active ? "  -> pressing A" : "");
+          } else {
+            lvg::generic_rumble_rgb_feedback rumble {};
+            std::memcpy(&rumble, event.payload, sizeof(rumble));
+            active = (rumble.low_frequency | rumble.high_frequency) != 0;
+            std::printf("  [%llus] feedback type %u low=%u high=%u%s\n", at_s,
+                        static_cast<unsigned>(event.type), rumble.low_frequency, rumble.high_frequency,
+                        active ? "  -> pressing A" : "");
+          }
+          if (active) haptic_ack_ticks = 6;
         }
         ++tick;
         Sleep(((phase == 4 || phase == 5) && !skip_send) ? stick_tail_sleep_ms : 50);

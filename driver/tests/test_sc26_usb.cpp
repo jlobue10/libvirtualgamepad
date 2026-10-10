@@ -291,14 +291,20 @@ int main() {
     check(set_feature(cmd, sizeof(cmd), fs) && get_feature(reply, sizeof(reply), fs) == 64 && reply[2] == 9 && reply[3] == 2 &&
           reply[6] == 1, "device info 2 is 9 bytes");
 
-    // Keyed values: no bond, nothing else.
+    // Keyed values, as the capture pairs them: the transport key answers one
+    // byte (0 = USB); the bond keys answer nothing on a unit without a puck.
     std::memset(cmd, 0, sizeof(cmd));
-    cmd[0] = 1; cmd[1] = cmd_get_keyed_value; cmd[2] = 9; std::memcpy(cmd + 3, "esb/bond", 9);
+    cmd[0] = 1; cmd[1] = cmd_get_keyed_value; cmd[2] = 24; std::memcpy(cmd + 3, "user/wireless_transport", 24);
     check(set_feature(cmd, sizeof(cmd), fs) && get_feature(reply, sizeof(reply), fs) == 64 && reply[2] == 1 && reply[3] == 0,
-          "esb/bond answers one zero byte");
-    cmd[2] = 24; std::memcpy(cmd + 3, "user/wireless_transport", 24);
+          "user/wireless_transport answers one zero byte");
+    std::memset(cmd + 3, 0, sizeof(cmd) - 3);
+    cmd[2] = 9; std::memcpy(cmd + 3, "esb/bond", 9);
     check(set_feature(cmd, sizeof(cmd), fs) && get_feature(reply, sizeof(reply), fs) == 64 && reply[2] == 0,
-          "other keys answer empty");
+          "esb/bond answers empty (no puck)");
+    std::memset(cmd + 3, 0, sizeof(cmd) - 3);
+    cmd[2] = 11; std::memcpy(cmd + 3, "esb/bond_2", 11);
+    check(set_feature(cmd, sizeof(cmd), fs) && get_feature(reply, sizeof(reply), fs) == 64 && reply[2] == 0,
+          "esb/bond_2 answers empty");
 
     // The three write-only commands are known, not counted as unknown.
     std::memset(cmd, 0, sizeof(cmd));
@@ -354,9 +360,9 @@ int main() {
       {"01c110ffffffff030905ffffffffffffffffff", 0},
       {"01dc020102", 0},
       {"01e2020120", 0},
-      {"01ed096573622f626f6e6400", 1},                              // "esb/bond"
+      {"01ed096573622f626f6e6400", 0},                              // "esb/bond" (no puck on a virtual unit)
       {"01ed0b6573622f626f6e645f3200", 0},                          // "esb/bond_2"
-      {"01ed18757365722f776972656c6573735f7472616e73706f727400", 0}, // "user/wireless_transport"
+      {"01ed18757365722f776972656c6573735f7472616e73706f727400", 1}, // "user/wireless_transport" -> [00]
       {"018500", 0},                                                // SET_DEFAULT_DIGITAL_MAPPINGS
       {"018e00", 0},                                                // LOAD_DEFAULT_SETTINGS
     };
