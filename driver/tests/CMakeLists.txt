@@ -48,6 +48,11 @@ if(WIN32)
     add_test(NAME client_contract COMMAND test_client_contract)
 endif()
 
+# The device-setup tool's install verdict (pure header, no Windows needed).
+add_executable(test_install_decision test_install_decision.cpp)
+target_compile_features(test_install_decision PRIVATE cxx_std_20)
+add_test(NAME install_decision COMMAND test_install_decision)
+
 # Include native PnP identity checks in the existing CI test entry point.
 add_subdirectory(gameinput)
 
