@@ -46,6 +46,22 @@ int main() {
   check(install_exit_code(install_outcome {.ready = false, .reboot_required = true}) == 3010,
         "not ready with a reboot request exits 3010");
   check(install_exit_code(install_outcome {.ready = false}) == 3, "not ready exits 3");
+
+  // D20-03: the probe verdict. A client holding the interface is in use = ready;
+  // the attestation still decides success rather than exit 0 on sight.
+  using lvg::device_setup::classify_open;
+  using lvg::device_setup::interface_ready;
+  using lvg::device_setup::probe_verdict;
+  using lvg::device_setup::k_win32_error_sharing_violation;
+  using lvg::device_setup::k_win32_error_access_denied;
+  check(classify_open(k_win32_error_sharing_violation) == probe_verdict::in_use, "a sharing violation means a client holds the interface");
+  check(classify_open(k_win32_error_access_denied) == probe_verdict::denied, "access denied is reported as denied");
+  check(classify_open(2) == probe_verdict::absent, "file not found is absent");
+  check(interface_ready(probe_verdict::in_use) && interface_ready(probe_verdict::answered), "in-use and answered interfaces are ready");
+  check(!interface_ready(probe_verdict::denied) && !interface_ready(probe_verdict::absent), "denied and absent interfaces are not ready");
+  check(attestation_due(install_outcome {.ready = interface_ready(probe_verdict::in_use)}), "an in-use interface still requires the DriverVer attestation");
+  check(install_exit_code(install_outcome {.ready = interface_ready(probe_verdict::in_use), .version_matches = false}) == 3,
+        "an in-use interface running another DriverVer is not a success");
   if (failures == 0) {
     std::printf("install decision: all checks passed\n");
   }

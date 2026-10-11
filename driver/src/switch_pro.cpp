@@ -515,12 +515,13 @@ bool decode_switch_rumble(
   const std::uint8_t *const left = report + 2;
   const std::uint8_t *const right = report + 6;
 
+  // The index is a row of SDL/Steam's amplitude table, not a linear scale.
   const auto scale = [](const std::int32_t index) -> std::uint16_t {
     if (index <= 0) {
       return 0;
     }
     const std::int32_t clamped = index > k_switch_amplitude_max ? k_switch_amplitude_max : index;
-    return static_cast<std::uint16_t>((clamped * 65535) / k_switch_amplitude_max);
+    return k_switch_amplitude_by_index[clamped];
   };
   const auto high_band = [&](const std::uint8_t *const side) -> std::uint16_t {
     return scale(static_cast<std::uint8_t>((side[1] & 0xFE) >> 1));

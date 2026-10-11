@@ -14,7 +14,44 @@ defaults:
     shell: pwsh
 
 jobs:
+  # A tag used to publish as soon as the package verified: the CTest suite and the
+  # keep-alive / pin-tool harnesses only ran on branch pushes and PRs, so a direct
+  # bump + tag shipped unvalidated by any functional test.
+  tests:
+    runs-on: windows-2022
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+      - name: Configure and build controller tests
+        run: |
+          cmake -S driver/tests -B build/contract-tests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build build/contract-tests --config Release
+          exit $LASTEXITCODE
+      - name: Test descriptors, contracts and the install decision
+        run: ctest --test-dir build/contract-tests -C Release --output-on-failure
+
+  harnesses:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+      - name: Test production keep-alive scheduling and lifetime under ASan/UBSan
+        run: python3 driver/tests/test_sc26_keepalive.py
+      - name: Test the Vibepollo pin tool's rewrite rules
+        run: python3 tools/capture/test_update_pins.py
+
   build:
+    needs: [tests, harnesses]
     runs-on: windows-2022
     permissions:
       contents: read
