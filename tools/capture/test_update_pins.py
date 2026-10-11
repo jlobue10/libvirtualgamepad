@@ -35,6 +35,24 @@ check('v0.1.0-beta.121' in out and ' 0.1.0-beta.1 ' in out and 'v0.1.0-beta.12.1
 check(not pins.tag_survives(out, 'v0.1.0-beta.12'), 'the guard is quiet once the old tag is gone')
 check(pins.tag_survives(sample, 'v0.1.0-beta.12'), 'the guard fires while the old tag remains')
 check(not pins.tag_survives('v0.1.0-beta.120 only', 'v0.1.0-beta.12'), 'the guard does not fire on the new tag')
+
+# The lock must describe the tag's commit before anything is pinned (D22-04).
+commit = 'a' * 40
+ref = {'object': {'type': 'commit', 'sha': commit}}
+good = {'tag': 'v0.1.0-beta.120', 'source_revision': commit, 'tag_target': commit}
+check(pins.check_lock_against_tag(good, 'v0.1.0-beta.120', ref) is None, 'a lock made from the tagged commit passes')
+check(pins.check_lock_against_tag(dict(good, source_revision='b' * 40), 'v0.1.0-beta.120', ref) is not None,
+      'a lock whose source revision is not the tagged commit is refused')
+check(pins.check_lock_against_tag(dict(good, tag_target='b' * 40), 'v0.1.0-beta.120', ref) is not None,
+      'a lock whose tag target is not the tagged commit is refused')
+check(pins.check_lock_against_tag(good, 'v0.1.0-beta.121', ref) is not None, 'a lock for another tag is refused')
+check(pins.check_lock_against_tag(good, 'v0.1.0-beta.120', {'object': {'type': 'tag', 'sha': commit}}) is not None,
+      'an annotated tag object is not taken for the commit')
+check(pins.check_lock_against_tag(good, 'v0.1.0-beta.120', {'object': {'type': 'commit', 'sha': commit.upper()}}) is None,
+      'commit hashes compare case-insensitively')
+check(pins.REPOSITORY_PATTERN.fullmatch('jlobue10/libvirtualgamepad') is not None, 'owner/name repositories are accepted')
+for bad in ('jlobue10', 'a/b/c', 'a b/c', 'owner/name;rm'):
+    check(pins.REPOSITORY_PATTERN.fullmatch(bad) is None, f'repository {bad!r} is refused')
 plain = pins.rewrite_tag('tag v0.1.0-beta.119 asset 0.1.0-beta.119', 'v0.1.0-beta.119', 'v0.1.0-beta.120')
 check(plain == 'tag v0.1.0-beta.120 asset 0.1.0-beta.120', 'an ordinary bump rewrites both forms')
 

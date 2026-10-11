@@ -105,6 +105,27 @@ def tag_survives(text, old_tag):
     return tag_pattern(old_tag).search(text) is not None
 
 
+REPOSITORY_PATTERN = re.compile(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+')
+
+
+def check_lock_against_tag(lock, tag, ref):
+    """The lock is pinned into five files and a gitlink; it must describe the commit the tag
+    points at (an operator-supplied --lock can be stale or hand-edited). `ref` is the
+    repos/{repo}/git/ref/tags/{tag} object; releases are made from lightweight tags, so the
+    object is the commit itself."""
+    if lock.get('tag') != tag:
+        return f"lock is for {lock.get('tag')}, not {tag}"
+    if ref['object']['type'] != 'commit':
+        return f"tag {tag} is not a lightweight tag on a commit ({ref['object']['type']})"
+    commit = ref['object']['sha'].lower()
+    rev = str(lock.get('source_revision', '')).lower()
+    target = str(lock.get('tag_target', rev)).lower()
+    if rev != commit or target != commit:
+        return (f"lock source_revision {rev[:12]} / tag_target {target[:12]} do not match the commit"
+                f" {commit[:12]} that {tag} points at")
+    return None
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--tag', required=True, help='driver fork release tag, e.g. v0.1.0-beta.101')
@@ -112,6 +133,8 @@ def main():
     ap.add_argument('--repository', default=DRIVER_REPO, help='producer repository to pin')
     ap.add_argument('--dry-run', action='store_true', help='show the changes, commit nothing')
     args = ap.parse_args()
+    if not REPOSITORY_PATTERN.fullmatch(args.repository):
+        sys.exit(f'--repository must be owner/name, got {args.repository!r}')
 
     if args.lock:
         # utf-8-sig: Windows PowerShell 5.1 writes a BOM for -Encoding utf8
@@ -126,8 +149,9 @@ def main():
         if out.returncode != 0:
             sys.exit(out.stderr)
         lock = json.loads(out.stdout.lstrip('\ufeff'))
-    if lock['tag'] != args.tag:
-        sys.exit(f"lock is for {lock['tag']}, not {args.tag}")
+    problem = check_lock_against_tag(lock, args.tag, gh(f'repos/{args.repository}/git/ref/tags/{args.tag}'))
+    if problem:
+        sys.exit(problem)
     new = dict(tag=lock['tag'], sha=lock['archive']['sha256'], rev=lock['source_revision'],
                ver=lock['driver_ver'], asset=lock['archive']['name'],
                protocol=str(lock['protocol_version']))

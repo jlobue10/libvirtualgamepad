@@ -85,6 +85,7 @@ function Invoke-GitHubJson {
         Headers = $script:JsonHeaders
         SkipHttpErrorCheck = $true
         MaximumRetryCount = 0
+        TimeoutSec = 120
     }
     if ($PSBoundParameters.ContainsKey('Body')) {
         $parameters.ContentType = 'application/json'
@@ -336,6 +337,7 @@ function Save-ReleaseAssets {
             -Uri "$script:ApiBase/releases/assets/$($asset.id)" `
             -Headers $script:BinaryHeaders `
             -OutFile $destinationPath `
+            -TimeoutSec 300 `
             -PassThru `
             -SkipHttpErrorCheck `
             -MaximumRetryCount 0
@@ -502,6 +504,7 @@ try {
             -Uri "${uploadBaseText}?name=$encodedName" `
             -Headers $script:JsonHeaders `
             -ContentType 'application/octet-stream' `
+            -TimeoutSec 300 `
             -InFile $path `
             -SkipHttpErrorCheck `
             -MaximumRetryCount 0
