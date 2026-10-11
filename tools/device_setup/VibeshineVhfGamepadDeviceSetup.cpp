@@ -26,6 +26,8 @@
 
 #include "libvirtualgamepad/protocol.h"
 
+#include "install_decision.h"
+
 #pragma comment(lib, "cfgmgr32.lib")
 #pragma comment(lib, "newdev.lib")
 #pragma comment(lib, "setupapi.lib")
@@ -1161,7 +1163,7 @@ void print_status() {
   bool device_cycle_reboot_required = false;
   bool device_cycle_succeeded = false;
   bool selected_driver_verified = false;
-  bool owned_reload_verified = !requires_live_reload;
+  bool owned_reload_verified = false;
   if (!ready || requires_live_reload) {
     try {
       const auto reactivation = reactivate_owned_root_devices();
@@ -1202,11 +1204,28 @@ void print_status() {
   // exact source node reloaded in the current session. When Windows requested
   // a reboot, also attest the driver version selected for every owned node so
   // an old compatible DLL cannot masquerade as the newly staged package.
-  if (ready && requires_live_reload && device_cycle_succeeded && !device_cycle_reboot_required) {
+  // Also attest when Windows kept an already-selected package (update_driver()
+  // returned updated=false): that is an idempotent re-run of this package only
+  // if every owned node runs this INF's DriverVer. A same-day package from
+  // another branch (lower rev-list count) or an equal-DriverVer rebuild was
+  // otherwise reported as installed with the old DLL still live.
+  lvg::device_setup::install_outcome outcome {
+    .ready = ready,
+    .updated = update_result.updated,
+    .reboot_required = reboot_required,
+    .device_cycle_succeeded = device_cycle_succeeded,
+    .device_cycle_reboot_required = device_cycle_reboot_required,
+    .version_matches = false,
+  };
+  if (lvg::device_setup::attestation_due(outcome)) {
     selected_driver_verified = owned_root_devices_match_driver_version(expected_driver_version);
+    outcome.version_matches = selected_driver_verified;
+    if (!selected_driver_verified) {
+      std::cerr << "Vibeshine VHF gamepad: the owned root device does not run the staged package's DriverVer"
+                << (update_result.updated ? "" : " (Windows kept an already-selected package)") << std::endl;
+    }
   }
-  if (ready && (!requires_live_reload ||
-                (device_cycle_succeeded && !device_cycle_reboot_required && selected_driver_verified))) {
+  if (lvg::device_setup::reload_verified(outcome)) {
     owned_reload_verified = true;
     reboot_required = false;
   }
@@ -1238,10 +1257,9 @@ void print_status() {
               << L",\"rolled_back\":" << (rolled_back ? L"true" : L"false")
              << L",\"rollback_reboot_required\":" << (rollback_reboot_required ? L"true" : L"false")
              << L",\"ready\":" << (ready ? L"true" : L"false") << L"}" << std::endl;
-  if (reboot_required) {
-    return k_exit_reboot_required;
-  }
-  return ready && owned_reload_verified ? 0 : 3;
+  static_assert(lvg::device_setup::k_exit_reboot == k_exit_reboot_required);
+  outcome.reboot_required = reboot_required;  // a rollback above may have added its own request
+  return lvg::device_setup::install_exit_code(outcome);
 }
 
 [[nodiscard]] int run_remove() {
