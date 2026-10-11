@@ -642,9 +642,10 @@ void wait_for_submits(device_context *const context, controller_slot &slot) noex
   lvg::driver::report_buffer *const taken = slot.pump.take();
   *have_next = taken != nullptr;
   if (*have_next) {
+    // Stamp the buffer that goes on the wire, then copy it for the caller.
+    mark_sc26_report_taken(context, slot, *taken, rearm_keepalive);
     *next = *taken;
     slot.read_transfer = {taken->data, taken->length, taken->report_id};
-    mark_sc26_report_taken(context, slot, *next, rearm_keepalive);
     *vhf = slot.vhf;
     ++slot.submits_in_flight;
   }
@@ -720,9 +721,9 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
     lvg::driver::report_buffer *const taken = slot->pump.take();
     have_next = taken != nullptr;
     if (have_next) {
+      mark_sc26_report_taken(context, *slot, *taken, true);
       next = *taken;
       slot->read_transfer = {taken->data, taken->length, taken->report_id};
-      mark_sc26_report_taken(context, *slot, next, true);
       vhf = slot->vhf;
       ++slot->submits_in_flight;
     }

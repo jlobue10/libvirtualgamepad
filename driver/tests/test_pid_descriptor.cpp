@@ -671,6 +671,15 @@ int main() {
 
     ds4_input_report report = encode_ds4_input(input, &state);
     check(report.report_id == k_ds4_input_report_id, "ds4 report id");
+    {
+      // The SC2026 click bits and the host-owned explicit bit (26..30) mean nothing here.
+      input_state_request tainted = input;
+      tainted.buttons |= 0x7C000000u;
+      ds4_state clean_state = state, tainted_state = state;
+      const ds4_input_report clean = encode_ds4_input(input, &clean_state);
+      const ds4_input_report same = encode_ds4_input(tainted, &tainted_state);
+      check(std::memcmp(&same, &clean, sizeof(clean)) == 0, "SC2026 click/metadata bits are ignored by the DualShock 4 encoder");
+    }
     check(report.left_x == 128, "ds4 centred X");
     check(report.left_y == 128, "ds4 centred Y");
     check((report.buttons0 & 0x0F) == 8, "ds4 released d-pad is hat 8");
@@ -841,6 +850,15 @@ int main() {
     input.buttons = button_mask::misc;
     const ds5_input_report report = encode_ds5_input(input, &state);
     check(report.report_id == k_ds5_input_report_id, "ds5 report id");
+    {
+      // The SC2026 click bits and the host-owned explicit bit (26..30) mean nothing here.
+      input_state_request tainted = input;
+      tainted.buttons |= 0x7C000000u;
+      ds5_state clean_state = state, tainted_state = state;
+      const ds5_input_report clean = encode_ds5_input(input, &clean_state);
+      const ds5_input_report same = encode_ds5_input(tainted, &tainted_state);
+      check(std::memcmp(&same, &clean, sizeof(clean)) == 0, "SC2026 click/metadata bits are ignored by the DualSense encoder");
+    }
     check((report.buttons[2] & 0x04) != 0, "ds5 misc is the microphone mute button");
 
     input.buttons = button_mask::touchpad;
@@ -1100,6 +1118,12 @@ int main() {
       rep = encode_sc26_input(in, nullptr);
       check((rep.buttons & (clicks | lvg::sc26_usb::btn_left_stick_touch)) == 0,
             "sc26 stateless encoding obeys authoritative releases");
+      // The latch outlives the metadata bit: a later input without it (a host
+      // that stopped sending explicit clicks mid-session) keeps analog synthesis off.
+      in.buttons = 0;
+      in.left_trigger = 255;
+      rep = encode_sc26_input(in, &state);
+      check((rep.buttons & clicks) == 0, "sc26 trigger-click latch survives an input without the metadata bit");
       state.reset();
       in.buttons = 0;
       rep = encode_sc26_input(in, &state);
@@ -1179,6 +1203,14 @@ int main() {
     input.right_y = 32767;
     const generic_input_report up = encode_generic_input(input);
     check(up.left_y < 0, "generic profile sends stick-up as negative HID Y");
+    {
+      // The SC2026 click bits and the host-owned explicit bit (26..30) mean nothing here.
+      input_state_request tainted = input;
+      tainted.buttons |= 0x7C000000u;
+      const generic_input_report clean = up;
+      const generic_input_report same = encode_generic_input(tainted);
+      check(std::memcmp(&same, &clean, sizeof(clean)) == 0, "SC2026 click/metadata bits are ignored by the generic encoder");
+    }
     check(up.right_y < 0, "generic profile sends stick-up as negative HID Ry");
 
     input.left_y = -32768;  // Fully down, and the value that cannot be negated.
@@ -1297,6 +1329,15 @@ int main() {
 
     switch_input_report report = encode_switch_input(input, &state);
     check(report.report_id == k_switch_input_report_id, "switch report id");
+    {
+      // The SC2026 click bits and the host-owned explicit bit (26..30) mean nothing here.
+      input_state_request tainted = input;
+      tainted.buttons |= 0x7C000000u;
+      switch_state clean_state = state, tainted_state = state;
+      const switch_input_report clean = encode_switch_input(input, &clean_state);
+      const switch_input_report same = encode_switch_input(tainted, &tainted_state);
+      check(std::memcmp(&same, &clean, sizeof(clean)) == 0, "SC2026 click/metadata bits are ignored by the Switch Pro encoder");
+    }
 
     {
       // Battery level is a quartile step 0/2/4/6/8; any charge at all is at
@@ -2033,6 +2074,13 @@ int main() {
     const xbox_one_input_report short_report = encode_xbox_one_input(sample);
     check(std::memcmp(&full, &short_report, sizeof(short_report)) == 0,
           "the Xbox One report is the Series report without its last byte");
+    {
+      // The SC2026 click bits and the host-owned explicit bit (26..30) mean nothing here.
+      input_state_request tainted = sample;
+      tainted.buttons |= 0x7C000000u;
+      const xbox_one_input_report same = encode_xbox_one_input(tainted);
+      check(std::memcmp(&same, &short_report, sizeof(short_report)) == 0, "SC2026 click/metadata bits are ignored by the Xbox One encoder");
+    }
 
     // Share is the one thing an Xbox One pad cannot report. Asking for it must
     // not change anything else.

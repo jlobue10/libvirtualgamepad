@@ -42,7 +42,7 @@ prefix = r'''
 #include <cstdio>
 #include <cassert>
 using HANDLE=void*; using VHFHANDLE=void*; using LONGLONG=long long; using LONG=std::int32_t; using ULONG=std::uint32_t;
-using UCHAR=std::uint8_t; using PUCHAR=std::uint8_t*;
+using UCHAR=std::uint8_t; using PUCHAR=std::uint8_t*; using PVOID=void*;
 using NTSTATUS=int; struct LARGE_INTEGER{long long QuadPart;};
 #define FALSE 0
 #define INFINITE 0xffffffff
@@ -80,7 +80,8 @@ namespace driver {
    if(have_latest){in_flight_=latest;have_latest=false;ready_=false;return &in_flight_;}return nullptr;}};
 }}
 enum class slot_state{active,free};
-struct controller_slot {slot_state state=slot_state::active; int selected_profile=1;
+struct device_context;
+struct controller_slot {device_context* parent=nullptr; slot_state state=slot_state::active; int selected_profile=1;
  bool have_last_input=true; VHFHANDLE vhf=(void*)1; int last_input=42; std::uint8_t sc26_wire_sequence=0;
  lvg::driver::fake_pump pump; lvg::driver::sc26_state sc26; int submits_in_flight=0; HID_XFER_PACKET read_transfer{};
  lvg::driver::ds4_state ds4; lvg::driver::ds5_state ds5; lvg::driver::switch_state switch_pro;};
@@ -157,15 +158,16 @@ int main(){int failures=0;
  c.controllers[0].pump.ready_=true;c.controllers[1].pump.ready_=true;
  // Input path: a snapshot queued while VHF has no read pending is not stamped;
  // the stamp lands when the readiness callback takes it.
- {auto& s=c.controllers[0];s.pump.ready_=false;s.sc26.last_report_us=1;s.sc26_wire_sequence=0;int report=42;
+ {auto& s=c.controllers[0];s.pump.ready_=false;s.sc26.last_report_us=1;s.sc26_wire_sequence=9;int report=42;
   lvg::driver::report_buffer next{};bool have=false;VHFHANDLE vhf=nullptr;clock_us=50000;arms=0;
   lock_context(&c);auto st=pump_report_locked(&c,s,&report,sizeof(report),lvg::driver::k_sc26_input_report_id,lvg::driver::report_kind::continuous,&next,&have,&vhf);unlock_context(&c);
   check(NT_SUCCESS(st) && !have && s.sc26.last_report_us==1 && arms==0 && s.submits_in_flight==0,
         "a state report queued without a pending read is neither stamped nor armed");
   clock_us=52000;s.pump.set_ready();
   lock_context(&c);st=pump_report_locked(&c,s,nullptr,0,lvg::driver::k_sc26_input_report_id,lvg::driver::report_kind::continuous,&next,&have,&vhf);unlock_context(&c);
-  check(NT_SUCCESS(st) && have && vhf==s.vhf && s.submits_in_flight==1 && next.data[1]==0 && s.sc26_wire_sequence==1,
+  check(NT_SUCCESS(st) && have && vhf==s.vhf && s.submits_in_flight==1 && next.data[1]==9 && s.sc26_wire_sequence==10,
         "the readiness callback takes the waiting snapshot with the handle, the in-flight count and the sequence");
+  check(s.pump.in_flight_.data[1]==9,"the sequence is stamped on the pump-owned buffer VHF reads, not only the bookkeeping copy");
   check(s.sc26.last_report_us==52000 && arms==1,"the keep-alive clock is stamped at take time and the timer re-armed");
   submitted=0;check(NT_SUCCESS(submit_taken(&c,s,next,vhf)) && submitted==1 && last_submitted_id==lvg::driver::k_sc26_input_report_id && s.submits_in_flight==0
         && last_packet==&s.read_transfer && last_buffer==s.pump.in_flight_.data && last_packet->reportBufferLen==s.pump.in_flight_.length,
@@ -182,6 +184,21 @@ int main(){int failures=0;
   check(!NT_SUCCESS(submit_taken(&c,s,next,vhf)) && !s.pump.ready() && s.submits_in_flight==0 && arms==0,
         "a failed submit leaves readiness and the parked keep-alive to VHF's callback");
   vhf_submit_status=0;c.sc26_timer_parked=false;}
+ {// D22-02: the readiness callback is the second take site. It grants readiness, takes into
+  // pump-owned storage, submits the slot-owned packet and resumes a parked keep-alive timer.
+  auto& s=c.controllers[0];s.parent=&c;s.pump.ready_=false;s.submits_in_flight=0;s.sc26_wire_sequence=20;int report=43;
+  check(s.pump.enqueue(&report,sizeof(report),lvg::driver::k_sc26_input_report_id,lvg::driver::report_kind::continuous),"a state queued while VHF holds no read");
+  c.sc26_timer_parked=true;arms=0;submitted=0;clock_us=70000;last_packet=nullptr;last_buffer=nullptr;
+  evt_vhf_ready_for_next_report(&s);
+  check(submitted==1 && last_packet==&s.read_transfer && last_buffer==s.pump.in_flight_.data && last_packet->reportId==lvg::driver::k_sc26_input_report_id,
+        "the readiness callback submits the slot-owned packet over the pump-owned buffer");
+  check(s.pump.in_flight_.data[1]==20 && s.sc26_wire_sequence==21,"the readiness callback stamps the wire sequence on the submitted buffer");
+  check(s.submits_in_flight==0 && !s.pump.ready() && s.sc26.last_report_us==70000,"the take consumes readiness, releases the in-flight count and stamps the clock");
+  check(arms==1 && !c.sc26_timer_parked,"a parked keep-alive timer resumes once on readiness");
+  submitted=0;evt_vhf_ready_for_next_report(&s);
+  check(submitted==0 && s.pump.ready(),"readiness with nothing queued stays granted for the next enqueue");
+  evt_vhf_ready_for_next_report(nullptr);s.parent=nullptr;evt_vhf_ready_for_next_report(&s);
+  check(submitted==0,"a null client context or an orphaned slot is ignored");s.pump.ready_=true;}
  c.sc26_keepalive_thread=(void*)1;joining=&c;start_sc26_keepalive(&c);
  check(c.sc26_timer_running,"exiting worker cannot clear replacement worker's running flag");
  {// D14-01: with a running worker a motion sample is folded and carried by the next tick;
@@ -226,6 +243,7 @@ signatures = [
  'NTSTATUS submit_taken(\n  device_context *const context,\n  controller_slot &slot,\n'
  '  const lvg::driver::report_buffer &next,\n  const VHFHANDLE vhf) noexcept',
  'bool sc26_keepalive_tick(device_context *const context) noexcept',
+ 'void evt_vhf_ready_for_next_report(PVOID vhf_client_context)',
  'void arm_sc26_keepalive(device_context *const context) noexcept',
  'void start_sc26_keepalive(device_context *const context) noexcept']
 prefix = prefix.replace('// PRODUCTION_TIMING_CONSTANTS', '\n'.join(
