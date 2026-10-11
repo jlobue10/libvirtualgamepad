@@ -529,9 +529,11 @@ bool decode_switch_rumble(
     return scale(((static_cast<std::int32_t>(side[3] & 0x7F) - 0x40) * 2) + ((side[2] & 0x80) >> 7));
   };
 
+  // (windows.h's max macro reaches this translation unit in the driver build; avoid std::max.)
+  const auto louder = [](const std::uint16_t a, const std::uint16_t b) -> std::uint16_t { return a > b ? a : b; };
   *feedback = {};
-  feedback->high_frequency = std::max(high_band(left), high_band(right));
-  feedback->low_frequency = std::max(low_band(left), low_band(right));
+  feedback->high_frequency = louder(high_band(left), high_band(right));
+  feedback->low_frequency = louder(low_band(left), low_band(right));
   return true;
 }
 
