@@ -42,7 +42,7 @@ Mirrors the DualSense profile (`driver/src/dualsense.{h,cpp}`, `include/libvirtu
 | Input submit | `driver.cpp` `submit_input_state` | new branch → `encode_sc26_input()` → `pump_report(..., 0x42, kind)` |
 | Touch / motion / battery | `driver.cpp` `begin_state_update`, `submit_touch_state`, `submit_motion_state`, `submit_battery_state`, `submit_profile_report` | new branches; battery also emits report 0x43 |
 | GetInputReport | `driver.cpp` `evt_vhf_get_input_report` | new case |
-| Output reports | `driver.cpp` `evt_vhf_write_report` | new branch for ids 0x80–0x89 (`sc26_usb::is_output_report`) → feedback events for 0x80/0x81, accepted otherwise |
+| Output reports | `driver.cpp` `evt_vhf_write_report` | new branch for ids 0x80–0x89 (`sc26_usb::is_output_report`) → `steam_haptic` feedback events for 0x80–0x85, accepted otherwise |
 | Build | `driver/VibeshineVhfGamepad.vcxproj` ClCompile/ClInclude; `driver/tests/CMakeLists.txt` (`test_pid_descriptor` sources, new `test_sc26_usb`) | |
 | Tests | `driver/tests/test_sc26_usb.cpp` (descriptor walk, sizes, literal-offset decode, malformed output), `test_pid_descriptor.cpp` (refusal/mask table), `probe_sc26_usb.cpp` (manual, Windows) | per `docs/PROFILE_CONTRACT.md` |
 | Docs | `docs/SC26_USB_COMPATIBILITY.md` (what Steam checked, evidence), capability table, provenance | written 2026-10-05 from the captures |

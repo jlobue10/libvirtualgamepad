@@ -1187,10 +1187,39 @@ int main() {
       switch_state gyro_state {};
       motion_state_request gyro {};
       gyro.motion_type = static_cast<std::uint8_t>(motion_kind::gyroscope);
-      gyro.x_milli = 100000;  // 100 deg/s
+      gyro.x_milli = 100000;  // 100 deg/s about SDL x (pitch)
       std::ignore = apply_switch_motion(gyro, &gyro_state);
-      check(gyro_state.gyro[0] >= 1420 && gyro_state.gyro[0] <= 1436,
-            "switch gyro: 100 deg/s encodes to ~1428 counts (936/13371 deg/s per count)");
+      // SDL reads host x = -device Y, so a positive SDL pitch rate lands on
+      // device gyro[1] negated; the other device axes stay at rest.
+      check(gyro_state.gyro[1] <= -1420 && gyro_state.gyro[1] >= -1436 && gyro_state.gyro[0] == 0 && gyro_state.gyro[2] == 0,
+            "switch gyro: 100 deg/s about SDL x encodes to ~-1428 counts on device Y (936/13371 deg/s per count)");
+      gyro.x_milli = 0;
+      gyro.y_milli = 100000;  // SDL y (yaw) -> device Z
+      std::ignore = apply_switch_motion(gyro, &gyro_state);
+      check(gyro_state.gyro[2] >= 1420 && gyro_state.gyro[2] <= 1436 && gyro_state.gyro[1] == 0,
+            "switch gyro: SDL y maps to device Z");
+      gyro.y_milli = 0;
+      gyro.z_milli = 100000;  // SDL z (roll) -> device X
+      std::ignore = apply_switch_motion(gyro, &gyro_state);
+      check(gyro_state.gyro[0] >= 1420 && gyro_state.gyro[0] <= 1436 && gyro_state.gyro[2] == 0,
+            "switch gyro: SDL z maps to device X");
+
+      // A controller at rest reports gravity on SDL +y (up); the device frame
+      // keeps it on Z, where reset() puts it.
+      switch_state accel_state {};
+      accel_state.reset();
+      motion_state_request accel {};
+      accel.motion_type = static_cast<std::uint8_t>(motion_kind::accelerometer);
+      accel.y_milli = 9807;
+      check(apply_switch_motion(accel, &accel_state) && accel_state.accel[2] == 4096 && accel_state.accel[0] == 0 && accel_state.accel[1] == 0,
+            "switch accel: one gravity on SDL y is 4096 counts on device Z, as at reset");
+      accel.y_milli = 0;
+      accel.x_milli = 9807;
+      check(apply_switch_motion(accel, &accel_state) && accel_state.accel[1] == -4096 && accel_state.accel[2] == 0,
+            "switch accel: SDL x maps to negated device Y");
+      accel.x_milli = INT32_MIN;  // the negation must not overflow
+      check(apply_switch_motion(accel, &accel_state) && accel_state.accel[1] == 32767,
+            "switch accel: INT32_MIN on SDL x saturates on device Y without wrapping");
     }
     state.reset();
 

@@ -74,11 +74,11 @@ Interrupt traffic in the same capture:
 | GET_STRING_ATTRIBUTE | tag 0 board serial, tag 1 unit serial, fixed 20-byte reply; serials are synthetic (`LVGSC26…`), never a real unit's | same |
 | SET_SETTINGS_VALUES and the GET_SETTINGS family | stored and read back as `(id, u16)` triples; lizard mode and IMU mode tracked | same |
 | GET_DEVICE_INFO 0xF2 | 41 / 34 / 9-byte replies shaped like the unit's, carrying the state's build time, board revision and serial | same |
-| 0xED keyed values | `esb/bond` answers `00` (no bonded puck); other keys answer empty | same |
+| 0xED keyed values | `user/wireless_transport` answers one byte `00` (USB); `esb/bond` and `esb/bond_2` answer empty (no bonded puck); other keys answer empty | same |
 | 0xC1, 0xDC, 0xE2 | acknowledged, no reply payload, not counted as unknown | same |
 | Unknown commands | acknowledged with an empty reply and counted (`feature_state.unknown_commands`) | same |
 | Output 0x80 rumble, 0x81 pulse, 0x82 command, 0x83 LFO, 0x84 sweep, 0x85 script | forwarded verbatim as a `steam_haptic` feedback event (beta.108); the host replays it on a client with the real pads or renders rumble from it (`vhf_gamepad_policy.cpp` `synthesize_steam_rumble`) | `apply_sc26_output` |
-| Output 0x82..0x89 | accepted (STATUS_SUCCESS), nothing rendered | `driver.cpp` write path |
+| Output 0x86..0x89 | accepted (STATUS_SUCCESS), nothing rendered; 0x82..0x85 are forwarded like 0x80/0x81 | `driver.cpp` write path |
 | Input 0x42 | 54 bytes at hid-steam's Ibex offsets, sequence byte, identity quaternion | `sc26_usb::encode_input` |
 | Input 0x43 | battery figures shaped like the unit's | `sc26_usb::encode_battery` |
 | Input 0x44 | sent after each zero-repeat 0x81 pulse, as the unit does (`encode_haptic_ack`) | `evt_vhf_write_report` |
@@ -93,7 +93,7 @@ Interrupt traffic in the same capture:
 | Triggers | two, 0..32767 | click bits at ≥ 0xF0 of the client's 0..255 |
 | Touch pads | two, single contact each, x/y ±32767, pressure 0..32767 | protocol contact index 0 = left, 1 = right; Vibepollo derives the index from the client's touchpad index, or from the half of a single DualShock-style pad for clients without `LI_CCAP_DUAL_TOUCHPAD` |
 | Motion | accelerometer and gyroscope at SDL scaling, device axes | quaternion fixed at identity, as on the real unit |
-| Battery | report 0x43 with level and charge state | emitted on battery updates |
+| Battery | report 0x43 with level and charge state | emitted on a client battery update while a VHF read is pending, and every 3.5 s by the keep-alive worker while someone reads (an update without a reader only restarts that period) |
 | LEDs | none | the controller has no host-controlled LED |
 | Rumble / haptics | 0x80..0x85 → `steam_haptic` (verbatim) | 0x86..0x89 accepted, not forwarded |
 | Trigger rumble | none | not a feature of the device |

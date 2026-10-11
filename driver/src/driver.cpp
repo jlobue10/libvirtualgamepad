@@ -859,11 +859,22 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
 
   auto &slot = context->controllers[controller_id];
   lock_context(context);
-  const bool usable = !context->stopping && is_owned_by(slot, owner) &&
+  // The same ladder as destroy/poll_feedback (client.h documents it): an empty
+  // slot is "not found", someone else's is "access denied", and only a stopping
+  // device or slot is "not ready".
+  const bool exists = slot.state != slot_state::empty;
+  const bool owned = is_owned_by(slot, owner);
+  const bool usable = !context->stopping && owned && exists &&
                       slot.state == slot_state::active && slot.vhf != nullptr;
   const lvg::profile profile = slot.selected_profile;
   unlock_context(context);
 
+  if (!exists) {
+    return STATUS_NOT_FOUND;
+  }
+  if (!owned) {
+    return STATUS_ACCESS_DENIED;
+  }
   if (!usable) {
     return STATUS_DEVICE_NOT_READY;
   }
@@ -1046,11 +1057,15 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
   auto &slot = context->controllers[request.controller_id];
   lock_lifetime(context);
   lock_context(context);
-  if (context->stopping || !is_owned_by(slot, owner) ||
+  if (slot.state == slot_state::empty || !is_owned_by(slot, owner) || context->stopping ||
       slot.state != slot_state::active || slot.vhf == nullptr) {
+    // Same ladder as begin_state_update / destroy / poll_feedback.
+    const NTSTATUS status = slot.state == slot_state::empty ? STATUS_NOT_FOUND :
+                            !is_owned_by(slot, owner)        ? STATUS_ACCESS_DENIED :
+                                                               STATUS_DEVICE_NOT_READY;
     unlock_context(context);
     unlock_lifetime(context);
-    return STATUS_DEVICE_NOT_READY;
+    return status;
   }
   if (is_playstation(slot.selected_profile)) {
     slot.last_input = request;
