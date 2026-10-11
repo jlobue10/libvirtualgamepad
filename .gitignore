@@ -22,3 +22,7 @@
 *.pfx
 *.pvk
 *.cer
+
+# Python bytecode (tools/capture harness)
+__pycache__/
+*.py[cod]

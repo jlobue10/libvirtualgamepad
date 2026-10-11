@@ -62,7 +62,7 @@ $InformationPreference = 'Continue'
 # Done from a throwaway PowerShell process: attaching to another console requires detaching from
 # our own, which would cut this script off from the user's window.
 $script:CtrlCHelper = @'
-param([int] $TargetPid)
+$TargetPid = [int] '__TARGET_PID__'
 Add-Type -Namespace Capture -Name ConsoleCtrl -MemberDefinition @"
 [DllImport("kernel32.dll", SetLastError = true)] public static extern bool AttachConsole(uint dwProcessId);
 [DllImport("kernel32.dll", SetLastError = true)] public static extern bool FreeConsole();
@@ -80,10 +80,11 @@ exit 0
 function Stop-ConsoleProcess {
     param([System.Diagnostics.Process] $Process, [int] $TimeoutSeconds = 10)
     if ($Process.HasExited) { return }
-    $helper = Join-Path $env:TEMP "sc26-ctrlc-$PID.ps1"
-    Set-Content -Path $helper -Value $script:CtrlCHelper -Encoding ascii
-    # Start-Process does not quote its arguments: $env:TEMP carries the user name, which may hold a space.
-    $h = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $helper), '-TargetPid', $Process.Id) -WindowStyle Hidden -PassThru -Wait
+    # The helper runs elevated (this script is): pass it inline rather than through a file in
+    # %TEMP%, which a same-user non-elevated process could replace between write and run.
+    $helperText = $script:CtrlCHelper -replace '__TARGET_PID__', ([string] $Process.Id)
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($helperText))
+    $h = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-NonInteractive', '-EncodedCommand', $encoded) -WindowStyle Hidden -PassThru -Wait
     $sent = ($h.ExitCode -eq 0)
     if (-not $sent) { Write-Warning "Ctrl+C helper failed (exit $($h.ExitCode)) for pid $($Process.Id)." }
     if ($sent -and $Process.WaitForExit($TimeoutSeconds * 1000)) { return }

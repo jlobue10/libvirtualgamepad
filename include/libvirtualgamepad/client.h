@@ -57,7 +57,9 @@ class client final {
   //   ERROR_ACCESS_DENIED      the slot belongs to another handle
   //   ERROR_NOT_READY          the device is stopping or stopped
   //   ERROR_INVALID_DATA       poll_feedback: the driver's event failed
-  //                            validation
+  //                            validation (size, protocol version, slot, an
+  //                            unknown feedback type, or a payload_size that
+  //                            is not feedback_payload_size(type))
   //   ERROR_NO_MORE_ITEMS      poll_feedback: nothing fresh
   [[nodiscard]] DWORD create_controller(
     std::uint32_t controller_id,

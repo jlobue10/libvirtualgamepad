@@ -19,6 +19,7 @@ defaults:
 jobs:
   build:
     runs-on: windows-2022
+    timeout-minutes: 45
     steps:
       - name: Check out the source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
