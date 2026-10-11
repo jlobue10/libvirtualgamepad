@@ -516,6 +516,13 @@ int main() {
     state.right_y = 0;
     xbox_series_input_report report = encode_xbox_series_input(state);
     check(report.report_id == k_xbox_series_input_report_id, "xbox report id");
+    {
+      // The SC2026 click bits and the host-owned explicit bit (26..30) mean nothing here.
+      input_state_request tainted = state;
+      tainted.buttons |= 0x7C000000u;
+      const xbox_series_input_report same = encode_xbox_series_input(tainted);
+      check(std::memcmp(&same, &report, sizeof(report)) == 0, "SC2026 click/metadata bits are ignored by the Xbox Series encoder");
+    }
     check(report.left_x == 32768, "centred X maps to mid scale");
     check(report.left_y == 32767, "centred Y maps to mid scale");
     check(report.hat == 0, "a centred d-pad reports the hat null value");

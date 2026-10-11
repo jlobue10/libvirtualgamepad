@@ -666,13 +666,9 @@ NTSTATUS submit_taken(
   --slot.submits_in_flight;
   if (!NT_SUCCESS(status)) {
     // Only VHF's callback may grant another submission: manufacturing
-    // readiness here could overwrite a read VHF still holds.
-    // No readiness callback follows a failed submit, so if the worker parked
-    // while this one was in flight nothing else would arm it again.
-    if (context->sc26_timer_parked && slot.have_last_input &&
-        is_steam_controller(slot.selected_profile)) {
-      arm_sc26_keepalive(context);
-    }
+    // readiness here could overwrite a read VHF still holds. The keep-alive
+    // tick parks on !ready and evt_vhf_ready_for_next_report un-parks it, so
+    // there is nothing to re-arm here either.
   }
   unlock_context(context);
   return status;

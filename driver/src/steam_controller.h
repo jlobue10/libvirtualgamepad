@@ -48,6 +48,9 @@ struct sc26_state {
   // Same for the stick-touch bits (button_mask::left/right_stick_touch): the first one
   // seen turns the deflection heuristic off and the sticks' touch follows the client.
   bool stick_touch_explicit {};
+  // Same for the physical trigger clicks (button_mask::sc26_buttons_explicit): once the host
+  // has marked this slot's client authoritative, the analog end-stop heuristic stays off.
+  bool trigger_click_explicit {};
 
   void reset() noexcept;
 };
