@@ -521,9 +521,8 @@ struct state {
   // counter that moved by 1 per IMU sample left Steam's gyro glyph motionless.
   std::uint32_t imu_timestamp {};
   // Capacitive grip sensors (left, right) report "held". A client with
-  // LI_CCAP_GRIP_SENSE sends them as button bits; otherwise the driver derives
-  // both from motion activity (a controller that is streaming motion is in
-  // someone's hands).
+  // LI_CCAP_GRIP_SENSE sends them as button bits; a client without it leaves
+  // both released (the earlier motion-activity heuristic was removed).
   bool grip_touch[2] {};
   // Capacitive stick touch (left, right) from a client with LI_CCAP_STICK_TOUCH.
   // Used only once stick_touch_from_deflection is off; until then a deflected

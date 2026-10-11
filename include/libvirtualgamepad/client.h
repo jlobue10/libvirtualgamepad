@@ -39,8 +39,14 @@ class client final {
   //   ERROR_INVALID_PARAMETER  controller_id >= maximum_controllers(), a null
   //                            output pointer, or a submit whose header was
   //                            not initialised for this protocol version
-  //   ERROR_NOT_SUPPORTED      the requested profile is not in
-  //                            available_profiles()
+  //   ERROR_NOT_SUPPORTED      create: the requested profile is not in
+  //                            available_profiles(); submit_touch/motion/
+  //                            battery: the slot's profile has no such fold
+  //                            (Xbox profiles)
+  //   ERROR_INVALID_PARAMETER  (also) a submit the profile cannot represent:
+  //                            a touch contact index the pad does not have, a
+  //                            move/hover on a contact that is not down, an
+  //                            unknown motion kind
   //   ERROR_REVISION_MISMATCH  the driver rejected a request we built
   //                            (STATUS_INVALID_BUFFER_SIZE): a different
   //                            protocol generation

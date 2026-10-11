@@ -307,9 +307,14 @@ bool apply_switch_motion(const motion_state_request &motion, switch_state *const
         return clamp_i16(static_cast<std::int32_t>(
           std::clamp<std::int64_t>((milli * 4096) / 9807, INT32_MIN, INT32_MAX)));
       };
-      state->accel[0] = convert(motion.x_milli);
-      state->accel[1] = convert(motion.y_milli);
-      state->accel[2] = convert(motion.z_milli);
+      // The protocol carries SDL's PlayStation-style frame. SDL's Switch driver
+      // shuffles the device axes into that frame (host x = -device Y, host y =
+      // device Z, host z = device X), so the device report holds the inverse;
+      // an identity copy showed a resting controller rolled 90 degrees and
+      // swapped pitch and yaw.
+      state->accel[0] = convert(motion.z_milli);
+      state->accel[1] = convert(-static_cast<std::int64_t>(motion.x_milli));
+      state->accel[2] = convert(motion.y_milli);
       return true;
     }
     case motion_kind::gyroscope: {
@@ -320,9 +325,10 @@ bool apply_switch_motion(const motion_state_request &motion, switch_state *const
         return clamp_i16(static_cast<std::int32_t>(
           std::clamp<std::int64_t>((milli * k_switch_gyro_sensitivity) / (936 * 1000), INT32_MIN, INT32_MAX)));
       };
-      state->gyro[0] = convert(motion.x_milli);
-      state->gyro[1] = convert(motion.y_milli);
-      state->gyro[2] = convert(motion.z_milli);
+      // Same axis shuffle as the accelerometer (see above).
+      state->gyro[0] = convert(motion.z_milli);
+      state->gyro[1] = convert(-static_cast<std::int64_t>(motion.x_milli));
+      state->gyro[2] = convert(motion.y_milli);
       return true;
     }
     default:
