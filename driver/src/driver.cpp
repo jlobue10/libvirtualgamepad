@@ -691,7 +691,8 @@ NTSTATUS pump_report(
   const ULONG length,
   const UCHAR report_id,
   const lvg::driver::report_kind kind) noexcept {
-  lvg::driver::report_buffer *next = nullptr;
+  lvg::driver::report_buffer next {};
+  bool have_next = false;
   VHFHANDLE vhf = nullptr;
 
   lock_context(context);
@@ -712,7 +713,8 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
     return;
   }
 
-  lvg::driver::report_buffer *next = nullptr;
+  lvg::driver::report_buffer next {};
+  bool have_next = false;
   VHFHANDLE vhf = nullptr;
 
   auto *const context = slot->parent;

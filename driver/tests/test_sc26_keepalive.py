@@ -72,14 +72,16 @@ namespace driver {
   bool enqueue(const void* d,ULONG len,UCHAR id,report_kind k){report_buffer b{};assert(len<=sizeof(b.data));memcpy(b.data,d,len);b.length=len;b.report_id=id;
    if(k==report_kind::aside){assert(aside_count<8);asides[aside_count++]=b;if(id==k_sc26_battery_report_id)++batteries_enqueued;}
    else{latest=b;have_latest=true;if(id==k_sc26_input_report_id)++states_enqueued;}return true;}
-  bool take(report_buffer* out){if(!ready_)return false;
-   if(aside_count){*out=asides[0];for(int i=1;i<aside_count;++i)asides[i-1]=asides[i];--aside_count;ready_=false;return true;}
-   if(have_latest){*out=latest;have_latest=false;ready_=false;return true;}return false;}};
+  report_buffer in_flight_{};
+  // Like the production pump: the taken report lives in pump-owned storage VHF may read after submit.
+  report_buffer* take(){if(!ready_)return nullptr;
+   if(aside_count){in_flight_=asides[0];for(int i=1;i<aside_count;++i)asides[i-1]=asides[i];--aside_count;ready_=false;return &in_flight_;}
+   if(have_latest){in_flight_=latest;have_latest=false;ready_=false;return &in_flight_;}return nullptr;}};
 }}
 enum class slot_state{active,free};
 struct controller_slot {slot_state state=slot_state::active; int selected_profile=1;
  bool have_last_input=true; VHFHANDLE vhf=(void*)1; int last_input=42; std::uint8_t sc26_wire_sequence=0;
- lvg::driver::fake_pump pump; lvg::driver::sc26_state sc26; int submits_in_flight=0;
+ lvg::driver::fake_pump pump; lvg::driver::sc26_state sc26; int submits_in_flight=0; HID_XFER_PACKET read_transfer{};
  lvg::driver::ds4_state ds4; lvg::driver::ds5_state ds5; lvg::driver::switch_state switch_pro;};
 struct device_context {controller_slot controllers[2]; bool stopping=false,sc26_timer_running=true,sc26_timer_parked=false;
  HANDLE sc26_keepalive_timer=(void*)1,sc26_keepalive_thread=nullptr,sc26_keepalive_stop=(void*)1;};
@@ -174,8 +176,8 @@ int main(){int failures=0;
   s.pump.set_ready();
   lock_context(&c);std::ignore=pump_report_locked(&c,s,&report,sizeof(report),lvg::driver::k_sc26_input_report_id,lvg::driver::report_kind::continuous,&next,&have,&vhf,false);unlock_context(&c);
   c.sc26_timer_parked=true;vhf_submit_status=-5;arms=0;
-  check(!NT_SUCCESS(submit_taken(&c,s,next,vhf)) && s.pump.ready() && s.submits_in_flight==0 && arms==1,
-        "a failed submit restores readiness and arms a parked keep-alive");
+  check(!NT_SUCCESS(submit_taken(&c,s,next,vhf)) && !s.pump.ready() && s.submits_in_flight==0 && arms==1,
+        "a failed submit leaves readiness to VHF's callback and arms a parked keep-alive");
   vhf_submit_status=0;c.sc26_timer_parked=false;}
  c.sc26_keepalive_thread=(void*)1;joining=&c;start_sc26_keepalive(&c);
  check(c.sc26_timer_running,"exiting worker cannot clear replacement worker's running flag");
