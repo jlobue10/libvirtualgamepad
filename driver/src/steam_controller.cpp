@@ -25,6 +25,7 @@ void sc26_state::reset() noexcept {
   last_report_us = 0;
   grip_explicit = false;
   stick_touch_explicit = false;
+  trigger_click_explicit = false;
 }
 
 const std::uint8_t *sc26_descriptor(std::size_t *const size) noexcept {
@@ -121,12 +122,15 @@ sc26_input_report encode_sc26_input(
     return encode_sc26_input(input, &scratch);
   }
   const bool explicit_buttons = (input.buttons & button_mask::sc26_buttons_explicit) != 0;
-  state->device.trigger_click_from_analog = !explicit_buttons;
   if (explicit_buttons) {
+    // Latched like the grip/stick-touch switches: the bit arrives per input, and a
+    // slot must not flip between explicit and heuristic trigger clicks mid-session.
+    state->trigger_click_explicit = true;
     state->grip_explicit = true;
     state->stick_touch_explicit = true;
     state->device.stick_touch_from_deflection = false;
   }
+  state->device.trigger_click_from_analog = !state->trigger_click_explicit;
   // Grip sense from the client (Moonlight extension LI_CCAP_GRIP_SENSE) is carried as
   // two button bits. The first one seen switches this controller to explicit grips for
   // good; explicit SC2026 clients also switch on an all-released first state.

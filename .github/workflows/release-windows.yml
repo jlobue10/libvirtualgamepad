@@ -19,6 +19,7 @@ jobs:
   # bump + tag shipped unvalidated by any functional test.
   tests:
     runs-on: windows-2022
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
@@ -36,6 +37,7 @@ jobs:
 
   harnesses:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
     defaults:

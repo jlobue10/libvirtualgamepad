@@ -53,7 +53,8 @@ using NTSTATUS=int; struct LARGE_INTEGER{long long QuadPart;};
 #define NT_SUCCESS(s) ((s)==0)
 struct HID_XFER_PACKET{PUCHAR reportBuffer; ULONG reportBufferLen; UCHAR reportId;};
 int batteries_enqueued=0,states_enqueued=0,submitted=0; NTSTATUS vhf_submit_status=0; UCHAR last_submitted_id=0;
-NTSTATUS VhfReadReportSubmit(VHFHANDLE h,HID_XFER_PACKET* p){assert(h==(void*)1);last_submitted_id=p->reportId;++submitted;return vhf_submit_status;}
+HID_XFER_PACKET* last_packet=nullptr; PUCHAR last_buffer=nullptr;
+NTSTATUS VhfReadReportSubmit(VHFHANDLE h,HID_XFER_PACKET* p){assert(h==(void*)1);last_submitted_id=p->reportId;last_packet=p;last_buffer=p->reportBuffer;++submitted;return vhf_submit_status;}
 namespace lvg { constexpr int k_max_controllers=2;
 namespace driver {
  enum class report_kind {continuous,transition,aside};
@@ -67,7 +68,7 @@ namespace driver {
  // The production pump's contract: asides are taken before the latest
  // continuous snapshot, a take clears readiness, nothing is taken while VHF
  // has no read pending.
- struct fake_pump {bool ready_=true; bool have_latest=false; report_buffer latest{}; report_buffer asides[8]{}; int aside_count=0;
+ struct fake_pump {bool ready_=false; /* like production reset(): VHF grants the first submission too */ bool have_latest=false; report_buffer latest{}; report_buffer asides[8]{}; int aside_count=0;
   bool ready() const {return ready_;} void set_ready(){ready_=true;}
   bool enqueue(const void* d,ULONG len,UCHAR id,report_kind k){report_buffer b{};assert(len<=sizeof(b.data));memcpy(b.data,d,len);b.length=len;b.report_id=id;
    if(k==report_kind::aside){assert(aside_count<8);asides[aside_count++]=b;if(id==k_sc26_battery_report_id)++batteries_enqueued;}
@@ -124,6 +125,7 @@ suffix = r'''
 int main(){int failures=0;
  auto check=[&](bool ok,const char* text){printf("%s %s\n",ok?"PASS":"FAIL",text);failures+=!ok;};
  device_context c;clock_us=3000;c.controllers[0].sc26.last_report_us=3000;c.controllers[1].sc26.last_report_us=3000;
+ c.controllers[0].pump.set_ready();c.controllers[1].pump.set_ready(); // VHF granted the first read on both slots
  lock_context(&c);arm_sc26_keepalive(&c);unlock_context(&c);
  check(timer_due==-40000,"a fresh report arms the full 4ms tick, not the early-wake threshold");
  c.controllers[1].sc26.last_report_us=0;
@@ -165,7 +167,8 @@ int main(){int failures=0;
   check(NT_SUCCESS(st) && have && vhf==s.vhf && s.submits_in_flight==1 && next.data[1]==0 && s.sc26_wire_sequence==1,
         "the readiness callback takes the waiting snapshot with the handle, the in-flight count and the sequence");
   check(s.sc26.last_report_us==52000 && arms==1,"the keep-alive clock is stamped at take time and the timer re-armed");
-  submitted=0;check(NT_SUCCESS(submit_taken(&c,s,next,vhf)) && submitted==1 && last_submitted_id==lvg::driver::k_sc26_input_report_id && s.submits_in_flight==0,
+  submitted=0;check(NT_SUCCESS(submit_taken(&c,s,next,vhf)) && submitted==1 && last_submitted_id==lvg::driver::k_sc26_input_report_id && s.submits_in_flight==0
+        && last_packet==&s.read_transfer && last_buffer==s.pump.in_flight_.data && last_packet->reportBufferLen==s.pump.in_flight_.length,
         "submit_taken hands the taken report to VHF and releases the in-flight count");
   // The tick's rearm=false path leaves arming to the tick itself.
   s.pump.set_ready();arms=0;clock_us=60000;
@@ -176,8 +179,8 @@ int main(){int failures=0;
   s.pump.set_ready();
   lock_context(&c);std::ignore=pump_report_locked(&c,s,&report,sizeof(report),lvg::driver::k_sc26_input_report_id,lvg::driver::report_kind::continuous,&next,&have,&vhf,false);unlock_context(&c);
   c.sc26_timer_parked=true;vhf_submit_status=-5;arms=0;
-  check(!NT_SUCCESS(submit_taken(&c,s,next,vhf)) && !s.pump.ready() && s.submits_in_flight==0 && arms==1,
-        "a failed submit leaves readiness to VHF's callback and arms a parked keep-alive");
+  check(!NT_SUCCESS(submit_taken(&c,s,next,vhf)) && !s.pump.ready() && s.submits_in_flight==0 && arms==0,
+        "a failed submit leaves readiness and the parked keep-alive to VHF's callback");
   vhf_submit_status=0;c.sc26_timer_parked=false;}
  c.sc26_keepalive_thread=(void*)1;joining=&c;start_sc26_keepalive(&c);
  check(c.sc26_timer_running,"exiting worker cannot clear replacement worker's running flag");
