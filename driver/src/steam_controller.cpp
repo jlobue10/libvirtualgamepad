@@ -72,7 +72,12 @@ std::uint32_t sc26_buttons(const std::uint32_t buttons, const sc26_state &state)
       out |= p.to;
     }
   }
-  if ((buttons & button_mask::touchpad) != 0) {
+  if ((buttons & button_mask::sc26_buttons_explicit) != 0) {
+    if (buttons & button_mask::left_pad_click) out |= sc::btn_left_pad_click;
+    if (buttons & button_mask::right_pad_click) out |= sc::btn_right_pad_click;
+    if (buttons & button_mask::left_trigger_click) out |= sc::btn_left_trigger_click;
+    if (buttons & button_mask::right_trigger_click) out |= sc::btn_right_trigger_click;
+  } else if ((buttons & button_mask::touchpad) != 0) {
     // The protocol has one pad-click flag; the controller has one per pad. A
     // click lands on the pad under a finger: the left pad when only it is
     // touched, the right pad when only it is, both when both are (the
@@ -113,15 +118,18 @@ sc26_input_report encode_sc26_input(
   if (state == nullptr) {
     sc26_state scratch {};
     scratch.reset();
-    apply_client_stick_touch(input.buttons, &scratch);
-    return sc::encode_input(sc26_buttons(input.buttons, scratch), input.left_x, input.left_y,
-                            input.right_x, input.right_y, input.left_trigger,
-                            input.right_trigger, scratch.device);
+    return encode_sc26_input(input, &scratch);
+  }
+  const bool explicit_buttons = (input.buttons & button_mask::sc26_buttons_explicit) != 0;
+  state->device.trigger_click_from_analog = !explicit_buttons;
+  if (explicit_buttons) {
+    state->grip_explicit = true;
+    state->stick_touch_explicit = true;
+    state->device.stick_touch_from_deflection = false;
   }
   // Grip sense from the client (Moonlight extension LI_CCAP_GRIP_SENSE) is carried as
   // two button bits. The first one seen switches this controller to explicit grips for
-  // good; until then, and for clients without the extension, the motion heuristic in
-  // sc26_tick() stands in.
+  // good; explicit SC2026 clients also switch on an all-released first state.
   constexpr std::uint32_t grip_bits = button_mask::left_grip_touch | button_mask::right_grip_touch;
   if ((input.buttons & grip_bits) != 0) {
     state->grip_explicit = true;

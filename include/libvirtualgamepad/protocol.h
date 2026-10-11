@@ -87,6 +87,13 @@ enum button_mask : std::uint32_t {
   // derives stick touch from deflection. Ignored by every other profile.
   left_stick_touch = 0x1000000u,
   right_stick_touch = 0x2000000u,
+  left_pad_click = 0x04000000u,
+  right_pad_click = 0x08000000u,
+  left_trigger_click = 0x10000000u,
+  right_trigger_click = 0x20000000u,
+  // Host-owned metadata, not a client button. Set on each input only when the
+  // SC2026 client advertised authoritative clicks and capacitive touch states.
+  sc26_buttons_explicit = 0x40000000u,
 };
 
 enum class feedback_type : std::uint16_t {

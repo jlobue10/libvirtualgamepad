@@ -1071,6 +1071,36 @@ int main() {
       state.reset();
     }
 
+    // An explicit SC2026 client must not invent a click or stick touch, even on
+    // its first all-released state with deflected sticks and fully pulled axes.
+    {
+      input_state_request in {};
+      in.buttons = button_mask::sc26_buttons_explicit | button_mask::touchpad |
+                   button_mask::left_pad_click | button_mask::right_trigger_click;
+      in.left_trigger = 255;
+      in.left_x = 20000;
+      state.device.pad_touched[0] = state.device.pad_touched[1] = true;
+      auto rep = encode_sc26_input(in, &state);
+      constexpr auto clicks = lvg::sc26_usb::btn_left_pad_click | lvg::sc26_usb::btn_right_pad_click |
+                              lvg::sc26_usb::btn_left_trigger_click | lvg::sc26_usb::btn_right_trigger_click;
+      check((rep.buttons & clicks) == (lvg::sc26_usb::btn_left_pad_click | lvg::sc26_usb::btn_right_trigger_click),
+            "sc26 explicit clicks ignore other pad touches and analog trigger thresholds");
+      check((rep.buttons & (lvg::sc26_usb::btn_left_stick_touch | lvg::sc26_usb::btn_right_stick_touch)) == 0,
+            "sc26 first all-released touch state disables the deflection heuristic");
+      in.buttons = button_mask::sc26_buttons_explicit;
+      rep = encode_sc26_input(in, &state);
+      check((rep.buttons & clicks) == 0, "sc26 explicit click release is preserved at full trigger pull");
+      rep = encode_sc26_input(in, nullptr);
+      check((rep.buttons & (clicks | lvg::sc26_usb::btn_left_stick_touch)) == 0,
+            "sc26 stateless encoding obeys authoritative releases");
+      state.reset();
+      in.buttons = 0;
+      rep = encode_sc26_input(in, &state);
+      check((rep.buttons & lvg::sc26_usb::btn_left_trigger_click) != 0,
+            "sc26 legacy client retains analog trigger click synthesis");
+      state.reset();
+    }
+
     // The single protocol click flag lands on the touched pad(s).
     check(sc26_buttons(button_mask::touchpad, state) == lvg::sc26_usb::btn_right_pad_click,
           "sc26 pad click with no touch goes to the right pad");
