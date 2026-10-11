@@ -241,7 +241,9 @@ DWORD client::poll_feedback(
   }
   if (bytes != sizeof(*event) || !valid_request(event, bytes) ||
       event->controller_id != controller_id ||
-      event->payload_size > sizeof(event->payload)) {
+      event->payload_size > sizeof(event->payload) ||
+      event->payload_size != feedback_payload_size(event->type)) {
+    // An unknown type, or a payload that is not the whole struct of its type.
     return ERROR_INVALID_DATA;
   }
   return ERROR_SUCCESS;

@@ -329,6 +329,30 @@ struct feedback_event {
   std::uint8_t payload[32];
 };
 
+// The payload each feedback type carries. A client rejects an event whose
+// payload_size disagrees, and any type it does not know (the driver only ever
+// writes whole structs, so a consumer may memcpy by type after that check).
+inline constexpr std::uint16_t k_feedback_payload_unknown = 0xFFFF;
+
+[[nodiscard]] constexpr std::uint16_t feedback_payload_size(const feedback_type type) noexcept {
+  switch (type) {
+    case feedback_type::none:
+      return 0;
+    case feedback_type::generic_rumble_rgb:
+    case feedback_type::generic_rumble:
+      return sizeof(generic_rumble_rgb_feedback);
+    case feedback_type::raw_output_report:
+      return sizeof(raw_hid_report_feedback);
+    case feedback_type::xbox_rumble:
+      return sizeof(xbox_rumble_feedback);
+    case feedback_type::playstation_output:
+      return sizeof(playstation_output_feedback);
+    case feedback_type::steam_haptic:
+      return sizeof(steam_haptic_feedback);
+  }
+  return k_feedback_payload_unknown;
+}
+
 #pragma pack(pop)
 
 static_assert(sizeof(request_header) == 8);

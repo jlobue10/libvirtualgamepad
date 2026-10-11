@@ -80,7 +80,8 @@ lvg::feedback_event good_event(const std::uint32_t controller_id) {
   lvg::feedback_event event {};
   lvg::initialize_header(&event.header, sizeof(event));
   event.controller_id = controller_id;
-  event.payload_size = 4;
+  event.type = lvg::feedback_type::generic_rumble;
+  event.payload_size = sizeof(lvg::generic_rumble_rgb_feedback);
   return event;
 }
 }  // namespace
@@ -145,8 +146,24 @@ int main() {
     driver.last_code = 0;
     driver.event = good_event(1);
     driver.output_bytes = sizeof(driver.event);
-    check(c.poll_feedback(1, &out) == ERROR_SUCCESS && out.payload_size == 4,
+    check(c.poll_feedback(1, &out) == ERROR_SUCCESS && out.payload_size == sizeof(lvg::generic_rumble_rgb_feedback),
           "a well-formed event is accepted");
+    driver.event = good_event(1);
+    driver.event.type = static_cast<lvg::feedback_type>(99);
+    check(c.poll_feedback(1, &out) == ERROR_INVALID_DATA, "an unknown feedback type is rejected");
+    driver.event = good_event(1);
+    driver.event.type = lvg::feedback_type::xbox_rumble;
+    driver.event.payload_size = 4;
+    check(c.poll_feedback(1, &out) == ERROR_INVALID_DATA, "a payload size that is not the type's struct is rejected");
+    driver.event = good_event(1);
+    driver.event.type = lvg::feedback_type::playstation_output;
+    driver.event.payload_size = sizeof(lvg::playstation_output_feedback);
+    check(c.poll_feedback(1, &out) == ERROR_SUCCESS && out.type == lvg::feedback_type::playstation_output,
+          "every known type is accepted with its whole struct");
+    driver.event = good_event(1);
+    driver.event.type = lvg::feedback_type::none;
+    driver.event.payload_size = 0;
+    check(c.poll_feedback(1, &out) == ERROR_SUCCESS, "a 'none' event carries no payload");
     driver.output_bytes = sizeof(driver.event) - 1;
     check(c.poll_feedback(1, &out) == ERROR_INVALID_DATA, "a short event is rejected");
     driver.output_bytes = sizeof(driver.event);

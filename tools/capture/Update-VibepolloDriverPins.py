@@ -106,6 +106,8 @@ def tag_survives(text, old_tag):
 
 
 REPOSITORY_PATTERN = re.compile(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+')
+# The tag is spliced into five files, a commit message and `gh` arguments.
+TAG_PATTERN = re.compile(r'v\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?')
 
 
 def check_lock_against_tag(lock, tag, ref):
@@ -135,6 +137,8 @@ def main():
     args = ap.parse_args()
     if not REPOSITORY_PATTERN.fullmatch(args.repository):
         sys.exit(f'--repository must be owner/name, got {args.repository!r}')
+    if not TAG_PATTERN.fullmatch(args.tag):
+        sys.exit(f'--tag must look like v0.1.0-beta.132, got {args.tag!r}')
 
     if args.lock:
         # utf-8-sig: Windows PowerShell 5.1 writes a BOM for -Encoding utf8

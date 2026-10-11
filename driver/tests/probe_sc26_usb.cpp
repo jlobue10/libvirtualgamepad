@@ -32,6 +32,8 @@
 #ifndef NOMINMAX
 #define NOMINMAX  // windows.h min/max macros would break std::min/std::max below (MSVC C2589)
 #endif
+#include "libvirtualgamepad/hid_path.h"
+
 #include <windows.h>
 #include <hidsdi.h>
 #include <setupapi.h>
@@ -95,7 +97,7 @@ std::vector<found_collection> new_collections(const GUID &guid, const std::set<s
     if (before.contains(detail->DevicePath)) continue;
     std::wstring lower(detail->DevicePath);
     std::transform(lower.begin(), lower.end(), lower.begin(), [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
-    if (lower.find(L"vid_28de&pid_1302") == std::wstring::npos) continue;
+    if (!lvg::is_virtual_sc26_child_path(lower)) continue;  // never a physical unit (&mi_ paths)
     // Mouse/keyboard collections are owned by their class drivers: open without
     // read/write just to read attributes and capabilities.
     auto h = CreateFileW(detail->DevicePath, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
@@ -203,11 +205,9 @@ int monitor(int seconds) {
   }
   std::printf("%zu virtual Steam Controller(s) present; monitoring the first for %d s (Enter stops):\n", collections.size(), seconds);
   for (const auto &c : collections) std::printf("  %ls\n", c.path.c_str());
-  HANDLE handle = CreateFileW(collections[0].path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+  // Read-only: the monitor never writes, and it must not be able to by accident.
+  HANDLE handle = CreateFileW(collections[0].path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                               OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
-  if (handle == INVALID_HANDLE_VALUE) {
-    handle = CreateFileW(collections[0].path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
-  }
   if (handle == INVALID_HANDLE_VALUE) {
     std::printf("open failed: error %lu (another reader may hold it exclusively)\n", GetLastError());
     return 1;

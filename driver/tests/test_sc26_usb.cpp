@@ -4,6 +4,7 @@
 // wired contract: the captured descriptor's report sizes, literal-offset input
 // encoding, the feature-report control channel (including a replay of the
 // commands Steam sent a real unit), and haptic output decoding.
+#include "libvirtualgamepad/hid_path.h"
 #include "libvirtualgamepad/sc26_usb.h"
 #include <cstdio>
 #include <cstring>
@@ -36,6 +37,13 @@ int main() {
   using namespace lvg::sc26_usb;
 
   check(version == 0x0307, "bcdDevice is the captured unit's 0x0307");
+  // The probes select the device they will write to by this predicate.
+  check(lvg::is_virtual_sc26_child_path(L"\\\\?\\hid#vid_28de&pid_1302#7&1a2b3c4d&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}"),
+        "a VHF child path of our VID/PID is a virtual controller");
+  check(!lvg::is_virtual_sc26_child_path(L"\\\\?\\hid#vid_28de&pid_1302&mi_02#8&2b3c4d5e&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}"),
+        "a multi-interface (physical USB) path is never selected");
+  check(!lvg::is_virtual_sc26_child_path(L"\\\\?\\hid#vid_28de&pid_1205#7&1a2b3c4d&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}"),
+        "another Valve product is not selected");
   check(!report_descriptor_is_provisional, "the real descriptor is compiled in");
 
   // Descriptor walk: every report the real descriptor declares has to match the

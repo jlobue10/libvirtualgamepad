@@ -9,6 +9,9 @@ import pathlib
 import sys
 import tempfile
 
+# A tracked tree must stay clean after running this (the build scripts refuse a dirty tree).
+sys.dont_write_bytecode = True
+
 HERE = pathlib.Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location("pins", HERE / "Update-VibepolloDriverPins.py")
 pins = importlib.util.module_from_spec(spec)
@@ -53,6 +56,10 @@ check(pins.check_lock_against_tag(good, 'v0.1.0-beta.120', {'object': {'type': '
 check(pins.REPOSITORY_PATTERN.fullmatch('jlobue10/libvirtualgamepad') is not None, 'owner/name repositories are accepted')
 for bad in ('jlobue10', 'a/b/c', 'a b/c', 'owner/name;rm'):
     check(pins.REPOSITORY_PATTERN.fullmatch(bad) is None, f'repository {bad!r} is refused')
+for good in ('v0.1.0-beta.132', 'v1.2.3', 'v0.1.0-rc.1'):
+    check(pins.TAG_PATTERN.fullmatch(good) is not None, f'tag {good!r} is accepted')
+for bad in ('0.1.0-beta.132', 'v0.1', 'v0.1.0 beta', 'v0.1.0-beta.1;rm', 'v0.1.0-beta.1/x'):
+    check(pins.TAG_PATTERN.fullmatch(bad) is None, f'tag {bad!r} is refused')
 plain = pins.rewrite_tag('tag v0.1.0-beta.119 asset 0.1.0-beta.119', 'v0.1.0-beta.119', 'v0.1.0-beta.120')
 check(plain == 'tag v0.1.0-beta.120 asset 0.1.0-beta.120', 'an ordinary bump rewrites both forms')
 
