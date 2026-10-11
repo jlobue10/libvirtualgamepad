@@ -161,3 +161,19 @@ Interrupt traffic in the same capture:
 - Virtual device enumeration on the rig: `captures/rig/virtual-device-hid-children.txt`
   (Windows lists the three collections plus VHF's parent node); probe output:
   `captures/rig/probe_sc26_usb-output.txt`.
+
+## Authoritative client clicks and touch state
+
+The normalized button ABI now reserves bits 26..29 for left/right pad clicks and
+left/right trigger clicks. Bit 30 (`sc26_buttons_explicit`) is host-owned metadata,
+set for clients advertising `LI_CCAP_SC26_BUTTONS=0x1000`. It selects physical click
+bits instead of guessing from the combined pad flag or analog trigger threshold.
+It also disables the stick deflection heuristic on the first report, including an
+all-released state. Older clients retain their existing fallbacks; other profiles
+ignore the new bits. The request layout and protocol version remain unchanged.
+
+These changes need a newly built and installed driver. Updating only Vibepollo's
+source submodule or APK does not update the installed driver. The host's immutable
+release package pin must be advanced after a producer release containing this code
+is built and verified. Puck input itself is handled at the Android client; the
+virtual Windows identity stays the wired 28de:1302 SC2026.

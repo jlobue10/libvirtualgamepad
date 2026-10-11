@@ -537,6 +537,7 @@ struct state {
   std::uint8_t battery_percent {100};
   std::uint8_t charge_state {charge_discharging};
   bool stick_touch_from_deflection {true};
+  bool trigger_click_from_analog {true};
 
   void reset() noexcept { *this = state {}; }
 };
@@ -579,8 +580,10 @@ inline constexpr std::int32_t stick_touch_deflection = 3276;
   r.report_id = input_report_id;
   r.sequence = st.sequence++;
   std::uint32_t bits = buttons;
-  if (left_trigger >= trigger_click_threshold) bits |= btn_left_trigger_click;
-  if (right_trigger >= trigger_click_threshold) bits |= btn_right_trigger_click;
+  if (st.trigger_click_from_analog) {
+    if (left_trigger >= trigger_click_threshold) bits |= btn_left_trigger_click;
+    if (right_trigger >= trigger_click_threshold) bits |= btn_right_trigger_click;
+  }
   if (st.pad_touched[0]) bits |= btn_left_pad_touch;
   if (st.pad_touched[1]) bits |= btn_right_pad_touch;
   if (st.grip_touch[0]) bits |= btn_left_grip_touch;
