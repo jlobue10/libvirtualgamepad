@@ -1474,8 +1474,37 @@ int main() {
     std::memcpy(half_high + 2, idle, 4);
     std::memcpy(half_high + 6, idle, 4);
     half_high[7] = static_cast<std::uint8_t>((k_switch_amplitude_max / 2) << 1);
-    check(decode_switch_rumble(half_high, sizeof(half_high), &feedback) && feedback.high_frequency > 30000 && feedback.high_frequency < 35000 && feedback.low_frequency == 0,
-          "a half high-band amplitude on one side is about half scale on the high-frequency motor");
+    // Row 50 of SDL's amplitude table is 22251 (34 %), not half scale: the index is a table row.
+    check(decode_switch_rumble(half_high, sizeof(half_high), &feedback) && feedback.high_frequency == 22251 && feedback.low_frequency == 0,
+          "high-band index 50 on one side decodes to SDL's row-50 amplitude on the high-frequency motor");
+
+    // Encode as SDL does for a few requests and expect the request back within one table step.
+    const auto sdl_pattern = [&](const int high_index, const int low_index, std::uint8_t *const out) {
+      out[0] = 0x00;
+      out[1] = static_cast<std::uint8_t>(high_index << 1);
+      out[2] = static_cast<std::uint8_t>(0x40 | ((low_index & 1) << 7));
+      out[3] = static_cast<std::uint8_t>(0x40 + (low_index >> 1));
+    };
+    struct table_case {
+      int index;
+      std::uint16_t amplitude;
+      const char *name;
+    };
+    const table_case table_cases[] = {
+      {68, 32861, "a 50 % request (row 68) decodes to 32861"},
+      {36, 16431, "a 25 % request (row 36) decodes to 16431"},
+      {15, 7372, "a 10 % request (row 15) decodes to 7372"},
+      {100, 65535, "row 100 is full scale"},
+      {1, 514, "row 1 is the first non-zero step"},
+    };
+    for (const auto &table_entry : table_cases) {
+      std::uint8_t both[10] {};
+      both[0] = k_switch_rumble_only_id;
+      sdl_pattern(table_entry.index, table_entry.index, both + 2);
+      sdl_pattern(table_entry.index, table_entry.index, both + 6);
+      check(decode_switch_rumble(both, sizeof(both), &feedback) && feedback.high_frequency == table_entry.amplitude && feedback.low_frequency == table_entry.amplitude,
+            table_entry.name);
+    }
 
     std::uint8_t foreign_rumble[10] {};
     foreign_rumble[0] = 0x42;

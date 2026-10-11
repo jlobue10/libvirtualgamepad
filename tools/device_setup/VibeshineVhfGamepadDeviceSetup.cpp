@@ -430,6 +430,7 @@ struct root_device_state {
 
 struct protocol_query_probe {
   std::atomic<HANDLE> device_handle {INVALID_HANDLE_VALUE};
+  std::atomic<DWORD> open_error {ERROR_SUCCESS};  // GetLastError() of a failed CreateFile, from the worker thread
   HANDLE completion_event {nullptr};
   HANDLE open_thread {nullptr};
   std::wstring device_path;
@@ -453,16 +454,25 @@ struct protocol_query_probe {
 
 DWORD WINAPI open_protocol_device_worker(void *context) {
   auto *probe = static_cast<protocol_query_probe *>(context);
-  probe->device_handle.store(CreateFileW(
+  const HANDLE handle = CreateFileW(
       probe->device_path.c_str(),
       GENERIC_READ | GENERIC_WRITE,
       0,
       nullptr,
       OPEN_EXISTING,
       FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
-      nullptr));
+      nullptr);
+  if (handle == INVALID_HANDLE_VALUE) {
+    probe->open_error.store(GetLastError());
+  }
+  probe->device_handle.store(handle);
   return 0;
 }
+
+// Verdict of the most recent probe, for the status JSON and the ready decision.
+lvg::device_setup::probe_verdict g_last_probe_verdict = lvg::device_setup::probe_verdict::absent;
+static_assert(ERROR_ACCESS_DENIED == lvg::device_setup::k_win32_error_access_denied);
+static_assert(ERROR_SHARING_VIOLATION == lvg::device_setup::k_win32_error_sharing_violation);
 
 // A broken UMDF endpoint can ignore CreateFile or overlapped-I/O cancellation.
 // Retain at most one such probe until it completes, rather than returning while
@@ -521,10 +531,13 @@ void reap_completed_protocol_query_probe() {
       FALSE) != FALSE;
   const bool valid = completed && protocol_query_response_is_valid(probe->response, bytes_returned);
   delete probe;
+  g_last_probe_verdict = valid ? lvg::device_setup::probe_verdict::answered : lvg::device_setup::probe_verdict::absent;
   return valid;
 }
 
 [[nodiscard]] bool source_interface_accepts_protocol(const wchar_t *device_path) {
+  using lvg::device_setup::probe_verdict;
+  g_last_probe_verdict = probe_verdict::absent;
   reap_completed_protocol_query_probe();
   if (g_pending_protocol_query_probe != nullptr) {
     return false;
@@ -550,8 +563,12 @@ void reap_completed_protocol_query_probe() {
   CloseHandle(probe->open_thread);
   probe->open_thread = nullptr;
   if (probe->device_handle.load() == INVALID_HANDLE_VALUE) {
+    // A client holding the interface (Vibepollo, first alloc to last free) is
+    // not a broken driver: report it as in use rather than "not ready", which
+    // made `install` restart the live node and `status` exit 3 mid-stream.
+    g_last_probe_verdict = lvg::device_setup::classify_open(probe->open_error.load());
     delete probe;
-    return false;
+    return lvg::device_setup::interface_ready(g_last_probe_verdict);
   }
   probe->completion_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
   if (probe->completion_event == nullptr) {
@@ -574,6 +591,7 @@ void reap_completed_protocol_query_probe() {
           &probe->overlapped)) {
     const bool valid = protocol_query_response_is_valid(probe->response, bytes_returned);
     delete probe;
+    g_last_probe_verdict = valid ? probe_verdict::answered : probe_verdict::absent;
     return valid;
   }
   if (GetLastError() != ERROR_IO_PENDING) {
@@ -1114,7 +1132,8 @@ void print_status() {
   const auto devices = enumerate_root_devices();
   const bool ready = source_device_interface_ready();
   std::wcout << L"{\"root_device_count\":" << devices.size()
-             << L",\"source_interface_ready\":" << (ready ? L"true" : L"false");
+             << L",\"source_interface_ready\":" << (ready ? L"true" : L"false")
+             << L",\"source_interface_state\":\"" << lvg::device_setup::probe_verdict_name(g_last_probe_verdict) << L"\"";
   if (!devices.empty()) {
     std::wcout << L",\"instance_id\":\"" << json_escape(devices.front().instance_id)
                << L"\",\"device_status\":" << devices.front().status

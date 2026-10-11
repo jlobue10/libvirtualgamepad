@@ -1203,6 +1203,8 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
   return status;
 }
 
+// `request` must not alias `output` (the IOCTL path passes a copy): every
+// field of the request is read before and after the event is stored.
 [[nodiscard]] NTSTATUS poll_feedback(
   device_context *const context,
   const WDFFILEOBJECT owner,
@@ -2279,7 +2281,10 @@ void evt_io_device_control(
         reinterpret_cast<PVOID *>(&output),
         nullptr);
       if (NT_SUCCESS(status)) {
-        status = poll_feedback(context, owner, *input, output);
+        // METHOD_BUFFERED: input and output share the system buffer, so the
+        // request must be copied before the event is written over it.
+        const lvg::controller_id_request request_copy = *input;
+        status = poll_feedback(context, owner, request_copy, output);
         if (NT_SUCCESS(status)) {
           information = sizeof(*output);
         }

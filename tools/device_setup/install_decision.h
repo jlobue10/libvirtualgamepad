@@ -38,6 +38,46 @@ struct install_outcome {
   return attestation_due(o) && o.version_matches;
 }
 
+// What the control-interface probe found. The tool opens the interface
+// exclusively (like the client), so a driver that is in use by Vibepollo
+// answers CreateFile with ERROR_SHARING_VIOLATION: the interface exists and a
+// client passed the handshake to hold it, which is "ready" for install/status
+// purposes (the DriverVer attestation still decides success). Access denied
+// (a non-interactive account) is reported as such instead of "not ready".
+enum class probe_verdict {
+  absent,
+  denied,
+  in_use,
+  answered,
+};
+constexpr unsigned long k_win32_error_access_denied = 5;      // ERROR_ACCESS_DENIED
+constexpr unsigned long k_win32_error_sharing_violation = 32;  // ERROR_SHARING_VIOLATION
+[[nodiscard]] constexpr probe_verdict classify_open(const unsigned long open_error) noexcept {
+  switch (open_error) {
+    case k_win32_error_sharing_violation:
+      return probe_verdict::in_use;
+    case k_win32_error_access_denied:
+      return probe_verdict::denied;
+    default:
+      return probe_verdict::absent;
+  }
+}
+[[nodiscard]] constexpr bool interface_ready(const probe_verdict verdict) noexcept {
+  return verdict == probe_verdict::answered || verdict == probe_verdict::in_use;
+}
+[[nodiscard]] constexpr const wchar_t *probe_verdict_name(const probe_verdict verdict) noexcept {
+  switch (verdict) {
+    case probe_verdict::answered:
+      return L"answered";
+    case probe_verdict::in_use:
+      return L"in_use";
+    case probe_verdict::denied:
+      return L"denied";
+    default:
+      return L"absent";
+  }
+}
+
 constexpr int k_exit_ok = 0;
 constexpr int k_exit_not_ready = 3;
 constexpr int k_exit_reboot = 3010;
