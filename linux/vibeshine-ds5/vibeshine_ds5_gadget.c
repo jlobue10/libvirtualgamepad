@@ -25,6 +25,9 @@
 #define DS5_INT_MAXP 64
 #define DS5_ISO_OUT_Q 8
 #define DS5_ISO_IN_Q 4
+/* Offset of the HID class descriptor (09 21 ...) inside ds5_config_desc: interface 3 at
+ * 0xc3, its HID descriptor at 0xcc, endpoints at 0xd5/0xdc. Checked at module init. */
+#define DS5_HID_DESC_OFFSET 0xcc
 #define DS5_EVENT_FIFO 16
 
 static const u8 ds5_report_desc[] = {
@@ -155,6 +158,9 @@ struct ds5_slot {
 	u8 alt1;
 	u8 alt2;
 	bool created;
+	/* The fd that CREATEd this slot: only it may read, write or destroy it, and
+	 * a reader blocked on the slot's wait queue is released when it goes away. */
+	struct file *owner;
 	bool hid_enabled;
 	bool iso_out_enabled;
 	bool iso_in_enabled;
@@ -479,7 +485,8 @@ static int ds5_setup(struct usb_gadget *gadget, const struct usb_ctrlrequest *ct
 				return ds5_queue_ep0(slot, ds5_report_desc, sizeof(ds5_report_desc), wLength);
 			return -EINVAL;
 		case 0x21:
-			return ds5_queue_ep0(slot, ds5_config_desc + 0xd2, 9, wLength);
+			BUILD_BUG_ON(sizeof(ds5_config_desc) < DS5_HID_DESC_OFFSET + 9);
+			return ds5_queue_ep0(slot, ds5_config_desc + DS5_HID_DESC_OFFSET, 9, wLength);
 		default:
 			return -EINVAL;
 		}
@@ -669,6 +676,10 @@ static void ds5_unbind(struct usb_gadget *gadget)
 
 	if (!slot)
 		return;
+	/* Under the slot lock: a write() past its hid_enabled test must not queue a request
+	 * this function is freeing. The slot is no longer created afterwards, so its owner
+	 * sees -ENODEV and a rebind does not strand it. */
+	mutex_lock(&slot->lock);
 	ds5_disable_iso_out(slot);
 	ds5_disable_iso_in(slot);
 	ds5_disable_hid(slot);
@@ -680,7 +691,13 @@ static void ds5_unbind(struct usb_gadget *gadget)
 	for (i = 0; i < DS5_ISO_IN_Q; i++)
 		ds5_free_req(slot->ep_iso_in, slot->req_iso_in[i]);
 	slot->ep0_req = NULL;
+	slot->req_int_in = NULL;
+	slot->req_int_out = NULL;
 	slot->gadget = NULL;
+	slot->created = false;
+	slot->owner = NULL;
+	mutex_unlock(&slot->lock);
+	wake_up_interruptible_all(&slot->wait);
 }
 
 static void ds5_disconnect(struct usb_gadget *gadget)
@@ -727,8 +744,10 @@ static int ds5_release(struct inode *inode, struct file *file)
 	if (slot->created && slot->gadget)
 		usb_gadget_disconnect(slot->gadget);
 	slot->created = false;
+	slot->owner = NULL;
 	mutex_unlock(&slot->lock);
 	file->private_data = NULL;
+	wake_up_interruptible_all(&slot->wait);
 	return 0;
 }
 
@@ -744,6 +763,9 @@ static long ds5_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 			return -EFAULT;
 		if (create.slot >= VIBESHINE_DS5_SLOTS)
 			return -EINVAL;
+		/* One slot per fd: a second CREATE would strand the first slot with no owner. */
+		if (file->private_data)
+			return -EBUSY;
 		slot = &ds5_slots[create.slot];
 		mutex_lock(&slot->lock);
 		if (slot->created) {
@@ -757,6 +779,7 @@ static long ds5_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		memcpy(slot->mac, create.mac, 6);
 		INIT_KFIFO(slot->events);
 		slot->created = true;
+		slot->owner = file;
 		file->private_data = slot;
 		usb_gadget_connect(slot->gadget);
 		mutex_unlock(&slot->lock);
@@ -769,8 +792,11 @@ static long ds5_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		if (slot->gadget)
 			usb_gadget_disconnect(slot->gadget);
 		slot->created = false;
+		slot->owner = NULL;
 		mutex_unlock(&slot->lock);
 		file->private_data = NULL;
+		/* A reader blocked on this slot must not wake up as somebody else's reader. */
+		wake_up_interruptible_all(&slot->wait);
 		return 0;
 	default:
 		ret = -ENOTTY;
@@ -790,6 +816,12 @@ static ssize_t ds5_write(struct file *file, const char __user *buf, size_t count
 	if (copy_from_user(report, buf, count))
 		return -EFAULT;
 	mutex_lock(&slot->lock);
+	/* Re-check under the lock: a DESTROY or an unbind may have raced the test above,
+	 * and a slot re-CREATEd by another fd belongs to that fd now. */
+	if (!slot->created || slot->owner != file || !slot->gadget) {
+		mutex_unlock(&slot->lock);
+		return -ENODEV;
+	}
 	memset(slot->input, 0, sizeof(slot->input));
 	memcpy(slot->input, report, count);
 	if (smp_load_acquire(&slot->hid_enabled) &&
@@ -829,9 +861,13 @@ static ssize_t ds5_read(struct file *file, char __user *buf, size_t count, loff_
 		if (ret)
 			return ret;
 	} else {
-		ret = wait_event_interruptible(slot->wait, kfifo_len(&slot->events) > 0);
+		ret = wait_event_interruptible(slot->wait, kfifo_len(&slot->events) > 0 ||
+					       READ_ONCE(slot->owner) != file);
 		if (ret)
 			return ret;
+		/* Destroyed (or re-created by another fd) while we slept: its events are not ours. */
+		if (READ_ONCE(slot->owner) != file)
+			return -ENODEV;
 		spin_lock_irqsave(&slot->evlock, flags);
 		if (!kfifo_get(&slot->events, &ev)) {
 			spin_unlock_irqrestore(&slot->evlock, flags);
@@ -852,6 +888,8 @@ static __poll_t ds5_poll(struct file *file, poll_table *wait)
 	if (!slot)
 		return POLLERR;
 	poll_wait(file, &slot->wait, wait);
+	if (READ_ONCE(slot->owner) != file)
+		return POLLERR | POLLHUP;
 	if (kfifo_len(&slot->events))
 		mask |= POLLIN | POLLRDNORM;
 	return mask;
@@ -879,6 +917,12 @@ static struct miscdevice ds5_misc = {
 int vibeshine_ds5_gadget_init(void)
 {
 	int i, ret;
+
+	if (ds5_config_desc[DS5_HID_DESC_OFFSET] != 0x09 ||
+	    ds5_config_desc[DS5_HID_DESC_OFFSET + 1] != 0x21 /* HID class descriptor */) {
+		pr_err("vibeshine_ds5: HID class descriptor is not at config offset %#x\n", DS5_HID_DESC_OFFSET);
+		return -EINVAL;
+	}
 
 	for (i = 0; i < VIBESHINE_DS5_SLOTS; i++) {
 		mutex_init(&ds5_slots[i].lock);
