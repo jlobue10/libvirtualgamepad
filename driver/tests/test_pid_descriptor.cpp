@@ -1199,10 +1199,21 @@ int main() {
       check(gyro_state.gyro[2] >= 1420 && gyro_state.gyro[2] <= 1436 && gyro_state.gyro[1] == 0,
             "switch gyro: SDL y maps to device Z");
       gyro.y_milli = 0;
-      gyro.z_milli = 100000;  // SDL z (roll) -> device X
+      gyro.z_milli = 100000;  // SDL z (roll) -> negated device X
       std::ignore = apply_switch_motion(gyro, &gyro_state);
-      check(gyro_state.gyro[0] >= 1420 && gyro_state.gyro[0] <= 1436 && gyro_state.gyro[2] == 0,
-            "switch gyro: SDL z maps to device X");
+      check(gyro_state.gyro[0] <= -1420 && gyro_state.gyro[0] >= -1436 && gyro_state.gyro[2] == 0,
+            "switch gyro: SDL z maps to negated device X");
+
+      // Distinct values on all three axes, pushed back through SDL's own formula
+      // (host x = -devY, host y = devZ, host z = -devX): any permutation or sign
+      // error in the fold shows up here.
+      gyro.x_milli = 100000;
+      gyro.y_milli = 200000;
+      gyro.z_milli = 300000;
+      std::ignore = apply_switch_motion(gyro, &gyro_state);
+      const int host_x = -gyro_state.gyro[1], host_y = gyro_state.gyro[2], host_z = -gyro_state.gyro[0];
+      check(host_x >= 1420 && host_x <= 1436 && host_y >= 2840 && host_y <= 2872 && host_z >= 4260 && host_z <= 4308,
+            "switch gyro: SDL (100, 200, 300) deg/s round-trips through SDL's axis shuffle");
 
       // A controller at rest reports gravity on SDL +y (up); the device frame
       // keeps it on Z, where reset() puts it.
@@ -1217,9 +1228,18 @@ int main() {
       accel.x_milli = 9807;
       check(apply_switch_motion(accel, &accel_state) && accel_state.accel[1] == -4096 && accel_state.accel[2] == 0,
             "switch accel: SDL x maps to negated device Y");
+      accel.x_milli = 0;
+      accel.z_milli = 9807;
+      check(apply_switch_motion(accel, &accel_state) && accel_state.accel[0] == -4096 && accel_state.accel[1] == 0,
+            "switch accel: SDL z maps to negated device X");
+      accel.z_milli = 0;
       accel.x_milli = INT32_MIN;  // the negation must not overflow
       check(apply_switch_motion(accel, &accel_state) && accel_state.accel[1] == 32767,
             "switch accel: INT32_MIN on SDL x saturates on device Y without wrapping");
+      accel.x_milli = 0;
+      accel.z_milli = INT32_MIN;
+      check(apply_switch_motion(accel, &accel_state) && accel_state.accel[0] == 32767,
+            "switch accel: INT32_MIN on SDL z saturates on device X without wrapping");
     }
     state.reset();
 
@@ -1429,8 +1449,33 @@ int main() {
     strong[5] = 0x40;
     std::memcpy(strong + 6, idle, 4);
     check(decode_switch_rumble(strong, sizeof(strong), &feedback), "strong rumble decodes");
-    check(feedback.low_frequency == 65535, "full amplitude is full scale");
-    check(feedback.high_frequency == 0, "the idle side stays silent");
+    // bytes 0-1 of a side are the high-frequency band: full amplitude there is the
+    // high-frequency motor at full scale, whichever side carries it
+    check(feedback.high_frequency == 65535, "a full high-band amplitude is the high-frequency motor at full scale");
+    check(feedback.low_frequency == 0, "an idle low band stays silent");
+
+    // SDL/Steam shape: both sides identical, the low-frequency motor in the low
+    // band (bytes 2-3) and the high band idle.
+    std::uint8_t sdl_low[10] {};
+    sdl_low[0] = k_switch_rumble_only_id;
+    const int low_index = k_switch_amplitude_max;
+    const std::uint8_t low_side[4] = {
+      0x00, 0x01,
+      static_cast<std::uint8_t>(0x40 | ((low_index & 1) << 7)),
+      static_cast<std::uint8_t>(0x40 + (low_index >> 1)),
+    };
+    std::memcpy(sdl_low + 2, low_side, 4);
+    std::memcpy(sdl_low + 6, low_side, 4);
+    check(decode_switch_rumble(sdl_low, sizeof(sdl_low), &feedback) && feedback.low_frequency == 65535 && feedback.high_frequency == 0,
+          "an SDL-shaped low-band pattern on both sides is the low-frequency motor only");
+    // Half amplitude in the high band on the right side only still reaches the high motor.
+    std::uint8_t half_high[10] {};
+    half_high[0] = k_switch_rumble_only_id;
+    std::memcpy(half_high + 2, idle, 4);
+    std::memcpy(half_high + 6, idle, 4);
+    half_high[7] = static_cast<std::uint8_t>((k_switch_amplitude_max / 2) << 1);
+    check(decode_switch_rumble(half_high, sizeof(half_high), &feedback) && feedback.high_frequency > 30000 && feedback.high_frequency < 35000 && feedback.low_frequency == 0,
+          "a half high-band amplitude on one side is about half scale on the high-frequency motor");
 
     std::uint8_t foreign_rumble[10] {};
     foreign_rumble[0] = 0x42;

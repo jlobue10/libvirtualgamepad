@@ -93,7 +93,7 @@ Interrupt traffic in the same capture:
 | Triggers | two, 0..32767 | click bits at ≥ 0xF0 of the client's 0..255 |
 | Touch pads | two, single contact each, x/y ±32767, pressure 0..32767 | protocol contact index 0 = left, 1 = right; Vibepollo derives the index from the client's touchpad index, or from the half of a single DualShock-style pad for clients without `LI_CCAP_DUAL_TOUCHPAD` |
 | Motion | accelerometer and gyroscope at SDL scaling, device axes | quaternion fixed at identity, as on the real unit |
-| Battery | report 0x43 with level and charge state | emitted on a client battery update while a VHF read is pending, and every 3.5 s by the keep-alive worker while someone reads (an update without a reader only restarts that period) |
+| Battery | report 0x43 with level and charge state | emitted on a client battery update while a VHF read is pending, and every 3.5 s by the keep-alive worker while someone reads (an update without a reader clears that period so the first ready tick sends the fresh value) |
 | LEDs | none | the controller has no host-controlled LED |
 | Rumble / haptics | 0x80..0x85 → `steam_haptic` (verbatim) | 0x86..0x89 accepted, not forwarded |
 | Trigger rumble | none | not a feature of the device |

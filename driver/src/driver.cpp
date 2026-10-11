@@ -902,16 +902,24 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
   }
 
   lock_context(context);
-  // Only the PlayStation pads have a touchpad.
-  const bool applied = slot->selected_profile == lvg::profile::dualshock_4
-                         ? lvg::driver::apply_ds4_touch(request, &slot->ds4)
-                         : slot->selected_profile == lvg::profile::dualsense
-                             ? lvg::driver::apply_ds5_touch(request, &slot->ds5)
-                             : is_steam_controller(slot->selected_profile)
-                                 ? lvg::driver::apply_sc26_touch(request, &slot->sc26)
-                                 : false;
+  // Only the PlayStation pads and the Steam Controller have a touch surface;
+  // a Switch Pro slot answers "not supported", as client.h documents, rather
+  // than "invalid parameter".
+  const bool has_touch = slot->selected_profile != lvg::profile::switch_pro;
+  const bool applied = has_touch &&
+                       (slot->selected_profile == lvg::profile::dualshock_4
+                          ? lvg::driver::apply_ds4_touch(request, &slot->ds4)
+                          : slot->selected_profile == lvg::profile::dualsense
+                              ? lvg::driver::apply_ds5_touch(request, &slot->ds5)
+                              : is_steam_controller(slot->selected_profile)
+                                  ? lvg::driver::apply_sc26_touch(request, &slot->sc26)
+                                  : false);
   unlock_context(context);
 
+  if (!has_touch) {
+    unlock_lifetime(context);
+    return STATUS_NOT_SUPPORTED;
+  }
   if (!applied) {
     unlock_lifetime(context);
     return STATUS_INVALID_PARAMETER;

@@ -308,11 +308,13 @@ bool apply_switch_motion(const motion_state_request &motion, switch_state *const
           std::clamp<std::int64_t>((milli * 4096) / 9807, INT32_MIN, INT32_MAX)));
       };
       // The protocol carries SDL's PlayStation-style frame. SDL's Switch driver
-      // shuffles the device axes into that frame (host x = -device Y, host y =
-      // device Z, host z = device X), so the device report holds the inverse;
-      // an identity copy showed a resting controller rolled 90 degrees and
-      // swapped pitch and yaw.
-      state->accel[0] = convert(motion.z_milli);
+      // (SDL_hidapi_switch.c, SendSensorUpdate) shuffles the device axes into
+      // that frame as a proper rotation: host x = -device Y, host y = device Z,
+      // host z = -device X. The device report holds the inverse: device X = -z,
+      // device Y = -x, device Z = y. (An identity copy showed a resting
+      // controller rolled 90 degrees; a +z device X mirrored roll and the z
+      // gravity component.)
+      state->accel[0] = convert(-static_cast<std::int64_t>(motion.z_milli));
       state->accel[1] = convert(-static_cast<std::int64_t>(motion.x_milli));
       state->accel[2] = convert(motion.y_milli);
       return true;
@@ -326,7 +328,7 @@ bool apply_switch_motion(const motion_state_request &motion, switch_state *const
           std::clamp<std::int64_t>((milli * k_switch_gyro_sensitivity) / (936 * 1000), INT32_MIN, INT32_MAX)));
       };
       // Same axis shuffle as the accelerometer (see above).
-      state->gyro[0] = convert(motion.z_milli);
+      state->gyro[0] = convert(-static_cast<std::int64_t>(motion.z_milli));
       state->gyro[1] = convert(-static_cast<std::int64_t>(motion.x_milli));
       state->gyro[2] = convert(motion.y_milli);
       return true;
@@ -503,27 +505,33 @@ bool decode_switch_rumble(
     return false;
   }
 
-  // Four bytes per side follow the packet counter. The console encodes
-  // frequency and amplitude together; only the amplitude has meaning for a
-  // client that just wants to know how hard to vibrate.
+  // Four bytes per side follow the packet counter: a high-frequency band
+  // (bytes 0-1) and a low-frequency band (bytes 2-3), each with its own
+  // amplitude. SDL and Steam encode the same pattern on both sides, with the
+  // host's "high frequency" motor in the high band and "low frequency" in the
+  // low band; mapping left side -> low motor and right side -> high motor
+  // (hid-nintendo's Linux convention) made a Windows host receive
+  // low = high = max(low, high). Decode per band, max over sides.
   const std::uint8_t *const left = report + 2;
   const std::uint8_t *const right = report + 6;
 
-  const auto amplitude = [](const std::uint8_t *const side) -> std::uint16_t {
-    const std::uint8_t high_index = static_cast<std::uint8_t>((side[1] & 0xFE) >> 1);
-    const std::int32_t low_index =
-      ((static_cast<std::int32_t>(side[3] & 0x7F) - 0x40) * 2) + ((side[2] & 0x80) >> 7);
-    const std::int32_t index = high_index > low_index ? high_index : low_index;
+  const auto scale = [](const std::int32_t index) -> std::uint16_t {
     if (index <= 0) {
       return 0;
     }
     const std::int32_t clamped = index > k_switch_amplitude_max ? k_switch_amplitude_max : index;
     return static_cast<std::uint16_t>((clamped * 65535) / k_switch_amplitude_max);
   };
+  const auto high_band = [&](const std::uint8_t *const side) -> std::uint16_t {
+    return scale(static_cast<std::uint8_t>((side[1] & 0xFE) >> 1));
+  };
+  const auto low_band = [&](const std::uint8_t *const side) -> std::uint16_t {
+    return scale(((static_cast<std::int32_t>(side[3] & 0x7F) - 0x40) * 2) + ((side[2] & 0x80) >> 7));
+  };
 
   *feedback = {};
-  feedback->low_frequency = amplitude(left);
-  feedback->high_frequency = amplitude(right);
+  feedback->high_frequency = std::max(high_band(left), high_band(right));
+  feedback->low_frequency = std::max(low_band(left), low_band(right));
   return true;
 }
 
