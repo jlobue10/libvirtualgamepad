@@ -12,7 +12,13 @@ with open(path, encoding="utf-8") as f:
         parts = line.rstrip("\n").split("\t")
         if len(parts) < 5 or parts[2] != "0x81":
             continue
-        b = bytes.fromhex(parts[4])
+        # usbhid.data when the HID dissector claimed the transfer, else usb.capdata (the
+        # writer emits both columns and its own summary falls back the same way).
+        payload = parts[4] or (parts[5] if len(parts) > 5 else "")
+        try:
+            b = bytes.fromhex(payload)
+        except ValueError:
+            continue
         if len(b) < 54 or b[0] != 0x42:
             continue
         seq = b[1]

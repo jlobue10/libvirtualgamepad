@@ -52,7 +52,7 @@ def fmt(payload):
         return f"short payload ({len(b)} bytes): {payload}"
     typ, length, body = b[1], b[2], b[3:3 + b[2]]
     s = f"type=0x{typ:02x} len={length:2d} payload={body.hex()}"
-    if typ == 0xae and length > 1:
+    if typ == 0xae and len(body) > 1:
         s += f" tag=0x{body[0]:02x} text={body[1:].split(NUL)[0].decode('ascii', 'replace')!r}"
     return s
 
