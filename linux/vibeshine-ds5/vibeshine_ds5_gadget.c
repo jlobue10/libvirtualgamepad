@@ -579,7 +579,9 @@ static int ds5_setup(struct usb_gadget *gadget, const struct usb_ctrlrequest *ct
 				return -EINVAL;
 			return ds5_queue_ep0(slot, buf, n, wLength);
 		}
-		if (req == 0x09) { /* SET_REPORT: data stage then status */
+		if (req == 0x09 && !(type & USB_DIR_IN)) { /* SET_REPORT: data stage then status */
+			/* An IN request with these values must stall, not be answered with
+			 * whatever ep0_req->buf last carried. */
 			slot->ep0_req->length = min_t(u16, wLength, 64);
 			slot->ep0_req->zero = 0;
 			slot->ep0_req->complete = ds5_ep0_complete;
@@ -611,7 +613,7 @@ static int ds5_setup(struct usb_gadget *gadget, const struct usb_ctrlrequest *ct
 				return ds5_queue_ep0(slot, buf, 2, wLength);
 			}
 		}
-		if (req == 0x01) {
+		if (req == 0x01 && !(type & USB_DIR_IN)) { /* SET_CUR: OUT data stage only */
 			slot->ep0_req->length = min_t(u16, wLength, 8);
 			return usb_ep_queue(gadget->ep0, slot->ep0_req, GFP_ATOMIC);
 		}

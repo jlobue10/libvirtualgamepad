@@ -63,6 +63,26 @@ def current_pins(cmake_text):
             grab('SUNSHINE_VHF_GAMEPAD_PROTOCOL_VERSION', r'\d+', quoted=False))
 
 
+NEW_PIN_PATTERNS = {
+    'tag': r'v0\.1\.0-beta\.\d+',
+    'sha': r'[0-9a-f]{64}',
+    'rev': r'[0-9a-f]{40}',
+    'ver': r'\d\d/\d\d/\d{4},0\.1\.0\.\d+',
+    'asset': r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}',
+    'protocol': r'\d+',
+}
+
+
+def validate_new_pins(new):
+    """The lock's fields are spliced into regex replacements and file literals: refuse anything
+    that is not exactly a pin of the expected shape."""
+    for key, pattern in NEW_PIN_PATTERNS.items():
+        value = new.get(key)
+        if not isinstance(value, str) or re.fullmatch(pattern, value) is None:
+            return f'release lock field {key!r} has an unexpected value: {value!r}'
+    return None
+
+
 def rewrite_protocol(path, text, old, new):
     """The protocol version is hard-coded at several sites that carry no other pin."""
     if old == new:
@@ -159,6 +179,9 @@ def main():
     new = dict(tag=lock['tag'], sha=lock['archive']['sha256'], rev=lock['source_revision'],
                ver=lock['driver_ver'], asset=lock['archive']['name'],
                protocol=str(lock['protocol_version']))
+    problem = validate_new_pins(new)
+    if problem:
+        sys.exit(problem)
     print('new pins:', json.dumps(new, indent=2))
 
     head = gh(f'repos/{VIBEPOLLO_REPO}/git/ref/heads/{VIBEPOLLO_BRANCH}')['object']['sha']
