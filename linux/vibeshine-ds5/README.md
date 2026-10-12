@@ -39,7 +39,11 @@ Run the portable ownership/concurrency regression without loading a module:
 
 ```sh
 python3 linux/vibeshine-ds5/test_slot_lifecycle.py
+python3 linux/vibeshine-ds5/test_audio_setup.py
 ```
 
-The harness runs production file operations with fake USB/FIFO boundaries and
-ASan/UBSan. Kernel builds and live USB behavior require separate validation.
+The harnesses run production file operations and audio endpoint setup with fake
+USB/FIFO boundaries under ASan/UBSan. Audio checks inject failure at endpoint
+enable and each queue position, then verify error propagation, partial-queue
+cleanup and a successful retry. Kernel builds and live USB behavior require
+separate validation.

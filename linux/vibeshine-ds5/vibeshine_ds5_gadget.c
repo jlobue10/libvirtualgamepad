@@ -388,8 +388,12 @@ static int ds5_enable_iso_out(struct ds5_slot *slot)
 	for (i = 0; i < DS5_ISO_OUT_Q; i++) {
 		slot->req_iso_out[i]->length = DS5_ISO_OUT_MAXP;
 		ret = usb_ep_queue(slot->ep_iso_out, slot->req_iso_out[i], GFP_ATOMIC);
-		if (ret)
-			break;
+		if (ret) {
+			/* Disable completes any earlier requests with -ESHUTDOWN. Leave
+			 * setup unpublished so SET_INTERFACE can retry the whole queue. */
+			usb_ep_disable(slot->ep_iso_out);
+			return ret;
+		}
 	}
 	slot->iso_out_enabled = true;
 	return 0;
@@ -421,7 +425,11 @@ static int ds5_enable_iso_in(struct ds5_slot *slot)
 	for (i = 0; i < DS5_ISO_IN_Q; i++) {
 		memset(slot->req_iso_in[i]->buf, 0, DS5_ISO_IN_MAXP);
 		slot->req_iso_in[i]->length = DS5_ISO_IN_MAXP;
-		usb_ep_queue(slot->ep_iso_in, slot->req_iso_in[i], GFP_ATOMIC);
+		ret = usb_ep_queue(slot->ep_iso_in, slot->req_iso_in[i], GFP_ATOMIC);
+		if (ret) {
+			usb_ep_disable(slot->ep_iso_in);
+			return ret;
+		}
 	}
 	slot->iso_in_enabled = true;
 	return 0;
@@ -528,17 +536,23 @@ static int ds5_setup(struct usb_gadget *gadget, const struct usb_ctrlrequest *ct
 		u8 intf = wIndex & 0xff;
 
 		if (intf == 1) {
-			slot->alt1 = alt;
-			if (alt)
-				ds5_enable_iso_out(slot);
-			else
+			if (alt) {
+				n = ds5_enable_iso_out(slot);
+				if (n)
+					return n;
+			} else {
 				ds5_disable_iso_out(slot);
+			}
+			slot->alt1 = alt;
 		} else if (intf == 2) {
-			slot->alt2 = alt;
-			if (alt)
-				ds5_enable_iso_in(slot);
-			else
+			if (alt) {
+				n = ds5_enable_iso_in(slot);
+				if (n)
+					return n;
+			} else {
 				ds5_disable_iso_in(slot);
+			}
+			slot->alt2 = alt;
 		} else if (intf != 0 && intf != 3) {
 			return -EINVAL;
 		}
