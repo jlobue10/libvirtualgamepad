@@ -334,6 +334,9 @@ static int ds5_enable_hid(struct ds5_slot *slot)
 
 	if (slot->hid_enabled)
 		return 0;
+	/* A slot whose bind did not complete (or that is being unbound) has no requests. */
+	if (!slot->req_int_in || !slot->req_int_out || !slot->ep_int_in || !slot->ep_int_out)
+		return -ESHUTDOWN;
 	slot->ep_int_in->driver_data = slot;
 	slot->ep_int_out->driver_data = slot;
 	slot->ep_int_in->desc = &ds5_ep_int_in_desc;
@@ -630,7 +633,7 @@ static void ds5_free_req(struct usb_ep *ep, struct usb_request *req)
 static int ds5_bind(struct usb_gadget *gadget, struct usb_gadget_driver *driver)
 {
 	struct ds5_slot *slot = NULL;
-	int i;
+	int i, ret;
 
 	for (i = 0; i < VIBESHINE_DS5_SLOTS; i++) {
 		if (!ds5_slots[i].gadget) {
@@ -641,30 +644,40 @@ static int ds5_bind(struct usb_gadget *gadget, struct usb_gadget_driver *driver)
 	if (!slot)
 		return -ENOSPC;
 
-	slot->gadget = gadget;
+	/* The gadget pointer is what CREATE and the I/O paths test for a usable slot:
+	 * publish it last, under the slot lock, and only when every request exists.
+	 * The core does not call unbind for a failed bind, so free on failure here. */
 	set_gadget_data(gadget, slot);
 	usb_ep_autoconfig_reset(gadget);
 	slot->ep_iso_out = ds5_find_ep(gadget, "ep1out-iso");
 	slot->ep_iso_in = ds5_find_ep(gadget, "ep2in-iso");
 	slot->ep_int_in = ds5_find_ep(gadget, "ep5in-int");
 	slot->ep_int_out = ds5_find_ep(gadget, "ep-aout");
-	if (!slot->ep_iso_out || !slot->ep_iso_in || !slot->ep_int_in || !slot->ep_int_out)
-		return -ENODEV;
+	if (!slot->ep_iso_out || !slot->ep_iso_in || !slot->ep_int_in || !slot->ep_int_out) {
+		ret = -ENODEV;
+		goto fail;
+	}
 
 	slot->ep0_req = ds5_alloc_req(gadget->ep0, 512, ds5_ep0_complete);
 	slot->req_int_in = ds5_alloc_req(slot->ep_int_in, DS5_INT_MAXP, ds5_int_in_complete);
 	slot->req_int_out = ds5_alloc_req(slot->ep_int_out, DS5_INT_MAXP, ds5_int_out_complete);
-	if (!slot->ep0_req || !slot->req_int_in || !slot->req_int_out)
-		return -ENOMEM;
+	if (!slot->ep0_req || !slot->req_int_in || !slot->req_int_out) {
+		ret = -ENOMEM;
+		goto fail;
+	}
 	for (i = 0; i < DS5_ISO_OUT_Q; i++) {
 		slot->req_iso_out[i] = ds5_alloc_req(slot->ep_iso_out, DS5_ISO_OUT_MAXP, ds5_iso_out_complete);
-		if (!slot->req_iso_out[i])
-			return -ENOMEM;
+		if (!slot->req_iso_out[i]) {
+			ret = -ENOMEM;
+			goto fail;
+		}
 	}
 	for (i = 0; i < DS5_ISO_IN_Q; i++) {
 		slot->req_iso_in[i] = ds5_alloc_req(slot->ep_iso_in, DS5_ISO_IN_MAXP, ds5_iso_in_complete);
-		if (!slot->req_iso_in[i])
-			return -ENOMEM;
+		if (!slot->req_iso_in[i]) {
+			ret = -ENOMEM;
+			goto fail;
+		}
 	}
 	slot->input[0] = 0x01;
 	slot->input[1] = 0x80;
@@ -674,7 +687,26 @@ static int ds5_bind(struct usb_gadget *gadget, struct usb_gadget_driver *driver)
 	gadget->is_selfpowered = 1;
 	usb_gadget_set_selfpowered(gadget);
 	usb_gadget_disconnect(gadget);
+	mutex_lock(&slot->lock);
+	slot->gadget = gadget;
+	mutex_unlock(&slot->lock);
 	return 0;
+
+fail:
+	ds5_free_req(gadget->ep0, slot->ep0_req);
+	ds5_free_req(slot->ep_int_in, slot->req_int_in);
+	ds5_free_req(slot->ep_int_out, slot->req_int_out);
+	for (i = 0; i < DS5_ISO_OUT_Q; i++)
+		ds5_free_req(slot->ep_iso_out, slot->req_iso_out[i]);
+	for (i = 0; i < DS5_ISO_IN_Q; i++)
+		ds5_free_req(slot->ep_iso_in, slot->req_iso_in[i]);
+	slot->ep0_req = NULL;
+	slot->req_int_in = NULL;
+	slot->req_int_out = NULL;
+	memset(slot->req_iso_out, 0, sizeof(slot->req_iso_out));
+	memset(slot->req_iso_in, 0, sizeof(slot->req_iso_in));
+	set_gadget_data(gadget, NULL);
+	return ret;
 }
 
 static void ds5_unbind(struct usb_gadget *gadget)
@@ -733,6 +765,8 @@ static const struct usb_gadget_driver ds5_driver_template = {
 	.driver = {
 		.owner = THIS_MODULE,
 		.name = "vibeshine_ds5",
+		/* No sysfs bind/unbind: a slot may be owned by an open fd. */
+		.suppress_bind_attrs = true,
 	},
 };
 
@@ -918,30 +952,36 @@ static ssize_t ds5_read(struct file *file, char __user *buf, size_t count, loff_
 	mutex_unlock(&slot->lock);
 	mutex_unlock(&ctx->lock);
 
-	/* Never hold either mutex while sleeping: DESTROY must be able to wake us.
-	 * The owner pointer alone cannot detect DESTROY/CREATE by the same fd. */
-	if (!(file->f_flags & O_NONBLOCK)) {
-		ret = wait_event_interruptible(slot->wait, kfifo_len(&slot->events) > 0 ||
-					       READ_ONCE(slot->owner) != file ||
-					       READ_ONCE(slot->generation) != generation);
-		if (ret)
-			return ret;
-	}
+	for (;;) {
+		/* Never hold either mutex while sleeping: DESTROY must be able to wake us.
+		 * The owner pointer alone cannot detect DESTROY/CREATE by the same fd. */
+		if (!(file->f_flags & O_NONBLOCK)) {
+			ret = wait_event_interruptible(slot->wait, kfifo_len(&slot->events) > 0 ||
+						       READ_ONCE(slot->owner) != file ||
+						       READ_ONCE(slot->generation) != generation);
+			if (ret)
+				return ret;
+		}
 
-	mutex_lock(&ctx->lock);
-	mutex_lock(&slot->lock);
-	/* Check and dequeue under the lifecycle locks for blocking AND nonblocking
-	 * reads. A slot must not change ownership between this check and kfifo_get. */
-	if (ctx->slot != slot || !slot->created || slot->owner != file ||
-	    slot->generation != generation) {
-		ret = -ENODEV;
-	} else {
-		spin_lock_irqsave(&slot->evlock, flags);
-		ret = kfifo_get(&slot->events, &ev) ? 0 : -EAGAIN;
-		spin_unlock_irqrestore(&slot->evlock, flags);
+		mutex_lock(&ctx->lock);
+		mutex_lock(&slot->lock);
+		/* Check and dequeue under the lifecycle locks for blocking AND nonblocking
+		 * reads. A slot must not change ownership between this check and kfifo_get. */
+		if (ctx->slot != slot || !slot->created || slot->owner != file ||
+		    slot->generation != generation) {
+			ret = -ENODEV;
+		} else {
+			spin_lock_irqsave(&slot->evlock, flags);
+			ret = kfifo_get(&slot->events, &ev) ? 0 : -EAGAIN;
+			spin_unlock_irqrestore(&slot->evlock, flags);
+		}
+		mutex_unlock(&slot->lock);
+		mutex_unlock(&ctx->lock);
+		/* A sibling reader on this fd took the event between the (non-exclusive)
+		 * wake and the re-lock: a blocking read waits for the next one. */
+		if (ret != -EAGAIN || (file->f_flags & O_NONBLOCK))
+			break;
 	}
-	mutex_unlock(&slot->lock);
-	mutex_unlock(&ctx->lock);
 	if (ret)
 		return ret;
 	if (copy_to_user(buf, &ev, sizeof(ev)))
