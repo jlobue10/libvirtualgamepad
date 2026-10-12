@@ -295,10 +295,15 @@ $interfaceFile = Join-Path $OutputDir 'usbpcap-interface.txt'
 # hub captures are read back by elevated tshark passes and copied into the repository, so the
 # directory is unpredictable, never adopted if it already exists (no -Force: a pre-planted
 # directory or junction fails the run) and readable only by Administrators and SYSTEM.
-$tmp = Join-Path $env:TEMP ("sc26-capture-" + [System.IO.Path]::GetRandomFileName().Replace('.', ''))
-New-Item -ItemType Directory -Path $tmp -ErrorAction Stop | Out-Null
-& icacls $tmp /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "Could not restrict the capture directory $tmp (icacls exit $LASTEXITCODE)." }
+# Only live captures use it: a -FromPcap reprocess runs unelevated and must not leave an
+# Administrators-only directory behind in the user's %TEMP%.
+$tmp = $null
+if (-not $FromPcap) {
+    $tmp = Join-Path $env:TEMP ("sc26-capture-" + [System.IO.Path]::GetRandomFileName().Replace('.', ''))
+    New-Item -ItemType Directory -Path $tmp -ErrorAction Stop | Out-Null
+    & icacls $tmp /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Could not restrict the capture directory $tmp (icacls exit $LASTEXITCODE)." }
+}
 
 switch ($Phase) {
     'Plugin' {

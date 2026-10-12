@@ -38,12 +38,18 @@ $tokens = $null; $errors = $null
 [void][System.Management.Automation.Language.Parser]::ParseInput($sample, [ref]$tokens, [ref]$errors)
 Check ($errors.Count -eq 0 -and $sample -match "\`$TargetPid = \[int\] '4242'") 'the substituted helper parses and carries the PID'
 
-# The raw hub captures (D25-05): random directory, never adopted, restricted ACL.
+# The raw hub captures (D25-05): random directory, never adopted, restricted ACL, and only
+# created by live captures (D26-02: a -FromPcap reprocess runs unelevated and used to leave an
+# empty Administrators-only directory in %TEMP%).
 $tmpStart = $text.IndexOf('$tmp = Join-Path $env:TEMP')
 $tmpBlock = if ($tmpStart -ge 0) { $text.Substring($tmpStart, [Math]::Min(600, $text.Length - $tmpStart)) } else { '' }
 Check ($tmpBlock -match 'GetRandomFileName') 'the capture directory name is random'
-Check ($tmpBlock -match 'New-Item -ItemType Directory -Path \$tmp' -and $tmpBlock -notmatch 'New-Item -ItemType Directory -Force -Path \$tmp') 'an existing capture directory is not adopted (no -Force)'
+$newItem = [regex]::Match($tmpBlock, 'New-Item[^\r\n]*\$tmp[^\r\n]*').Value
+Check ($newItem -match '-ItemType Directory' -and $newItem -notmatch '-Force') 'an existing capture directory is not adopted (no -Force, whatever the operand order)'
 Check ($tmpBlock -match 'icacls \$tmp /inheritance:r') 'the capture directory ACL is restricted to Administrators and SYSTEM'
+$guardStart = $text.LastIndexOf('if (-not $FromPcap)', $tmpStart)
+$guard = if ($guardStart -ge 0) { $text.Substring($guardStart, $tmpStart - $guardStart) } else { 'missing' }
+Check ($guardStart -ge 0 -and $guard -notmatch '\n\}' -and $guard -match '\{\s*$') 'the capture directory is only created when not reprocessing a pcap'
 
 if ($failures -ne 0) { throw "$failures capture-helper gate(s) failed" }
 Write-Host 'capture helper gates passed'

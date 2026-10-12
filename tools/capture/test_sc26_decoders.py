@@ -36,10 +36,11 @@ with tempfile.TemporaryDirectory(prefix="sc26-decoders-") as temp:
         + "3\t0.003\t0x00\t0x21\t0x09\t0x0301\t0x0002\t64\t3\t1\t64\t" + set_report + "\n"
         + "4\t0.004\t0x00\t0xa1\t0x01\t0x0301\t0x0002\t64\t3\t1\t0\t\n"
         + "5\t0.005\t0x01\t\t\t\t\t\t\t\t64\t" + get_reply + "\n"
-        + "6\t0.006\t0x00\t0x21\n",                                            # a short row
+        + "6\t0.006\t0x00\t0x21\n"                                             # a short row
+        + "7\t0.007\t0x00\t0x21\t0x09\t0x0301\t0x0002\t64\t3\t1\t64\t" + "01ae05" + "\n",  # 0xae with no body
         encoding="utf-8")
     result = run("Decode-Sc26Handshake.py", handshake)
-    check(result.returncode == 0, "the handshake decoder survives SET_IDLE/SET_PROTOCOL rows without payload and short rows")
+    check(result.returncode == 0, "the handshake decoder survives SET_IDLE/SET_PROTOCOL rows without payload, short rows and a bodiless 0xae")
     check("type=0x87" in result.stdout, "the real SET_REPORT is still decoded")
     if result.returncode != 0:
         print(result.stderr[-600:])
@@ -53,6 +54,19 @@ with tempfile.TemporaryDirectory(prefix="sc26-decoders-") as temp:
         check(result.returncode == 0, f"the stick analyzer survives {count} report(s)")
         if result.returncode != 0:
             print(result.stderr[-600:])
+
+    # The writer's real layout has two payload columns: usbhid.data, else usb.capdata (a hub
+    # capture without injected descriptors is not dissected as HID, so only the sixth column is
+    # set). A malformed hex cell must be skipped, not fatal.
+    raw_header = "frame\ttime\tendpoint\tdir\tpayload\tpayload_raw\n"
+    stick = work / "stick_capdata.tsv"
+    stick.write_text(raw_header + "".join(f"{i}\t{i * 0.004:.3f}\t0x81\t0x01\t\t{report}\n" for i in range(2))
+                     + "9\t0.040\t0x81\t0x01\tzz\t\n", encoding="utf-8")
+    result = run("analyze_sc26_stick.py", stick)
+    check(result.returncode == 0 and "0x42 reports: 2" in result.stdout,
+          "the stick analyzer reads usb.capdata payloads and skips a malformed hex cell")
+    if result.returncode != 0:
+        print(result.stderr[-600:])
 
 print(f"{failures} failures")
 sys.exit(1 if failures else 0)

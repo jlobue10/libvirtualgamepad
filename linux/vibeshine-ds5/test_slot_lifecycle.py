@@ -127,6 +127,11 @@ static void reuse_same_fd(void) {
   assert(!create(reused_file, 0));
   event(0, 99);
 }
+// First wake: nothing queued (a sibling reader on the same fd drained it); second wake: an event.
+static int sleeps;
+static void spurious_then_event(void) {
+  if (++sleeps == 2) event(0, 42);
+}
 struct create_job { struct file *file; unsigned int slot; int result; bool done; };
 static void *create_thread(void *arg) {
   struct create_job *job = arg;
@@ -159,6 +164,22 @@ int main(void) {
   file.f_flags = O_NONBLOCK;
   check(ds5_read(&file, (char *)&received, sizeof(received), NULL) == sizeof(received) && received.data[0] == 99,
         "the replacement generation keeps its feedback for a new read");
+  // D25-03: a blocking read woken without an event goes back to sleep instead of
+  // returning EAGAIN (or spinning); a nonblocking read reports it in one pass.
+  file.f_flags = 0; sleeps = 0; wait_hook = spurious_then_event;
+  check(ds5_read(&file, (char *)&received, sizeof(received), NULL) == sizeof(received) && received.data[0] == 42 && sleeps == 2,
+        "a blocking read drained by a sibling waits for the next event");
+  wait_hook = NULL;
+  file.f_flags = O_NONBLOCK;
+  check(ds5_read(&file, (char *)&received, sizeof(received), NULL) == -EAGAIN, "a nonblocking read drained by a sibling returns EAGAIN at once");
+  // D25-04: a slot whose gadget bind failed (or has not happened) cannot be created.
+  struct file unbound = {};
+  assert(!ds5_open(NULL, &unbound));
+  ds5_slots[2].gadget = NULL;
+  check(create(&unbound, 2) == -ENODEV && !ds5_slots[2].created && ((struct ds5_file *)unbound.private_data)->slot == NULL,
+        "CREATE on a slot without a bound gadget is refused without reserving it");
+  ds5_slots[2].gadget = &gadgets[2];
+  ds5_release(NULL, &unbound);
 
   // Unbind retires a slot without changing the old file's private state. Rebind
   // can then give the same slot to another file before the old file closes.
