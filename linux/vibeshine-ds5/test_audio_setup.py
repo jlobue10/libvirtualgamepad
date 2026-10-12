@@ -191,9 +191,11 @@ int main(void) {
           "a high-byte interface alias cannot stop active playback");
     // Baseline may have stopped playback; re-enable it before testing reconfiguration.
     set_interface(&slot,1,1);
+    slot.ep0_pending_cs=2;
     check(set_configuration(&slot,1)==0 && slot.config==1 && slot.alt1==0 && slot.alt2==0 &&
           !out.enabled && !in.enabled && out.queued==0 && in.queued==0 && slot.hid_enabled,
           "reapplying the configuration retires both audio queues and resets alternate settings");
+    check(slot.ep0_pending_cs==0,"reconfiguration drops a pending audio-control data stage");
     check(set_interface(&slot,1,1)==0 && set_interface(&slot,2,1)==0,
           "audio can start again after reconfiguration");
     before=acknowledgements;

@@ -32,7 +32,15 @@ def is_set_report(brequest):
 for r in rows:
     if len(r) < 12:
         continue
-    direction, request_type, payload, t = r[2], r[3], r[11], float(r[1])
+    try:
+        t = float(r[1])
+    except ValueError:
+        continue  # a malformed time cell is skipped, not fatal
+    direction, request_type, payload = r[2], r[3], r[11]
+    try:
+        bytes.fromhex(payload)
+    except ValueError:
+        continue  # a malformed hex cell is skipped, not fatal (fmt() and the SET loops decode it)
     # SET_REPORT (class, host -> interface). SET_IDLE/SET_PROTOCOL share the request type
     # and carry no payload (a re-plug during the capture): classify by bRequest and length.
     if direction == '0x00' and request_type == '0x21' and is_set_report(r[4]) and len(payload) >= 6:

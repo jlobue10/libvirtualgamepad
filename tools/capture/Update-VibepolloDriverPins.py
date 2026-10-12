@@ -125,7 +125,8 @@ def tag_survives(text, old_tag):
     return tag_pattern(old_tag).search(text) is not None
 
 
-REPOSITORY_PATTERN = re.compile(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+')
+# owner/name; neither segment may be `.` or `..` (the value is spliced into `gh api repos/...` paths).
+REPOSITORY_PATTERN = re.compile(r'(?!\.\.?/)[A-Za-z0-9_.-]+/(?!\.\.?$)[A-Za-z0-9_.-]+')
 # The tag is spliced into five files, a commit message and `gh` arguments.
 TAG_PATTERN = re.compile(r'v\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?')
 
