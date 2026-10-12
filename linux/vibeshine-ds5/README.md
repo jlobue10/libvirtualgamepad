@@ -40,6 +40,7 @@ Run the portable ownership/concurrency regression without loading a module:
 ```sh
 python3 linux/vibeshine-ds5/test_slot_lifecycle.py
 python3 linux/vibeshine-ds5/test_audio_setup.py
+python3 linux/vibeshine-ds5/test_ep0_control_state.py
 ```
 
 The harnesses run production file operations and audio endpoint setup with fake
