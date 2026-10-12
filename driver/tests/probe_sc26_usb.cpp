@@ -136,6 +136,7 @@ bool read_report(HANDLE handle, std::array<unsigned char, 64> &report, DWORD &by
   OVERLAPPED operation {}; operation.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
   bytes = 0;
   bool ok = false;
+  if (!operation.hEvent) return false;
   bool started = ReadFile(handle, report.data(), static_cast<DWORD>(report.size()), nullptr, &operation) != FALSE;
   if (started || GetLastError() == ERROR_IO_PENDING) {
     if (WaitForSingleObject(operation.hEvent, timeout_ms) == WAIT_OBJECT_0) {
@@ -300,21 +301,42 @@ int monitor(int seconds) {
   return 0;
 }
 
+// The value following an option, unless the next argument is itself an option
+// (`--hold --monitor` used to swallow "--monitor" as the hold duration).
+static const char *next_value(int argc, char **argv, int &i) {
+  if (i + 1 < argc && std::strncmp(argv[i + 1], "--", 2) != 0) return argv[++i];
+  return nullptr;
+}
+static int int_arg(int argc, char **argv, int &i, int fallback) {
+  const char *v = next_value(argc, argv, i);
+  return v ? std::atoi(v) : fallback;
+}
+static double double_arg(int argc, char **argv, int &i, double fallback) {
+  const char *v = next_value(argc, argv, i);
+  const double d = v ? std::atof(v) : fallback;
+  return std::isfinite(d) ? d : fallback;  // NaN would pass std::clamp untouched
+}
+// timeBeginPeriod(1) for the whole run, released on every return path.
+struct timer_period {
+  timer_period() { timeBeginPeriod(1); }
+  ~timer_period() { timeEndPeriod(1); }
+};
+
 int main(int argc, char **argv) {
   constexpr unsigned slot = 7;
   int hold_seconds = 0, monitor_seconds = 0, circle_mode = 0, stick_rate = 0, stick_update_rate = 0, burst = 1;
   int stick_clip = 32767;
   double turn_seconds = 3.0, circle_scale = 1.2;
   for (int i = 1; i < argc; ++i) {
-    if (std::strcmp(argv[i], "--hold") == 0) hold_seconds = (i + 1 < argc) ? std::atoi(argv[++i]) : 600;
-    if (std::strcmp(argv[i], "--monitor") == 0) monitor_seconds = (i + 1 < argc) ? std::atoi(argv[++i]) : 120;
-    if (std::strcmp(argv[i], "--circle") == 0) circle_mode = (i + 1 < argc) ? std::atoi(argv[++i]) : 0;
-    if (std::strcmp(argv[i], "--rate") == 0) stick_rate = (i + 1 < argc) ? std::atoi(argv[++i]) : 0;
-    if (std::strcmp(argv[i], "--turn") == 0) turn_seconds = (i + 1 < argc) ? std::atof(argv[++i]) : 3.0;
-    if (std::strcmp(argv[i], "--update") == 0) stick_update_rate = (i + 1 < argc) ? std::atoi(argv[++i]) : 0;
-    if (std::strcmp(argv[i], "--burst") == 0) burst = (i + 1 < argc) ? std::atoi(argv[++i]) : 3;
-    if (std::strcmp(argv[i], "--scale") == 0) circle_scale = (i + 1 < argc) ? std::atof(argv[++i]) : 1.2;
-    if (std::strcmp(argv[i], "--clip") == 0) stick_clip = (i + 1 < argc) ? std::atoi(argv[++i]) : 32766;
+    if (std::strcmp(argv[i], "--hold") == 0) hold_seconds = int_arg(argc, argv, i, 600);
+    else if (std::strcmp(argv[i], "--monitor") == 0) monitor_seconds = int_arg(argc, argv, i, 120);
+    else if (std::strcmp(argv[i], "--circle") == 0) circle_mode = int_arg(argc, argv, i, 0);
+    else if (std::strcmp(argv[i], "--rate") == 0) stick_rate = int_arg(argc, argv, i, 0);
+    else if (std::strcmp(argv[i], "--turn") == 0) turn_seconds = double_arg(argc, argv, i, 3.0);
+    else if (std::strcmp(argv[i], "--update") == 0) stick_update_rate = int_arg(argc, argv, i, 0);
+    else if (std::strcmp(argv[i], "--burst") == 0) burst = int_arg(argc, argv, i, 3);
+    else if (std::strcmp(argv[i], "--scale") == 0) circle_scale = double_arg(argc, argv, i, 1.2);
+    else if (std::strcmp(argv[i], "--clip") == 0) stick_clip = int_arg(argc, argv, i, 32766);
   }
   circle_mode = std::clamp(circle_mode, 0, 5);
   // Seconds per stick turn (the wired unit's owner took ~0.9 s per turn in the Steam capture) and
@@ -334,7 +356,7 @@ int main(int argc, char **argv) {
   stick_clip = std::clamp(stick_clip, 16384, 32767);
   // Sleep() granularity is 15.6 ms by default, which makes a 16 ms sleep last up to 31 ms; the
   // hold's cadences depend on 4..50 ms sleeps being honoured, so ask for 1 ms timer resolution.
-  timeBeginPeriod(1);
+  const timer_period period;
   if (monitor_seconds > 0) return monitor(monitor_seconds);
   GUID guid; HidD_GetHidGuid(&guid);
   const auto before = existing_paths(guid);

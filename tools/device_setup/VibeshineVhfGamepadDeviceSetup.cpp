@@ -357,7 +357,9 @@ void validate_owned_inf_path(const std::wstring &absolute_path) {
 }
 
 [[nodiscard]] bool owned_root_devices_match_driver_version(const std::wstring &expected_version) {
-  device_info_set device_set {SetupDiGetClassDevsW(nullptr, nullptr, nullptr, DIGCF_ALLCLASSES)};
+  // DIGCF_PRESENT: a phantom (not present) root node must not count as ours, or
+  // creation is blocked and UpdateDriver reports NO_MORE_ITEMS with nothing to roll back.
+  device_info_set device_set {SetupDiGetClassDevsW(nullptr, nullptr, nullptr, DIGCF_ALLCLASSES | DIGCF_PRESENT)};
   if (device_set.get() == INVALID_HANDLE_VALUE) {
     return false;
   }
@@ -395,7 +397,9 @@ struct root_device_state {
 };
 
 [[nodiscard]] std::vector<root_device_state> enumerate_root_devices() {
-  device_info_set device_set {SetupDiGetClassDevsW(nullptr, nullptr, nullptr, DIGCF_ALLCLASSES)};
+  // DIGCF_PRESENT: a phantom (not present) root node must not count as ours, or
+  // creation is blocked and UpdateDriver reports NO_MORE_ITEMS with nothing to roll back.
+  device_info_set device_set {SetupDiGetClassDevsW(nullptr, nullptr, nullptr, DIGCF_ALLCLASSES | DIGCF_PRESENT)};
   if (device_set.get() == INVALID_HANDLE_VALUE) {
     throw_last_error("SetupDiGetClassDevsW");
   }
