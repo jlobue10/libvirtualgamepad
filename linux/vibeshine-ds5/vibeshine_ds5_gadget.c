@@ -648,8 +648,14 @@ static int ds5_setup(struct usb_gadget *gadget, const struct usb_ctrlrequest *ct
 			 * value to mute/volume so GET_CUR reflects it. */
 			slot->ep0_pending_cs = cs;
 			slot->ep0_req->length = min_t(u16, wLength, 8);
+			slot->ep0_req->zero = 0;
 			slot->ep0_req->complete = ds5_ep0_complete;
-			return usb_ep_queue(gadget->ep0, slot->ep0_req, GFP_ATOMIC);
+			n = usb_ep_queue(gadget->ep0, slot->ep0_req, GFP_ATOMIC);
+			/* A rejected queue has no completion callback. Do not let the next
+			 * EP0 response apply its bytes as this failed SET_CUR's value. */
+			if (n)
+				slot->ep0_pending_cs = 0;
+			return n;
 		}
 	}
 

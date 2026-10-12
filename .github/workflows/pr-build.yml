@@ -31,6 +31,8 @@ jobs:
         run: python3 linux/vibeshine-ds5/test_audio_setup.py
       - name: Gate the Linux DualSense control-request routing
         run: python3 linux/vibeshine-ds5/test_control_setup_gate.py
+      - name: Test Linux DualSense EP0 state after a failed audio-control queue
+        run: python3 linux/vibeshine-ds5/test_ep0_control_state.py
 
   driver:
     runs-on: windows-2022
