@@ -122,6 +122,21 @@ int main(void) {
   check(slot.volume==-1024 && slot.ep0_pending_cs==0,"cancelled completion clears state without applying bytes");
   setup(&gadget,0x21,1,0x200,0,2); complete(&ep,0,1);
   check(slot.volume==-1024 && slot.ep0_pending_cs==0,"short volume completion cannot change the control");
+  // #37: both OUT data stages stall when the ep0 request is gone (pre-#37 dereferenced NULL).
+  slot.ep0_req=NULL; queued=NULL;
+  check(setup(&gadget,0x21,1,0x100,0,1)==-ESHUTDOWN && !queued && slot.ep0_pending_cs==0,
+        "a UAC SET_CUR without an ep0 request stalls and arms nothing");
+  check(setup(&gadget,0x21,9,0x205,3,64)==-ESHUTDOWN && !queued,"a HID SET_REPORT without an ep0 request stalls");
+  slot.ep0_req=&req;
+  // D31-02: the selector belongs to the request on the wire, not to the slot's history.
+  slot.ep0_pending_cs=2;
+  check(setup(&gadget,0xa1,0x81,0x200,0,2)==0 && slot.ep0_pending_cs==0,"an IN reply clears a selector no completion retired");
+  put_unaligned_le16((u16)-2048,data); complete(&ep,0,2);
+  check(slot.volume==-1024,"...and its bytes are not applied as volume");
+  slot.ep0_pending_cs=1;
+  check(setup(&gadget,0x21,9,0x205,3,2)==0 && slot.ep0_pending_cs==0,"a HID SET_REPORT clears a stale audio selector");
+  data[0]=1; complete(&ep,0,2);
+  check(slot.mute==1,"...and the mute set earlier is untouched by it");
   printf("%d checks; %d failures\n",checks,failures);
   return failures!=0;
 }

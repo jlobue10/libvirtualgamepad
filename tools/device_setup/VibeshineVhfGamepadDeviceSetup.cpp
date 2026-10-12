@@ -396,10 +396,13 @@ struct root_device_state {
   ULONG problem {};
 };
 
-[[nodiscard]] std::vector<root_device_state> enumerate_root_devices() {
-  // DIGCF_PRESENT: a phantom (not present) root node must not count as ours, or
-  // creation is blocked and UpdateDriver reports NO_MORE_ITEMS with nothing to roll back.
-  device_info_set device_set {SetupDiGetClassDevsW(nullptr, nullptr, nullptr, DIGCF_ALLCLASSES | DIGCF_PRESENT)};
+// present_only (the default): a phantom (registered, not present) root node must not
+// count as ours for install/reactivate/cycle/status, or creation is blocked and
+// UpdateDriver reports NO_MORE_ITEMS with nothing to roll back. `remove` passes false
+// so a phantom is deleted too instead of accumulating one instance per failed cycle.
+[[nodiscard]] std::vector<root_device_state> enumerate_root_devices(const bool present_only = true) {
+  const DWORD flags = DIGCF_ALLCLASSES | (present_only ? DIGCF_PRESENT : 0);
+  device_info_set device_set {SetupDiGetClassDevsW(nullptr, nullptr, nullptr, flags)};
   if (device_set.get() == INVALID_HANDLE_VALUE) {
     throw_last_error("SetupDiGetClassDevsW");
   }
@@ -1287,7 +1290,8 @@ void print_status() {
 
 [[nodiscard]] int run_remove() {
   require_elevation();
-  const auto devices = enumerate_root_devices();
+  // Every registered node, present or phantom: remove_device_instance opens by instance id.
+  const auto devices = enumerate_root_devices(false);
   DWORD removed = 0;
   bool reboot_required = false;
   for (const auto &device : devices) {

@@ -217,6 +217,10 @@ static int ds5_queue_ep0(struct ds5_slot *slot, const void *data, unsigned int l
 
 	if (!req)
 		return -ESHUTDOWN;
+	/* The selector belongs to the request on the wire: an IN reply or an ack is
+	 * never a SET_CUR data stage, so a stage a UDC dropped without a giveback
+	 * cannot have this request's bytes applied as mute/volume. */
+	slot->ep0_pending_cs = 0;
 	if (len > wLength)
 		len = wLength;
 	if (len && data)
@@ -611,6 +615,7 @@ static int ds5_setup(struct usb_gadget *gadget, const struct usb_ctrlrequest *ct
 			 * whatever ep0_req->buf last carried. */
 			if (!slot->ep0_req)
 				return -ESHUTDOWN;
+			slot->ep0_pending_cs = 0;	/* HID bytes must not reach the audio controls */
 			slot->ep0_req->length = min_t(u16, wLength, 64);
 			slot->ep0_req->zero = 0;
 			slot->ep0_req->complete = ds5_ep0_complete;

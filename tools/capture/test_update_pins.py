@@ -60,7 +60,7 @@ for key, bad in (('tag', 'v0.1.0-beta.120 '), ('sha', 'A' * 64), ('rev', 'b' * 3
                  ('asset', '../evil.zip'), ('protocol', '3)|('), ('protocol', 3)):
     check(pins.validate_new_pins(dict(good_pins, **{key: bad})) is not None, f'lock pin {key}={bad!r} is refused')
 check(pins.REPOSITORY_PATTERN.fullmatch('jlobue10/libvirtualgamepad') is not None, 'owner/name repositories are accepted')
-for bad in ('jlobue10', 'a/b/c', 'a b/c', 'owner/name;rm'):
+for bad in ('jlobue10', 'a/b/c', 'a b/c', 'owner/name;rm', 'owner/..', 'owner/.', '../name', './name'):
     check(pins.REPOSITORY_PATTERN.fullmatch(bad) is None, f'repository {bad!r} is refused')
 for good in ('v0.1.0-beta.132', 'v1.2.3', 'v0.1.0-rc.1'):
     check(pins.TAG_PATTERN.fullmatch(good) is not None, f'tag {good!r} is accepted')

@@ -45,7 +45,10 @@ for ok, name in (
     (all('slot->ep0_pending_cs = 0;' in block(m) for m in ('static void ds5_disconnect(', 'static void ds5_unbind(')) and
      'slot->ep0_pending_cs = 0;' in block('\tif (req == USB_REQ_SET_CONFIGURATION'),
      'disconnect, unbind and reconfiguration clear a pending audio-control data stage'),
-    (setup.count('if (!slot->ep0_req)') >= 2, 'the HID SET_REPORT and UAC SET_CUR data stages stall when the ep0 request is gone'),
+    ('if (!slot->ep0_req)' in hid and 'if (!slot->ep0_req)' in setup[uac_start:],
+     'the HID SET_REPORT and UAC SET_CUR data stages each stall when the ep0 request is gone'),
+    ('slot->ep0_pending_cs = 0;' in hid and 'slot->ep0_pending_cs = 0;' in block('static int ds5_queue_ep0('),
+     'a HID OUT stage and every ep0 IN reply/ack clear a stale audio selector before queueing'),
 ):
     print(('PASS: ' if ok else 'FAIL: ') + name)
     failures += not ok

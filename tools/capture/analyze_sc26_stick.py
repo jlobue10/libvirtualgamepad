@@ -25,7 +25,11 @@ with open(path, encoding="utf-8") as f:
         buttons = struct.unpack_from("<I", b, 2)[0]
         lx, ly, rx, ry = struct.unpack_from("<hhhh", b, 10)
         ts = struct.unpack_from("<I", b, 30)[0]
-        reports.append((float(parts[1]), seq, buttons, lx, ly, rx, ry, ts))
+        try:
+            t = float(parts[1])
+        except ValueError:
+            continue  # a malformed time cell is skipped, not fatal
+        reports.append((t, seq, buttons, lx, ly, rx, ry, ts))
 
 print("0x42 reports:", len(reports))
 if len(reports) < 2:

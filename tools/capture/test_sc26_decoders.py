@@ -37,10 +37,12 @@ with tempfile.TemporaryDirectory(prefix="sc26-decoders-") as temp:
         + "4\t0.004\t0x00\t0xa1\t0x01\t0x0301\t0x0002\t64\t3\t1\t0\t\n"
         + "5\t0.005\t0x01\t\t\t\t\t\t\t\t64\t" + get_reply + "\n"
         + "6\t0.006\t0x00\t0x21\n"                                             # a short row
-        + "7\t0.007\t0x00\t0x21\t0x09\t0x0301\t0x0002\t64\t3\t1\t64\t" + "01ae05" + "\n",  # 0xae with no body
+        + "7\t0.007\t0x00\t0x21\t0x09\t0x0301\t0x0002\t64\t3\t1\t64\t" + "01ae05" + "\n"   # 0xae with no body
+        + "8\tabc\t0x00\t0x21\t0x09\t0x0301\t0x0002\t64\t3\t1\t64\t" + set_report + "\n"   # malformed time cell
+        + "9\t0.009\t0x00\t0x21\t0x09\t0x0301\t0x0002\t64\t3\t1\t64\t" + "zz" + set_report[2:] + "\n",  # malformed hex
         encoding="utf-8")
     result = run("Decode-Sc26Handshake.py", handshake)
-    check(result.returncode == 0, "the handshake decoder survives SET_IDLE/SET_PROTOCOL rows without payload, short rows and a bodiless 0xae")
+    check(result.returncode == 0, "the handshake decoder survives SET_IDLE/SET_PROTOCOL rows without payload, short rows, a bodiless 0xae and malformed time/hex cells")
     check("type=0x87" in result.stdout, "the real SET_REPORT is still decoded")
     if result.returncode != 0:
         print(result.stderr[-600:])

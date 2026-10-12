@@ -12,6 +12,10 @@ namespace lvg {
 // Opens the driver's private WDF device interface, never a HID child path.
 // A connection owns the controller slots it creates. Closing it releases those
 // slots in the driver even if the caller did not explicitly destroy them.
+// Thread safety: a connection may be used from one thread at a time; calls on
+// the same connection from several threads must be serialised by the caller
+// (the driver serialises per handle, the library does not). Distinct
+// connections are independent.
 class client final {
  public:
   client() noexcept = default;
