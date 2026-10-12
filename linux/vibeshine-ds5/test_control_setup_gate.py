@@ -25,7 +25,10 @@ def block(marker):
 
 
 setup = block('static int ds5_setup(')
-hid = block('\tif ((wIndex & 0xff) == 3 && (type & USB_TYPE_MASK) == USB_TYPE_CLASS)')
+hid = block('\tif ((wIndex & 0xff) == 3 && (type & USB_TYPE_MASK) == USB_TYPE_CLASS')
+get_interface = block('\tif (req == USB_REQ_GET_INTERFACE')
+hid_head = setup[setup.index('\tif ((wIndex & 0xff) == 3 && (type & USB_TYPE_MASK) == USB_TYPE_CLASS'):]
+hid_head = hid_head[:hid_head.index('{')]
 uac_start = setup.index('/* UAC SET_CUR / GET_CUR')
 uac_head = setup[uac_start:setup.index('{', uac_start)]
 failures = 0
@@ -36,6 +39,9 @@ for ok, name in (
     ('req == 0x01 && !(type & USB_DIR_IN)' in setup[uac_start:], 'UAC SET_CUR consumes an OUT data stage only'),
     ('(type & USB_RECIP_MASK) == USB_RECIP_INTERFACE' in uac_head and '(wIndex & 0xff) <= 2' in uac_head,
      'the audio-control block answers the audio interfaces 0-2 only'),
+    ('(type & USB_RECIP_MASK) == USB_RECIP_INTERFACE' in hid_head, 'the HID block answers the interface recipient only'),
+    ('slot->config != 1 || wIndex > 3' in get_interface, 'GET_INTERFACE stalls when unconfigured or for an interface the descriptor lacks'),
+    ('slot->ep0_pending_cs = cs;' in setup and 'slot->ep0_pending_cs == 0x02' in source, 'a UAC SET_CUR data stage is applied to mute/volume on completion'),
 ):
     print(('PASS: ' if ok else 'FAIL: ') + name)
     failures += not ok

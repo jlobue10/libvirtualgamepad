@@ -50,7 +50,6 @@ function Resolve-SdkTool {
     }
 
     $sdkRoots = @($AdditionalSearchRoots) + @(
-        'D:\Software\WinSDK\bin',
         (Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFilesX86)) 'Windows Kits\10\bin')
     )
     foreach ($sdkRoot in $sdkRoots) {
@@ -201,7 +200,6 @@ if ($SkipInfVerif) {
     Write-Warning 'Skipping InfVerif. Verify this INF on a host with the WDK InfVerif tool before producing a release package.'
 } else {
     $wdkToolRoots = @(
-        'D:\Software\WinSDK\Tools',
         (Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFilesX86)) 'Windows Kits\10\Tools')
     )
     $infVerif = Resolve-SdkTool -Name 'InfVerif.exe' -ExplicitPath $InfVerifPath -AdditionalSearchRoots $wdkToolRoots
