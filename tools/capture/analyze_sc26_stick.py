@@ -22,6 +22,9 @@ with open(path, encoding="utf-8") as f:
         reports.append((float(parts[1]), seq, buttons, lx, ly, rx, ry, ts))
 
 print("0x42 reports:", len(reports))
+if len(reports) < 2:
+    print("too few 0x42 reports for cadence or stick statistics")
+    sys.exit(0)
 # cadence
 dt = [reports[i][0] - reports[i - 1][0] for i in range(1, len(reports))]
 dts = [(reports[i][7] - reports[i - 1][7]) & 0xFFFFFFFF for i in range(1, len(reports))]

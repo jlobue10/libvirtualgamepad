@@ -291,9 +291,14 @@ $interfaces = Get-UsbPcapInterfaces
 if ($interfaces.Count -eq 0 -and -not $FromPcap) { throw 'No \\.\USBPcapN control devices exist. Reboot after installing USBPcap (the root-hub filter attaches at boot), then retry.' }
 if ($interfaces.Count -gt 0) { Write-Information "USBPcap root hubs: $($interfaces -join ', ')" }
 $interfaceFile = Join-Path $OutputDir 'usbpcap-interface.txt'
-# Unique per run, not per shell: USBPcapCMD refuses to overwrite an existing output file.
-$tmp = Join-Path $env:TEMP "sc26-capture-$(Get-Date -Format yyyyMMdd-HHmmss)-$PID"
-New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+# Unique per run, not per shell: USBPcapCMD refuses to overwrite an existing output file. The raw
+# hub captures are read back by elevated tshark passes and copied into the repository, so the
+# directory is unpredictable, never adopted if it already exists (no -Force: a pre-planted
+# directory or junction fails the run) and readable only by Administrators and SYSTEM.
+$tmp = Join-Path $env:TEMP ("sc26-capture-" + [System.IO.Path]::GetRandomFileName().Replace('.', ''))
+New-Item -ItemType Directory -Path $tmp -ErrorAction Stop | Out-Null
+& icacls $tmp /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Could not restrict the capture directory $tmp (icacls exit $LASTEXITCODE)." }
 
 switch ($Phase) {
     'Plugin' {

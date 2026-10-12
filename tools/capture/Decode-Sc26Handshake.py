@@ -11,13 +11,31 @@ import csv
 import sys
 from collections import Counter, defaultdict
 
+# Replies carry arbitrary bytes rendered with U+FFFD; a cp1252 console must not abort the dump.
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+
 path = sys.argv[1] if len(sys.argv) > 1 else 'captures/sc26-steam-control.tsv'
 rows = list(csv.reader(open(path, encoding='utf-8-sig'), delimiter='\t'))[1:]
 seq = []
 pending = None
+
+
+def is_set_report(brequest):
+    # tshark prints bRequest as hex or decimal depending on the dissector; SET_REPORT is 9.
+    try:
+        return int(brequest, 0) == 9
+    except (TypeError, ValueError):
+        return False
+
+
 for r in rows:
+    if len(r) < 12:
+        continue
     direction, request_type, payload, t = r[2], r[3], r[11], float(r[1])
-    if direction == '0x00' and request_type == '0x21':      # SET_REPORT (class, host -> interface)
+    # SET_REPORT (class, host -> interface). SET_IDLE/SET_PROTOCOL share the request type
+    # and carry no payload (a re-plug during the capture): classify by bRequest and length.
+    if direction == '0x00' and request_type == '0x21' and is_set_report(r[4]) and len(payload) >= 6:
         seq.append(('SET', t, payload))
     elif direction == '0x00' and request_type == '0xa1':    # GET_REPORT request
         pending = t
@@ -30,6 +48,8 @@ NUL = b'\x00'
 
 def fmt(payload):
     b = bytes.fromhex(payload)
+    if len(b) < 3:
+        return f"short payload ({len(b)} bytes): {payload}"
     typ, length, body = b[1], b[2], b[3:3 + b[2]]
     s = f"type=0x{typ:02x} len={length:2d} payload={body.hex()}"
     if typ == 0xae and length > 1:
