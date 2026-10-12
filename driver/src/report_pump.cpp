@@ -21,9 +21,9 @@ void report_pump::store(
 }
 
 void report_pump::reset() noexcept {
-  // VHF can take a report before it has ever signalled readiness, so the first
-  // one must not wait for a signal that only follows a submission.
-  ready_ = true;
+  // Custom buffering requires a VHF readiness callback even for the first
+  // submission. Reset is only called before creation or after VhfDelete.
+  ready_ = false;
   priority_count_ = 0;
   transition_head_ = 0;
   transition_count_ = 0;
@@ -107,37 +107,37 @@ void report_pump::set_ready() noexcept {
   ready_ = true;
 }
 
-bool report_pump::take(report_buffer *const out) noexcept {
-  if (out == nullptr || !ready_) {
-    return false;
+report_buffer *report_pump::take() noexcept {
+  if (!ready_) {
+    return nullptr;
   }
 
   if (priority_count_ > 0) {
-    *out = priority_[0];
+    in_flight_ = priority_[0];
     for (std::uint8_t i = 1; i < priority_count_; ++i) {
       priority_[i - 1] = priority_[i];
     }
     --priority_count_;
     ready_ = false;
-    return true;
+    return &in_flight_;
   }
 
   if (transition_count_ > 0) {
-    *out = transitions_[transition_head_];
+    in_flight_ = transitions_[transition_head_];
     transition_head_ = static_cast<std::uint8_t>((transition_head_ + 1) % k_transition_capacity);
     --transition_count_;
     ready_ = false;
-    return true;
+    return &in_flight_;
   }
 
   if (have_latest_) {
-    *out = latest_;
+    in_flight_ = latest_;
     have_latest_ = false;
     ready_ = false;
-    return true;
+    return &in_flight_;
   }
 
-  return false;
+  return nullptr;
 }
 
 }  // namespace lvg::driver

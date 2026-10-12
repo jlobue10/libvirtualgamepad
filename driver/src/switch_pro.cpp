@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "switch_pro.h"
+#include "report_pump.h"
 
 #include <cstring>
 
@@ -464,6 +465,28 @@ std::size_t handle_switch_subcommand(
       reply->ack = 0x80;
       return sizeof(switch_subcommand_reply);
   }
+}
+
+bool queue_switch_subcommand_reply(
+  const std::uint8_t *const report,
+  const std::size_t size,
+  const input_state_request &last_input,
+  switch_state *const state,
+  report_pump &pump) noexcept {
+  switch_subcommand_reply reply {};
+  if (handle_switch_subcommand(report, size, last_input, state, &reply) == 0 ||
+      !pump.enqueue(&reply, sizeof(reply), reply.report_id, report_kind::priority)) {
+    return false;
+  }
+
+  if (reply.subcommand == k_switch_sub_set_input_mode && size >= 12 &&
+      report[11] == k_switch_input_report_id) {
+    // Chromium waits for controller data after the mode acknowledgement.
+    // Sending only the 0x21 reply leaves a quiet controller uninitialized.
+    const switch_input_report input = encode_switch_input(last_input, state);
+    return pump.enqueue(&input, sizeof(input), input.report_id, report_kind::continuous);
+  }
+  return true;
 }
 
 bool decode_switch_rumble(

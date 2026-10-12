@@ -58,9 +58,10 @@ class report_pump {
   // Marks VHF able to accept another report.
   void set_ready() noexcept;
 
-  // Takes the next report to submit. Returns false when VHF is not ready or
-  // nothing is waiting; on success the pump is no longer ready.
-  [[nodiscard]] bool take(report_buffer *out) noexcept;
+  // Takes the next report into storage owned by the pump. VHF retains this
+  // buffer until its next readiness callback; enqueue must not overwrite it.
+  // Returns nullptr until VHF grants readiness or when nothing is waiting.
+  [[nodiscard]] report_buffer *take() noexcept;
 
   [[nodiscard]] bool ready() const noexcept {
     return ready_;
@@ -90,6 +91,7 @@ class report_pump {
   static void store(report_buffer *slot, const void *data, std::uint32_t length, std::uint8_t report_id) noexcept;
 
   bool ready_ {};
+  report_buffer in_flight_ {};
   report_buffer priority_[k_priority_capacity] {};
   std::uint8_t priority_count_ {};
   report_buffer transitions_[k_transition_capacity] {};

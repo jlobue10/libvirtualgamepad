@@ -39,6 +39,17 @@ void check(const bool condition, const std::string &what) {
   }
 }
 
+// Existing ordering tests inspect a completed copy. Lifetime tests below keep
+// the actual submission pointer, as VHF does with custom buffering enabled.
+bool take_report(lvg::driver::report_pump &pump, lvg::driver::report_buffer &out) {
+  const auto *const report = pump.take();
+  if (report == nullptr) {
+    return false;
+  }
+  out = *report;
+  return true;
+}
+
 struct report_bits_t {
   std::size_t input = 0;
   std::size_t output = 0;
@@ -1173,11 +1184,95 @@ int main() {
           "a foreign report id is rejected");
   }
 
+  for (const bool have_client_input : {false, true}) {
+    // Reproduce Chromium's final initialization step with no later client
+    // packets. The mode ACK must be followed by a fresh full input report.
+    switch_state state {};
+    state.reset();
+    input_state_request last {};
+    last.buttons = have_client_input ? button_mask::south : 0;
+    report_pump pump;
+    pump.reset();
+    pump.set_ready();
+    if (have_client_input) {
+      const auto initial = encode_switch_input(last, &state);
+      pump.enqueue(&initial, sizeof(initial), initial.report_id, report_kind::continuous);
+      check(pump.take() != nullptr, "initial client input consumed before initialization");
+      pump.set_ready();
+    }
+
+    std::uint8_t request[12] {};
+    request[0] = k_switch_rumble_subcommand_id;
+    request[10] = k_switch_sub_set_input_mode;
+    request[11] = k_switch_input_report_id;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+      check(queue_switch_subcommand_reply(request, sizeof(request), last, &state, pump),
+            "full input mode queues its replies even on repeated initialization");
+      const auto *ack = pump.take();
+      check(ack != nullptr && ack->report_id == k_switch_subcommand_reply_id &&
+              ack->data[14] == k_switch_sub_set_input_mode,
+            "mode acknowledgement precedes full state");
+      check(pump.take() == nullptr, "full state waits until VHF releases the ACK");
+      pump.set_ready();
+      const auto *full = pump.take();
+      check(full != nullptr && full->report_id == k_switch_input_report_id &&
+              full->length == sizeof(switch_input_report),
+            "quiet controller supplies full state without another client packet");
+      if (full != nullptr) {
+        check(full->data[3] == (have_client_input ? switch_b : 0),
+              "initialization preserves the latest buttons or neutral defaults");
+      }
+      pump.set_ready();
+      check(pump.take() == nullptr, "initialization does not start an unbounded report loop");
+    }
+
+    // Other modes and a command missing its mode byte owe only an ACK.
+    request[11] = 0x3F;
+    for (const std::size_t size : {sizeof(request), sizeof(request) - 1}) {
+      check(queue_switch_subcommand_reply(request, size, last, &state, pump),
+            "other or missing input mode is acknowledged");
+      check(pump.take() != nullptr, "mode ACK available");
+      pump.set_ready();
+      check(pump.take() == nullptr, "no unsolicited full report for another input mode");
+    }
+  }
+
+  {
+    // A deferred consumer retains the actual submission buffer after the
+    // submitting function returns, while other producers change every queue.
+    report_pump pump;
+    pump.reset();
+    const auto submit = [&pump]() {
+      const std::uint8_t local[] = {0x30, 0x12, 0x34, 0x56};
+      pump.enqueue(local, sizeof(local), 0x30, report_kind::continuous);
+      pump.set_ready();
+      return pump.take();
+    };
+    const auto *retained = submit();
+    check(retained != nullptr, "deferred consumer receives an owned report");
+    const std::uint8_t next[] = {0x21, 0xFF, 0xFF, 0xFF};
+    pump.enqueue(next, sizeof(next), 0x21, report_kind::priority);
+    for (int i = 0; i < k_transition_capacity + 2; ++i) {
+      pump.enqueue(next, sizeof(next), 0x21, report_kind::transition);
+      pump.enqueue(next, sizeof(next), 0x21, report_kind::continuous);
+    }
+    check(pump.take() == nullptr, "queued writes cannot reuse an outstanding buffer");
+    const std::uint8_t expected[] = {0x30, 0x12, 0x34, 0x56};
+    check(retained != nullptr && retained->length == sizeof(expected) &&
+            retained->report_id == 0x30 &&
+            std::memcmp(retained->data, expected, sizeof(expected)) == 0,
+          "deferred read survives function return and pending queue mutation");
+    pump.set_ready();
+    const auto *after_release = pump.take();
+    check(after_release != nullptr && after_release->report_id == 0x21,
+          "next report becomes available only after the readiness callback");
+  }
+
   {
     // ---- report pacing ----
     report_pump pump;
     pump.reset();
-    check(pump.ready(), "a fresh pump can send immediately");
+    check(!pump.ready(), "a fresh pump waits for the first VHF callback");
     check(pump.empty(), "a fresh pump has nothing waiting");
 
     const std::uint8_t a[4] = {1, 0, 0, 0};
@@ -1185,44 +1280,45 @@ int main() {
     const std::uint8_t c[4] = {3, 0, 0, 0};
     report_buffer out {};
 
-    // The first report goes out without waiting for a readiness signal, which
-    // only ever arrives after a submission.
     check(pump.enqueue(a, sizeof(a), 1, report_kind::continuous), "first enqueue");
-    check(pump.take(&out), "first report is taken");
+    check(!take_report(pump, out), "initial input stays queued until VHF is ready");
+    pump.set_ready();
+    check(take_report(pump, out), "first report is taken");
     check(out.data[0] == 1, "first report is the one enqueued");
     check(!pump.ready(), "taking a report consumes readiness");
-    check(!pump.take(&out), "nothing more is sent until VHF is ready again");
+    check(!take_report(pump, out), "nothing more is sent until VHF is ready again");
 
     // While waiting, newer continuous state replaces older: a consumer that
     // was busy should see where the stick is now, not where it was.
     check(pump.enqueue(b, sizeof(b), 1, report_kind::continuous), "second continuous");
     check(pump.enqueue(c, sizeof(c), 1, report_kind::continuous), "third continuous");
     pump.set_ready();
-    check(pump.take(&out), "a report is waiting");
+    check(take_report(pump, out), "a report is waiting");
     check(out.data[0] == 3, "the newest continuous state is sent, got " + std::to_string(out.data[0]));
     pump.set_ready();
-    check(!pump.take(&out), "the superseded state was not also queued");
+    check(!take_report(pump, out), "the superseded state was not also queued");
   }
 
   {
     // Transitions must survive: dropping one loses a press or a release.
     report_pump pump;
     pump.reset();
+    pump.set_ready();
     report_buffer out {};
     const std::uint8_t press[2] = {0xA1, 0};
     const std::uint8_t release[2] = {0xA0, 0};
     const std::uint8_t moving[2] = {0xB0, 0};
 
     check(pump.enqueue(press, sizeof(press), 1, report_kind::transition), "press");
-    check(pump.take(&out) && out.data[0] == 0xA1, "press sent");
+    check(take_report(pump, out) && out.data[0] == 0xA1, "press sent");
 
     check(pump.enqueue(release, sizeof(release), 1, report_kind::transition), "release");
     check(pump.enqueue(moving, sizeof(moving), 1, report_kind::continuous), "movement");
     pump.set_ready();
-    check(pump.take(&out), "something is waiting");
+    check(take_report(pump, out), "something is waiting");
     check(out.data[0] == 0xA0, "the release is sent before newer movement");
     pump.set_ready();
-    check(pump.take(&out) && out.data[0] == 0xB0, "movement follows");
+    check(take_report(pump, out) && out.data[0] == 0xB0, "movement follows");
   }
 
   {
@@ -1230,38 +1326,40 @@ int main() {
     // afterwards, or it can restore the button state the transition changed.
     report_pump pump;
     pump.reset();
+    pump.set_ready();
     report_buffer out {};
     const std::uint8_t press[2] = {0xA1, 0};
     const std::uint8_t moving_while_pressed[2] = {0xB1, 0};
     const std::uint8_t release[2] = {0xA0, 0};
 
     check(pump.enqueue(press, sizeof(press), 1, report_kind::transition), "press queued");
-    check(pump.take(&out) && out.data[0] == 0xA1, "press sent");
+    check(take_report(pump, out) && out.data[0] == 0xA1, "press sent");
     check(pump.enqueue(moving_while_pressed, sizeof(moving_while_pressed), 1,
                        report_kind::continuous),
           "movement while pressed queued");
     check(pump.enqueue(release, sizeof(release), 1, report_kind::transition), "release queued");
     pump.set_ready();
-    check(pump.take(&out) && out.data[0] == 0xA0, "release supersedes older movement");
+    check(take_report(pump, out) && out.data[0] == 0xA0, "release supersedes older movement");
     pump.set_ready();
-    check(!pump.take(&out), "stale pressed movement was discarded");
+    check(!take_report(pump, out), "stale pressed movement was discarded");
   }
 
   {
     // Initialization replies go ahead of controller state.
     report_pump pump;
     pump.reset();
+    pump.set_ready();
     report_buffer out {};
     const std::uint8_t state[2] = {0x30, 0};
     const std::uint8_t reply[2] = {0x21, 0};
 
-    check(pump.take(&out) == false, "nothing to send yet");
+    check(take_report(pump, out) == false, "nothing to send yet");
     check(pump.enqueue(state, sizeof(state), 0x30, report_kind::transition), "state queued");
     check(pump.enqueue(reply, sizeof(reply), 0x21, report_kind::priority), "reply queued");
-    check(pump.take(&out), "a report is taken");
+    check(take_report(pump, out), "a report is taken");
     check(out.report_id == 0x21, "the handshake reply goes first");
     pump.set_ready();
-    check(pump.take(&out) && out.report_id == 0x30, "controller state follows");
+    check(take_report(pump, out) && out.report_id == 0x30, "controller state follows");
   }
 
   {
@@ -1270,11 +1368,12 @@ int main() {
     // release is still queued reads as released rather than held.
     report_pump pump;
     pump.reset();
+    pump.set_ready();
     report_buffer out {};
     std::uint8_t payload[2] = {0, 0};
 
     check(pump.enqueue(payload, sizeof(payload), 1, report_kind::transition), "prime");
-    check(pump.take(&out), "prime sent");
+    check(take_report(pump, out), "prime sent");
 
     for (int i = 0; i < k_transition_capacity + 4; ++i) {
       payload[0] = static_cast<std::uint8_t>(i);
@@ -1289,7 +1388,7 @@ int main() {
     std::uint8_t last = 0;
     for (int i = 0; i < k_transition_capacity; ++i) {
       pump.set_ready();
-      if (pump.take(&out)) {
+      if (take_report(pump, out)) {
         last = out.data[0];
       }
     }
@@ -1302,6 +1401,7 @@ int main() {
     // player would call a discrete change.
     report_pump pump;
     pump.reset();
+    pump.set_ready();
     check(pump.classify(0, 0, 0) == report_kind::transition,
           "the first state is always a transition");
     check(pump.classify(0, 0, 0) == report_kind::continuous, "an unchanged state is continuous");

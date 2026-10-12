@@ -26,6 +26,8 @@
 
 namespace lvg::driver {
 
+class report_pump;
+
 inline constexpr std::uint8_t k_switch_input_report_id = 0x30;      // Full input report.
 inline constexpr std::uint8_t k_switch_subcommand_reply_id = 0x21;  // Subcommand acknowledgement.
 inline constexpr std::uint8_t k_switch_usb_reply_id = 0x81;         // USB handshake reply.
@@ -180,6 +182,16 @@ struct switch_state {
   const input_state_request &last_input,
   switch_state *state,
   switch_subcommand_reply *reply) noexcept;
+
+// Queues the acknowledgement and, when full input mode is requested, a fresh
+// 0x30 report after it. Initialization must finish even if client input is idle.
+// The caller serializes access to the state and pump.
+[[nodiscard]] bool queue_switch_subcommand_reply(
+  const std::uint8_t *report,
+  std::size_t size,
+  const input_state_request &last_input,
+  switch_state *state,
+  report_pump &pump) noexcept;
 
 // Decodes the four-byte-per-side rumble payload carried by 0x01 and 0x10.
 [[nodiscard]] bool decode_switch_rumble(
