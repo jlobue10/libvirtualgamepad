@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Exercise production DualSense audio endpoint setup with injected USB failures.
 
-Compiles the real enable/disable functions and SET_INTERFACE branch. Only USB
-endpoint operations and EP0 acknowledgement are faked; no kernel is loaded.
+Compiles the real audio enable/disable functions and SET_INTERFACE/CONFIGURATION
+branches. USB endpoint operations, HID lifecycle and EP0 acknowledgement are
+boundary fakes; no kernel is loaded.
 --baseline reads HEAD.
 """
 from pathlib import Path
@@ -38,6 +39,7 @@ typedef uint8_t u8;
 typedef uint16_t u16;
 #define GFP_ATOMIC 0
 #define USB_REQ_SET_INTERFACE 11
+#define USB_REQ_SET_CONFIGURATION 9
 #define USB_RECIP_INTERFACE 1
 @@CONSTANTS@@
 struct usb_request;
@@ -51,7 +53,8 @@ struct ds5_slot {
   struct usb_ep *ep_iso_out, *ep_iso_in;
   struct usb_request *req_iso_out[DS5_ISO_OUT_Q], *req_iso_in[DS5_ISO_IN_Q];
   bool iso_out_enabled, iso_in_enabled;
-  u8 alt1, alt2;
+  u8 alt1, alt2, config;
+  bool hid_enabled;
 };
 static int ds5_ep_iso_out_desc, ds5_ep_iso_in_desc;
 static int failure, queue_calls, enables, disables, acknowledgements, pcm_events, invalid_queues;
@@ -99,10 +102,18 @@ static void usb_ep_dequeue(struct usb_ep *ep, struct usb_request *req) {
 static int ds5_queue_ep0(struct ds5_slot *slot, const void *buf, int length, int requested) {
   (void)slot; (void)buf; (void)length; (void)requested; ++acknowledgements; return 0;
 }
+static int hid_enables, hid_disables;
+static int ds5_enable_hid(struct ds5_slot *slot) { ++hid_enables; slot->hid_enabled=true; return 0; }
+static void ds5_disable_hid(struct ds5_slot *slot) { ++hid_disables; slot->hid_enabled=false; }
 @@METHODS@@
 static int set_interface(struct ds5_slot *slot, u16 wIndex, u16 wValue) {
-  int n; u8 req=USB_REQ_SET_INTERFACE, type=USB_RECIP_INTERFACE;
+  int n; u8 req=USB_REQ_SET_INTERFACE, type=USB_RECIP_INTERFACE; u16 wLength=0;
   @@SET_INTERFACE@@
+  return -EINVAL;
+}
+static int set_configuration(struct ds5_slot *slot, u16 wValue) {
+  int n; u8 req=USB_REQ_SET_CONFIGURATION, type=0; u16 wIndex=0, wLength=0;
+  @@SET_CONFIGURATION@@
   return -EINVAL;
 }
 static int checks, failures;
@@ -115,7 +126,7 @@ int main(void) {
     for (int fail=0; fail<=depth; ++fail) {
       struct usb_ep out={}, in={};
       struct usb_request outs[DS5_ISO_OUT_Q]={}, ins[DS5_ISO_IN_Q]={};
-      struct ds5_slot slot={.ep_iso_out=&out,.ep_iso_in=&in};
+      struct ds5_slot slot={.ep_iso_out=&out,.ep_iso_in=&in,.config=1};
       for (int i=0;i<DS5_ISO_OUT_Q;++i) { outs[i].buf=outs[i].storage; outs[i].complete=ds5_iso_out_complete; slot.req_iso_out[i]=&outs[i]; }
       for (int i=0;i<DS5_ISO_IN_Q;++i) { ins[i].buf=ins[i].storage; ins[i].complete=ds5_iso_in_complete; slot.req_iso_in[i]=&ins[i]; }
       invalid_queues=0;
@@ -149,6 +160,50 @@ int main(void) {
       check(invalid_queues==0, "no request was ever queued while still linked");
     }
   }
+  {
+    struct usb_ep out={}, in={};
+    struct usb_request outs[DS5_ISO_OUT_Q]={}, ins[DS5_ISO_IN_Q]={};
+    struct ds5_slot slot={.ep_iso_out=&out,.ep_iso_in=&in};
+    for(int i=0;i<DS5_ISO_OUT_Q;++i) { outs[i].buf=outs[i].storage; outs[i].complete=ds5_iso_out_complete; slot.req_iso_out[i]=&outs[i]; }
+    for(int i=0;i<DS5_ISO_IN_Q;++i) { ins[i].buf=ins[i].storage; ins[i].complete=ds5_iso_in_complete; slot.req_iso_in[i]=&ins[i]; }
+    failure=-1; invalid_queues=queue_calls=enables=disables=acknowledgements=0;
+    check(set_interface(&slot,1,1)<0 && !out.enabled && acknowledgements==0,
+          "SET_INTERFACE before configuration is rejected without enabling audio");
+    ds5_disable_iso_out(&slot); slot.alt1=0;
+    check(set_configuration(&slot,1)==0 && slot.config==1 && slot.hid_enabled,
+          "the advertised configuration enables HID");
+    check(set_interface(&slot,1,1)==0 && set_interface(&slot,2,1)==0 && out.queued==DS5_ISO_OUT_Q && in.queued==DS5_ISO_IN_Q,
+          "configured playback and capture can both stream");
+    for (unsigned int value=2; value<=3; ++value) {
+      int before=acknowledgements;
+      check(set_configuration(&slot,value)<0 && slot.config==1 && slot.alt1==1 && slot.alt2==1 && acknowledgements==before,
+            "an unsupported configuration cannot change the active device");
+    }
+    slot.config=1;  // restore the baseline's invalid value to continue independent checks
+    for (unsigned int intf=0; intf<4; ++intf) {
+      int before=acknowledgements;
+      check(set_interface(&slot,intf,2)<0 && acknowledgements==before,
+            "an alternate setting absent from the descriptor is rejected");
+    }
+    slot.alt1=slot.alt2=1;
+    int before=acknowledgements;
+    check(set_interface(&slot,0x101,0)<0 && slot.alt1==1 && out.enabled && acknowledgements==before,
+          "a high-byte interface alias cannot stop active playback");
+    // Baseline may have stopped playback; re-enable it before testing reconfiguration.
+    set_interface(&slot,1,1);
+    check(set_configuration(&slot,1)==0 && slot.config==1 && slot.alt1==0 && slot.alt2==0 &&
+          !out.enabled && !in.enabled && out.queued==0 && in.queued==0 && slot.hid_enabled,
+          "reapplying the configuration retires both audio queues and resets alternate settings");
+    check(set_interface(&slot,1,1)==0 && set_interface(&slot,2,1)==0,
+          "audio can start again after reconfiguration");
+    before=acknowledgements;
+    check(set_configuration(&slot,0x100)<0 && slot.config==1 && out.enabled && in.enabled && acknowledgements==before,
+          "a high-byte configuration alias cannot unconfigure the device");
+    check(set_configuration(&slot,0)==0 && slot.config==0 && !slot.hid_enabled && !out.enabled && !in.enabled &&
+          out.queued==0 && in.queued==0 && slot.alt1==0 && slot.alt2==0,
+          "configuration zero cleanly stops every endpoint");
+    check(invalid_queues==0, "configuration transitions never queue an already-linked audio request");
+  }
   printf("%d checks; %d failures\n",checks,failures);
   return failures!=0;
 }
@@ -156,6 +211,7 @@ int main(void) {
 code = code.replace('@@CONSTANTS@@', '\n'.join(re.findall(r'^#define DS5_ISO_(?:OUT|IN)_(?:MAXP|Q) .+$', source, re.M)))
 code = code.replace('@@METHODS@@', '\n'.join(block('static ' + name) for name in [
     'int ds5_enable_iso_out(', 'void ds5_disable_iso_out(', 'int ds5_enable_iso_in(', 'void ds5_disable_iso_in(']))
+code = code.replace('@@SET_CONFIGURATION@@', block('\tif (req == USB_REQ_SET_CONFIGURATION'))
 code = code.replace('@@SET_INTERFACE@@', block('\tif (req == USB_REQ_SET_INTERFACE'))
 code = code.replace('@@HANDLERS@@', '\n'.join(block('static void ' + name) for name in ['ds5_iso_out_complete(', 'ds5_iso_in_complete(']))
 with tempfile.TemporaryDirectory() as temp:
