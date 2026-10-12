@@ -45,6 +45,9 @@ jobs:
           persist-credentials: false
       - name: Test the kit installer's argument quoting and exit gates
         run: ./tools/tests/test-install-testdriver-gates.ps1
+
+      - name: Test the evidence collector's config.vdf selection
+        run: ./tools/tests/test-collect-evidence-gates.ps1
       - name: Test the capture script's inline Ctrl+C helper
         run: ./tools/tests/test-capture-helper.ps1
       - name: Build and verify the unsigned driver package with the WDK

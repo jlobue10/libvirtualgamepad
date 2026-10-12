@@ -168,6 +168,7 @@ struct ds5_slot {
 	bool int_in_busy;
 	s16 volume;
 	u8 mute;
+	u8 ep0_pending_cs;		/* UAC control selector of an in-flight SET_CUR data stage */
 };
 
 /* Serialize lifecycle and I/O admission on each open file. Slot locks alone do
@@ -326,6 +327,19 @@ static void ds5_iso_in_complete(struct usb_ep *ep, struct usb_request *req)
 
 static void ds5_ep0_complete(struct usb_ep *ep, struct usb_request *req)
 {
+	struct ds5_slot *slot = req->context;
+	const u8 *data = req->buf;
+
+	/* A completed UAC SET_CUR data stage: apply mute (1 byte) or volume (2 bytes). */
+	if (!slot || !slot->ep0_pending_cs)
+		return;
+	if (req->status == 0) {
+		if (slot->ep0_pending_cs == 0x01 && req->actual >= 1)
+			slot->mute = data[0];
+		else if (slot->ep0_pending_cs == 0x02 && req->actual >= 2)
+			slot->volume = (s16)get_unaligned_le16(data);
+	}
+	slot->ep0_pending_cs = 0;
 }
 
 static int ds5_enable_hid(struct ds5_slot *slot)
@@ -569,15 +583,20 @@ static int ds5_setup(struct usb_gadget *gadget, const struct usb_ctrlrequest *ct
 	if (req == USB_REQ_GET_INTERFACE && (type & USB_DIR_IN)) {
 		u8 alt = 0;
 
-		if ((wIndex & 0xff) == 1)
+		/* Unconfigured, or an interface the descriptor does not have (no
+		 * high-byte alias either, matching SET_INTERFACE): stall. */
+		if (slot->config != 1 || wIndex > 3)
+			return -EINVAL;
+		if (wIndex == 1)
 			alt = slot->alt1;
-		else if ((wIndex & 0xff) == 2)
+		else if (wIndex == 2)
 			alt = slot->alt2;
 		return ds5_queue_ep0(slot, &alt, 1, wLength);
 	}
 
-	/* HID class GET/SET_REPORT on interface 3 */
-	if ((wIndex & 0xff) == 3 && (type & USB_TYPE_MASK) == USB_TYPE_CLASS) {
+	/* HID class GET/SET_REPORT on interface 3 (interface recipient only) */
+	if ((wIndex & 0xff) == 3 && (type & USB_TYPE_MASK) == USB_TYPE_CLASS &&
+	    (type & USB_RECIP_MASK) == USB_RECIP_INTERFACE) {
 		u8 report = wValue & 0xff;
 
 		if (req == 0x01 && (type & USB_DIR_IN)) { /* GET_REPORT */
@@ -625,7 +644,11 @@ static int ds5_setup(struct usb_gadget *gadget, const struct usb_ctrlrequest *ct
 			}
 		}
 		if (req == 0x01 && !(type & USB_DIR_IN)) { /* SET_CUR: OUT data stage only */
+			/* The data stage completes in ds5_ep0_complete(), which applies the
+			 * value to mute/volume so GET_CUR reflects it. */
+			slot->ep0_pending_cs = cs;
 			slot->ep0_req->length = min_t(u16, wLength, 8);
+			slot->ep0_req->complete = ds5_ep0_complete;
 			return usb_ep_queue(gadget->ep0, slot->ep0_req, GFP_ATOMIC);
 		}
 	}
@@ -686,6 +709,8 @@ static int ds5_bind(struct usb_gadget *gadget, struct usb_gadget_driver *driver)
 	}
 
 	slot->ep0_req = ds5_alloc_req(gadget->ep0, 512, ds5_ep0_complete);
+	if (slot->ep0_req)
+		slot->ep0_req->context = slot;
 	slot->req_int_in = ds5_alloc_req(slot->ep_int_in, DS5_INT_MAXP, ds5_int_in_complete);
 	slot->req_int_out = ds5_alloc_req(slot->ep_int_out, DS5_INT_MAXP, ds5_int_out_complete);
 	if (!slot->ep0_req || !slot->req_int_in || !slot->req_int_out) {

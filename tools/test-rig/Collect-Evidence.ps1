@@ -29,7 +29,9 @@ foreach ($name in 'controller.txt', 'controller_ui.txt', 'console_log.txt', 'boo
 }
 $vdf = Join-Path $SteamDir 'config\config.vdf'
 if (Test-Path $vdf) {
-    Get-Content $vdf | Select-String 'SDL_GamepadBind|28de|1302' | ForEach-Object { $_.Line.Trim() } | Set-Content (Join-Path $OutDir 'steam-config-gamepad-lines.txt')
+    # Only the gamepad binding keys: an unanchored vendor/product id match also caught
+    # encrypted login-token hex lines, which the evidence zip must never carry.
+    Get-Content $vdf | Select-String -CaseSensitive -Pattern '^\s*"SDL_GamepadBind' | ForEach-Object { $_.Line.Trim() } | Set-Content (Join-Path $OutDir 'steam-config-gamepad-lines.txt')
 }
 if (Test-Path $VibepolloLog) {
     Get-Content $VibepolloLog | Select-String -Pattern 'gamepad|vhf|Steam Controller|virtual' | ForEach-Object { $_.Line } |
