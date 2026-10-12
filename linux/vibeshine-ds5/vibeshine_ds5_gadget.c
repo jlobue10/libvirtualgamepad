@@ -161,12 +161,20 @@ struct ds5_slot {
 	/* The fd that CREATEd this slot: only it may read, write or destroy it, and
 	 * a reader blocked on the slot's wait queue is released when it goes away. */
 	struct file *owner;
+	u32 generation;
 	bool hid_enabled;
 	bool iso_out_enabled;
 	bool iso_in_enabled;
 	bool int_in_busy;
 	s16 volume;
 	u8 mute;
+};
+
+/* Serialize lifecycle and I/O admission on each open file. Slot locks alone do
+ * not serialize concurrent CREATEs targeting different slots on the same fd. */
+struct ds5_file {
+	struct mutex lock;
+	struct ds5_slot *slot;
 };
 
 static struct ds5_slot ds5_slots[VIBESHINE_DS5_SLOTS];
@@ -695,7 +703,7 @@ static void ds5_unbind(struct usb_gadget *gadget)
 	slot->req_int_out = NULL;
 	slot->gadget = NULL;
 	slot->created = false;
-	slot->owner = NULL;
+	WRITE_ONCE(slot->owner, NULL);
 	mutex_unlock(&slot->lock);
 	wake_up_interruptible_all(&slot->wait);
 }
@@ -730,31 +738,48 @@ static const struct usb_gadget_driver ds5_driver_template = {
 
 static int ds5_open(struct inode *inode, struct file *file)
 {
-	file->private_data = NULL;
+	struct ds5_file *ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
+
+	if (!ctx)
+		return -ENOMEM;
+	mutex_init(&ctx->lock);
+	file->private_data = ctx;
 	return 0;
 }
 
 static int ds5_release(struct inode *inode, struct file *file)
 {
-	struct ds5_slot *slot = file->private_data;
+	struct ds5_file *ctx = file->private_data;
+	struct ds5_slot *slot;
 
-	if (!slot)
-		return 0;
-	mutex_lock(&slot->lock);
-	if (slot->created && slot->gadget)
-		usb_gadget_disconnect(slot->gadget);
-	slot->created = false;
-	slot->owner = NULL;
-	mutex_unlock(&slot->lock);
+	mutex_lock(&ctx->lock);
+	slot = ctx->slot;
+	if (slot) {
+		mutex_lock(&slot->lock);
+		/* Unbind may already have retired this ownership and rebind may have
+		 * handed the slot to another fd. Never retire the replacement. */
+		if (slot->owner == file) {
+			if (slot->created && slot->gadget)
+				usb_gadget_disconnect(slot->gadget);
+			slot->created = false;
+			WRITE_ONCE(slot->owner, NULL);
+		}
+		ctx->slot = NULL;
+		mutex_unlock(&slot->lock);
+		wake_up_interruptible_all(&slot->wait);
+	}
+	mutex_unlock(&ctx->lock);
 	file->private_data = NULL;
-	wake_up_interruptible_all(&slot->wait);
+	kfree(ctx);
 	return 0;
 }
 
 static long ds5_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
+	struct ds5_file *ctx = file->private_data;
 	struct vibeshine_ds5_create create;
 	struct ds5_slot *slot;
+	unsigned long flags;
 	int ret = 0;
 
 	switch (cmd) {
@@ -763,64 +788,83 @@ static long ds5_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 			return -EFAULT;
 		if (create.slot >= VIBESHINE_DS5_SLOTS)
 			return -EINVAL;
-		/* One slot per fd: a second CREATE would strand the first slot with no owner. */
-		if (file->private_data)
+		mutex_lock(&ctx->lock);
+		if (ctx->slot) {
+			mutex_unlock(&ctx->lock);
 			return -EBUSY;
+		}
 		slot = &ds5_slots[create.slot];
 		mutex_lock(&slot->lock);
 		if (slot->created) {
-			mutex_unlock(&slot->lock);
-			return -EBUSY;
+			ret = -EBUSY;
+			goto unlock;
 		}
 		if (!slot->gadget) {
-			mutex_unlock(&slot->lock);
-			return -ENODEV;
+			ret = -ENODEV;
+			goto unlock;
 		}
 		memcpy(slot->mac, create.mac, 6);
+		spin_lock_irqsave(&slot->evlock, flags);
 		INIT_KFIFO(slot->events);
+		spin_unlock_irqrestore(&slot->evlock, flags);
+		WRITE_ONCE(slot->generation, slot->generation + 1);
 		slot->created = true;
-		slot->owner = file;
-		file->private_data = slot;
+		WRITE_ONCE(slot->owner, file);
+		ctx->slot = slot;
 		usb_gadget_connect(slot->gadget);
-		mutex_unlock(&slot->lock);
-		return 0;
+		break;
 	case VIBESHINE_DS5_DESTROY:
-		slot = file->private_data;
-		if (!slot)
+		mutex_lock(&ctx->lock);
+		slot = ctx->slot;
+		if (!slot) {
+			mutex_unlock(&ctx->lock);
 			return -ENODEV;
+		}
 		mutex_lock(&slot->lock);
-		if (slot->gadget)
-			usb_gadget_disconnect(slot->gadget);
-		slot->created = false;
-		slot->owner = NULL;
-		mutex_unlock(&slot->lock);
-		file->private_data = NULL;
-		/* A reader blocked on this slot must not wake up as somebody else's reader. */
+		if (slot->owner == file) {
+			if (slot->gadget)
+				usb_gadget_disconnect(slot->gadget);
+			slot->created = false;
+			WRITE_ONCE(slot->owner, NULL);
+		} else {
+			ret = -ENODEV;
+		}
+		ctx->slot = NULL;
+		/* Also wake a read whose fd immediately CREATEs the slot again. */
 		wake_up_interruptible_all(&slot->wait);
-		return 0;
+		break;
 	default:
-		ret = -ENOTTY;
+		return -ENOTTY;
 	}
+unlock:
+	mutex_unlock(&slot->lock);
+	mutex_unlock(&ctx->lock);
 	return ret;
 }
 
 static ssize_t ds5_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
 {
-	struct ds5_slot *slot = file->private_data;
+	struct ds5_file *ctx = file->private_data;
+	struct ds5_slot *slot;
 	u8 report[VIBESHINE_DS5_INPUT_SIZE];
+	ssize_t result;
 
-	if (!slot || !slot->created)
-		return -ENODEV;
 	if (count < 1 || count > VIBESHINE_DS5_INPUT_SIZE)
 		return -EINVAL;
-	if (copy_from_user(report, buf, count))
-		return -EFAULT;
+	mutex_lock(&ctx->lock);
+	slot = ctx->slot;
+	if (!slot) {
+		result = -ENODEV;
+		goto unlock_file;
+	}
+	if (copy_from_user(report, buf, count)) {
+		result = -EFAULT;
+		goto unlock_file;
+	}
 	mutex_lock(&slot->lock);
-	/* Re-check under the lock: a DESTROY or an unbind may have raced the test above,
-	 * and a slot re-CREATEd by another fd belongs to that fd now. */
 	if (!slot->created || slot->owner != file || !slot->gadget) {
-		mutex_unlock(&slot->lock);
-		return -ENODEV;
+		result = -ENODEV;
+		goto unlock_slot;
 	}
 	memset(slot->input, 0, sizeof(slot->input));
 	memcpy(slot->input, report, count);
@@ -835,46 +879,71 @@ static ssize_t ds5_write(struct file *file, const char __user *buf, size_t count
 		ret = usb_ep_queue(slot->ep_int_in, slot->req_int_in, GFP_KERNEL);
 		if (ret) {
 			smp_store_release(&slot->int_in_busy, false);
-			mutex_unlock(&slot->lock);
-			return ret;
+			result = ret;
+			goto unlock_slot;
 		}
 	}
+	result = count;
+unlock_slot:
 	mutex_unlock(&slot->lock);
-	return count;
+unlock_file:
+	mutex_unlock(&ctx->lock);
+	return result;
 }
 
 static ssize_t ds5_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 {
-	struct ds5_slot *slot = file->private_data;
+	struct ds5_file *ctx = file->private_data;
+	struct ds5_slot *slot;
 	struct vibeshine_ds5_event ev;
 	unsigned long flags;
+	u32 generation;
 	int ret;
 
-	if (!slot)
-		return -ENODEV;
 	if (count < sizeof(ev))
 		return -EINVAL;
-	if (file->f_flags & O_NONBLOCK) {
+	mutex_lock(&ctx->lock);
+	slot = ctx->slot;
+	if (!slot) {
+		mutex_unlock(&ctx->lock);
+		return -ENODEV;
+	}
+	mutex_lock(&slot->lock);
+	if (!slot->created || slot->owner != file) {
+		mutex_unlock(&slot->lock);
+		mutex_unlock(&ctx->lock);
+		return -ENODEV;
+	}
+	generation = slot->generation;
+	mutex_unlock(&slot->lock);
+	mutex_unlock(&ctx->lock);
+
+	/* Never hold either mutex while sleeping: DESTROY must be able to wake us.
+	 * The owner pointer alone cannot detect DESTROY/CREATE by the same fd. */
+	if (!(file->f_flags & O_NONBLOCK)) {
+		ret = wait_event_interruptible(slot->wait, kfifo_len(&slot->events) > 0 ||
+					       READ_ONCE(slot->owner) != file ||
+					       READ_ONCE(slot->generation) != generation);
+		if (ret)
+			return ret;
+	}
+
+	mutex_lock(&ctx->lock);
+	mutex_lock(&slot->lock);
+	/* Check and dequeue under the lifecycle locks for blocking AND nonblocking
+	 * reads. A slot must not change ownership between this check and kfifo_get. */
+	if (ctx->slot != slot || !slot->created || slot->owner != file ||
+	    slot->generation != generation) {
+		ret = -ENODEV;
+	} else {
 		spin_lock_irqsave(&slot->evlock, flags);
 		ret = kfifo_get(&slot->events, &ev) ? 0 : -EAGAIN;
 		spin_unlock_irqrestore(&slot->evlock, flags);
-		if (ret)
-			return ret;
-	} else {
-		ret = wait_event_interruptible(slot->wait, kfifo_len(&slot->events) > 0 ||
-					       READ_ONCE(slot->owner) != file);
-		if (ret)
-			return ret;
-		/* Destroyed (or re-created by another fd) while we slept: its events are not ours. */
-		if (READ_ONCE(slot->owner) != file)
-			return -ENODEV;
-		spin_lock_irqsave(&slot->evlock, flags);
-		if (!kfifo_get(&slot->events, &ev)) {
-			spin_unlock_irqrestore(&slot->evlock, flags);
-			return -EAGAIN;
-		}
-		spin_unlock_irqrestore(&slot->evlock, flags);
 	}
+	mutex_unlock(&slot->lock);
+	mutex_unlock(&ctx->lock);
+	if (ret)
+		return ret;
 	if (copy_to_user(buf, &ev, sizeof(ev)))
 		return -EFAULT;
 	return sizeof(ev);
@@ -882,16 +951,24 @@ static ssize_t ds5_read(struct file *file, char __user *buf, size_t count, loff_
 
 static __poll_t ds5_poll(struct file *file, poll_table *wait)
 {
-	struct ds5_slot *slot = file->private_data;
+	struct ds5_file *ctx = file->private_data;
+	struct ds5_slot *slot;
 	__poll_t mask = POLLOUT | POLLWRNORM;
 
-	if (!slot)
+	mutex_lock(&ctx->lock);
+	slot = ctx->slot;
+	if (!slot) {
+		mutex_unlock(&ctx->lock);
 		return POLLERR;
+	}
+	mutex_lock(&slot->lock);
 	poll_wait(file, &slot->wait, wait);
-	if (READ_ONCE(slot->owner) != file)
-		return POLLERR | POLLHUP;
-	if (kfifo_len(&slot->events))
+	if (!slot->created || slot->owner != file)
+		mask = POLLERR | POLLHUP;
+	else if (kfifo_len(&slot->events))
 		mask |= POLLIN | POLLRDNORM;
+	mutex_unlock(&slot->lock);
+	mutex_unlock(&ctx->lock);
 	return mask;
 }
 
