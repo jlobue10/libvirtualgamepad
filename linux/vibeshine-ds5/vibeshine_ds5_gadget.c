@@ -512,18 +512,20 @@ static int ds5_setup(struct usb_gadget *gadget, const struct usb_ctrlrequest *ct
 	}
 
 	if (req == USB_REQ_SET_CONFIGURATION && type == 0) {
-		slot->config = wValue & 0xff;
-		if (slot->config) {
+		/* Only configuration 1 is advertised. Reject reserved/high bits before
+		 * changing any endpoint state. Reapplying it resets every interface. */
+		if (wValue > 1 || wIndex || wLength)
+			return -EINVAL;
+		ds5_disable_iso_out(slot);
+		ds5_disable_iso_in(slot);
+		ds5_disable_hid(slot);
+		slot->alt1 = slot->alt2 = 0;
+		slot->config = 0;
+		if (wValue) {
 			n = ds5_enable_hid(slot);
-			if (n) {
-				slot->config = 0;
+			if (n)
 				return n;
-			}
-		} else {
-			ds5_disable_iso_out(slot);
-			ds5_disable_iso_in(slot);
-			ds5_disable_hid(slot);
-			slot->alt1 = slot->alt2 = 0;
+			slot->config = 1;
 		}
 		return ds5_queue_ep0(slot, NULL, 0, 0);
 	}
@@ -532,8 +534,13 @@ static int ds5_setup(struct usb_gadget *gadget, const struct usb_ctrlrequest *ct
 		return ds5_queue_ep0(slot, &slot->config, 1, wLength);
 
 	if (req == USB_REQ_SET_INTERFACE && type == USB_RECIP_INTERFACE) {
-		u8 alt = wValue & 0xff;
-		u8 intf = wIndex & 0xff;
+		u16 alt = wValue;
+		u16 intf = wIndex;
+
+		/* Audio interfaces have alternates 0/1; control and HID only have 0. */
+		if (slot->config != 1 || wLength || intf > 3 ||
+		    alt > ((intf == 1 || intf == 2) ? 1 : 0))
+			return -EINVAL;
 
 		if (intf == 1) {
 			if (alt) {
