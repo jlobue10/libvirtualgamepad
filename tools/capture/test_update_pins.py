@@ -53,6 +53,12 @@ check(pins.check_lock_against_tag(good, 'v0.1.0-beta.120', {'object': {'type': '
       'an annotated tag object is not taken for the commit')
 check(pins.check_lock_against_tag(good, 'v0.1.0-beta.120', {'object': {'type': 'commit', 'sha': commit.upper()}}) is None,
       'commit hashes compare case-insensitively')
+good_pins = dict(tag='v0.1.0-beta.120', sha='a' * 64, rev='b' * 40, ver='10/12/2026,0.1.0.180',
+                 asset='libvirtualgamepad-0.1.0-beta.120-windows-x64.zip', protocol='3')
+check(pins.validate_new_pins(good_pins) is None, 'well-formed lock pins are accepted')
+for key, bad in (('tag', 'v0.1.0-beta.120 '), ('sha', 'A' * 64), ('rev', 'b' * 39), ('ver', '10/12/2026,0.1.0'),
+                 ('asset', '../evil.zip'), ('protocol', '3)|('), ('protocol', 3)):
+    check(pins.validate_new_pins(dict(good_pins, **{key: bad})) is not None, f'lock pin {key}={bad!r} is refused')
 check(pins.REPOSITORY_PATTERN.fullmatch('jlobue10/libvirtualgamepad') is not None, 'owner/name repositories are accepted')
 for bad in ('jlobue10', 'a/b/c', 'a b/c', 'owner/name;rm'):
     check(pins.REPOSITORY_PATTERN.fullmatch(bad) is None, f'repository {bad!r} is refused')

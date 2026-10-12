@@ -40,8 +40,13 @@ typedef uint16_t u16;
 #define USB_REQ_SET_INTERFACE 11
 #define USB_RECIP_INTERFACE 1
 @@CONSTANTS@@
-struct usb_ep { void *driver_data; const void *desc; bool enabled; int queued; };
-struct usb_request { unsigned int length; unsigned char storage[DS5_ISO_OUT_MAXP]; void *buf; };
+struct usb_request;
+struct usb_ep { void *driver_data; const void *desc; bool enabled; int queued; struct usb_request *list[64]; };
+struct usb_request {
+  unsigned int length, actual; int status; bool linked;
+  unsigned char storage[DS5_ISO_OUT_MAXP]; void *buf;
+  void (*complete)(struct usb_ep *ep, struct usb_request *req);
+};
 struct ds5_slot {
   struct usb_ep *ep_iso_out, *ep_iso_in;
   struct usb_request *req_iso_out[DS5_ISO_OUT_Q], *req_iso_in[DS5_ISO_IN_Q];
@@ -49,22 +54,44 @@ struct ds5_slot {
   u8 alt1, alt2;
 };
 static int ds5_ep_iso_out_desc, ds5_ep_iso_in_desc;
-static int failure, queue_calls, enables, disables, acknowledgements;
+static int failure, queue_calls, enables, disables, acknowledgements, pcm_events, invalid_queues;
+#define VIBESHINE_DS5_EVENT_PCM 2
+static void ds5_push_event(struct ds5_slot *slot, u8 type, const void *data, unsigned int len) {
+  (void)slot; (void)data; (void)len; if (type==VIBESHINE_DS5_EVENT_PCM) ++pcm_events;
+}
 static int usb_ep_enable(struct usb_ep *ep) {
   ++enables; if (failure==0) return -EIO;
   ep->enabled=true; return 0;
 }
+// Modelled on vibeshine_ds5_udc.c: a linked request or a missing descriptor is -EINVAL, a
+// disabled endpoint -ESHUTDOWN; otherwise the request joins the endpoint's list.
 static int usb_ep_queue(struct usb_ep *ep, struct usb_request *req, int flags) {
-  (void)req; (void)flags;
+  (void)flags;
   if (++queue_calls==failure) return -ENOMEM;
+  if (req->linked || !ep->desc) { ++invalid_queues; return -EINVAL; }
   if (!ep->enabled) return -ESHUTDOWN;
-  ++ep->queued; return 0;
+  req->linked=true; ep->list[ep->queued++]=req; return 0;
+}
+// Completing a request unlinks it first; the handler may requeue it (so the list is
+// snapshotted before the completions run).
+static void give_back_all(struct usb_ep *ep, int status) {
+  struct usb_request *batch[64]; int n=ep->queued;
+  memcpy(batch, ep->list, sizeof(batch[0])*(size_t)n); ep->queued=0;
+  for (int i=0;i<n;++i) { batch[i]->linked=false; batch[i]->status=status; batch[i]->actual=0; if (batch[i]->complete) batch[i]->complete(ep, batch[i]); }
 }
 static void usb_ep_disable(struct usb_ep *ep) {
-  ++disables; ep->enabled=false; ep->queued=0;
-  // The loopback UDC completes queued requests with -ESHUTDOWN on disable.
+  ++disables; ep->enabled=false;
+  give_back_all(ep, -ESHUTDOWN);   // the real UDC nukes synchronously with -ESHUTDOWN
 }
-static void usb_ep_dequeue(struct usb_ep *ep, struct usb_request *req) { (void)ep; (void)req; }
+static void usb_ep_dequeue(struct usb_ep *ep, struct usb_request *req) {
+  for (int i=0;i<ep->queued;++i) if (ep->list[i]==req) {
+    for (int j=i+1;j<ep->queued;++j) ep->list[j-1]=ep->list[j];
+    --ep->queued; req->linked=false; req->status=-ECONNRESET; req->actual=0;
+    if (req->complete) req->complete(ep, req);   // the production handler requeues on this
+    return;
+  }
+}
+@@HANDLERS@@
 static int ds5_queue_ep0(struct ds5_slot *slot, const void *buf, int length, int requested) {
   (void)slot; (void)buf; (void)length; (void)requested; ++acknowledgements; return 0;
 }
@@ -85,8 +112,9 @@ int main(void) {
       struct usb_ep out={}, in={};
       struct usb_request outs[DS5_ISO_OUT_Q]={}, ins[DS5_ISO_IN_Q]={};
       struct ds5_slot slot={.ep_iso_out=&out,.ep_iso_in=&in};
-      for (int i=0;i<DS5_ISO_OUT_Q;++i) { outs[i].buf=outs[i].storage; slot.req_iso_out[i]=&outs[i]; }
-      for (int i=0;i<DS5_ISO_IN_Q;++i) { ins[i].buf=ins[i].storage; slot.req_iso_in[i]=&ins[i]; }
+      for (int i=0;i<DS5_ISO_OUT_Q;++i) { outs[i].buf=outs[i].storage; outs[i].complete=ds5_iso_out_complete; slot.req_iso_out[i]=&outs[i]; }
+      for (int i=0;i<DS5_ISO_IN_Q;++i) { ins[i].buf=ins[i].storage; ins[i].complete=ds5_iso_in_complete; slot.req_iso_in[i]=&ins[i]; }
+      invalid_queues=0;
       failure=fail; queue_calls=enables=disables=acknowledgements=0;
       int result=set_interface(&slot,direction,1);
       check(result==(fail==0 ? -EIO : -ENOMEM) && acknowledgements==0,
@@ -95,6 +123,10 @@ int main(void) {
             "failed setup does not publish an active alternate setting");
       check(!out.enabled && !in.enabled && out.queued==0 && in.queued==0,
             "failed setup disables its endpoint and retires any partially queued requests");
+      bool none_linked=true;
+      for (int i=0;i<DS5_ISO_OUT_Q;++i) none_linked&=!outs[i].linked;
+      for (int i=0;i<DS5_ISO_IN_Q;++i) none_linked&=!ins[i].linked;
+      check(none_linked, "no request stays linked after a failed setup (the handlers do not requeue on -ESHUTDOWN)");
       failure=-1; queue_calls=0;
       result=set_interface(&slot,direction,1);
       struct usb_ep *ep=direction==1 ? &out : &in;
@@ -110,6 +142,7 @@ int main(void) {
       check(result==0 && !ep->enabled && ep->queued==0 &&
             (direction==1 ? slot.alt1 : slot.alt2)==0,
             "alternate setting zero still disables and drains the audio endpoint");
+      check(invalid_queues==0, "no request was ever queued while still linked");
     }
   }
   printf("%d checks; %d failures\n",checks,failures);
@@ -120,6 +153,7 @@ code = code.replace('@@CONSTANTS@@', '\n'.join(re.findall(r'^#define DS5_ISO_(?:
 code = code.replace('@@METHODS@@', '\n'.join(block('static ' + name) for name in [
     'int ds5_enable_iso_out(', 'void ds5_disable_iso_out(', 'int ds5_enable_iso_in(', 'void ds5_disable_iso_in(']))
 code = code.replace('@@SET_INTERFACE@@', block('\tif (req == USB_REQ_SET_INTERFACE'))
+code = code.replace('@@HANDLERS@@', '\n'.join(block('static void ' + name) for name in ['ds5_iso_out_complete(', 'ds5_iso_in_complete(']))
 with tempfile.TemporaryDirectory() as temp:
     work = Path(temp)
     (work / 'test.c').write_text(code)

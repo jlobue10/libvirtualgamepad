@@ -47,7 +47,7 @@ Check ($tmpBlock -match 'GetRandomFileName') 'the capture directory name is rand
 $newItem = [regex]::Match($tmpBlock, 'New-Item[^\r\n]*\$tmp[^\r\n]*').Value
 Check ($newItem -match '-ItemType Directory' -and $newItem -notmatch '-Force') 'an existing capture directory is not adopted (no -Force, whatever the operand order)'
 Check ($tmpBlock -match 'icacls \$tmp /inheritance:r') 'the capture directory ACL is restricted to Administrators and SYSTEM'
-$guardStart = $text.LastIndexOf('if (-not $FromPcap)', $tmpStart)
+$guardStart = if ($tmpStart -ge 0) { $text.LastIndexOf('if (-not $FromPcap)', $tmpStart) } else { -1 }
 $guard = if ($guardStart -ge 0) { $text.Substring($guardStart, $tmpStart - $guardStart) } else { 'missing' }
 Check ($guardStart -ge 0 -and $guard -notmatch '\n\}' -and $guard -match '\{\s*$') 'the capture directory is only created when not reprocessing a pcap'
 
