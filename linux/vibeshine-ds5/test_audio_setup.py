@@ -53,7 +53,7 @@ struct ds5_slot {
   struct usb_ep *ep_iso_out, *ep_iso_in;
   struct usb_request *req_iso_out[DS5_ISO_OUT_Q], *req_iso_in[DS5_ISO_IN_Q];
   bool iso_out_enabled, iso_in_enabled;
-  u8 alt1, alt2, config;
+  u8 alt1, alt2, config, ep0_pending_cs;
   bool hid_enabled;
 };
 static int ds5_ep_iso_out_desc, ds5_ep_iso_in_desc;

@@ -535,6 +535,7 @@ static int ds5_setup(struct usb_gadget *gadget, const struct usb_ctrlrequest *ct
 		ds5_disable_hid(slot);
 		slot->alt1 = slot->alt2 = 0;
 		slot->config = 0;
+		slot->ep0_pending_cs = 0;	/* no data stage survives a reconfiguration */
 		if (wValue) {
 			n = ds5_enable_hid(slot);
 			if (n)
@@ -608,6 +609,8 @@ static int ds5_setup(struct usb_gadget *gadget, const struct usb_ctrlrequest *ct
 		if (req == 0x09 && !(type & USB_DIR_IN)) { /* SET_REPORT: data stage then status */
 			/* An IN request with these values must stall, not be answered with
 			 * whatever ep0_req->buf last carried. */
+			if (!slot->ep0_req)
+				return -ESHUTDOWN;
 			slot->ep0_req->length = min_t(u16, wLength, 64);
 			slot->ep0_req->zero = 0;
 			slot->ep0_req->complete = ds5_ep0_complete;
@@ -645,7 +648,12 @@ static int ds5_setup(struct usb_gadget *gadget, const struct usb_ctrlrequest *ct
 		}
 		if (req == 0x01 && !(type & USB_DIR_IN)) { /* SET_CUR: OUT data stage only */
 			/* The data stage completes in ds5_ep0_complete(), which applies the
-			 * value to mute/volume so GET_CUR reflects it. */
+			 * value to mute/volume so GET_CUR reflects it. A stage longer than the
+			 * 8-byte buffer completes -EOVERFLOW on the dummy UDC: the host sees
+			 * success and the value is not applied (no advertised control is
+			 * longer than 2 bytes). */
+			if (!slot->ep0_req)
+				return -ESHUTDOWN;
 			slot->ep0_pending_cs = cs;
 			slot->ep0_req->length = min_t(u16, wLength, 8);
 			slot->ep0_req->zero = 0;
@@ -781,6 +789,7 @@ static void ds5_unbind(struct usb_gadget *gadget)
 	ds5_disable_iso_out(slot);
 	ds5_disable_iso_in(slot);
 	ds5_disable_hid(slot);
+	slot->ep0_pending_cs = 0;
 	ds5_free_req(gadget->ep0, slot->ep0_req);
 	ds5_free_req(slot->ep_int_in, slot->req_int_in);
 	ds5_free_req(slot->ep_int_out, slot->req_int_out);
@@ -809,6 +818,9 @@ static void ds5_disconnect(struct usb_gadget *gadget)
 	ds5_disable_hid(slot);
 	slot->config = 0;
 	slot->alt1 = slot->alt2 = 0;
+	/* A UDC that drops the queued data stage without a giveback must not have the
+	 * first post-reconnect IN reply applied as mute/volume. */
+	slot->ep0_pending_cs = 0;
 }
 
 static const struct usb_gadget_driver ds5_driver_template = {

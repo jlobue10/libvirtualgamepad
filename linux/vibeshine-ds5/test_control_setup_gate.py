@@ -42,6 +42,10 @@ for ok, name in (
     ('(type & USB_RECIP_MASK) == USB_RECIP_INTERFACE' in hid_head, 'the HID block answers the interface recipient only'),
     ('slot->config != 1 || wIndex > 3' in get_interface, 'GET_INTERFACE stalls when unconfigured or for an interface the descriptor lacks'),
     ('slot->ep0_pending_cs = cs;' in setup and 'slot->ep0_pending_cs == 0x02' in source, 'a UAC SET_CUR data stage is applied to mute/volume on completion'),
+    (all('slot->ep0_pending_cs = 0;' in block(m) for m in ('static void ds5_disconnect(', 'static void ds5_unbind(')) and
+     'slot->ep0_pending_cs = 0;' in block('\tif (req == USB_REQ_SET_CONFIGURATION'),
+     'disconnect, unbind and reconfiguration clear a pending audio-control data stage'),
+    (setup.count('if (!slot->ep0_req)') >= 2, 'the HID SET_REPORT and UAC SET_CUR data stages stall when the ep0 request is gone'),
 ):
     print(('PASS: ' if ok else 'FAIL: ') + name)
     failures += not ok
