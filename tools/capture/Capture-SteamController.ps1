@@ -44,6 +44,7 @@ param(
     [string] $Phase,
 
     [string] $OutputDir = (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'captures'),
+    [ValidatePattern('^[0-9A-Fa-f]{4}$')]
     [string] $VendorId = '28DE',
     [string] $UsbPcapCmd = 'C:\Program Files\USBPcap\USBPcapCMD.exe',
     [string] $TShark = 'C:\Program Files\Wireshark\tshark.exe',

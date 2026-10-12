@@ -2052,6 +2052,11 @@ void evt_vhf_get_input_report(
       static_assert(sizeof(ds4_input_report) <= k_max_report_bytes, "ds4_input_report must fit the VHF report buffer");
       static_assert(sizeof(ds5_input_report) <= k_max_report_bytes, "ds5_input_report must fit the VHF report buffer");
       static_assert(sizeof(generic_input_report) <= k_max_report_bytes, "generic_input_report must fit the VHF report buffer");
+      static_assert(sizeof(switch_input_report) <= k_max_report_bytes, "switch_input_report must fit the VHF report buffer");
+      static_assert(sizeof(xbox_series_input_report) <= k_max_report_bytes, "xbox_series_input_report must fit the VHF report buffer");
+      static_assert(sizeof(xbox_one_input_report) <= k_max_report_bytes, "xbox_one_input_report must fit the VHF report buffer");
+      static_assert(sizeof(sc26_battery_report) <= k_max_report_bytes, "sc26_battery_report must fit the VHF report buffer");
+      static_assert(sizeof(sc26_input_report) <= k_max_report_bytes, "sc26_input_report must fit the VHF report buffer");
       std::uint8_t buffer[k_max_report_bytes] {};
       std::size_t length = 0;
       std::uint8_t report_id = 0;
