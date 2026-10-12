@@ -176,9 +176,12 @@ def main():
     problem = check_lock_against_tag(lock, args.tag, gh(f'repos/{args.repository}/git/ref/tags/{args.tag}'))
     if problem:
         sys.exit(problem)
-    new = dict(tag=lock['tag'], sha=lock['archive']['sha256'], rev=lock['source_revision'],
-               ver=lock['driver_ver'], asset=lock['archive']['name'],
-               protocol=str(lock['protocol_version']))
+    try:
+        new = dict(tag=lock['tag'], sha=lock['archive']['sha256'], rev=lock['source_revision'],
+                   ver=lock['driver_ver'], asset=lock['archive']['name'],
+                   protocol=str(lock['protocol_version']))
+    except (KeyError, TypeError) as e:
+        sys.exit(f'release lock is missing a field: {e}')
     problem = validate_new_pins(new)
     if problem:
         sys.exit(problem)

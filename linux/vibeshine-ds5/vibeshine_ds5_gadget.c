@@ -587,12 +587,16 @@ static int ds5_setup(struct usb_gadget *gadget, const struct usb_ctrlrequest *ct
 			slot->ep0_req->complete = ds5_ep0_complete;
 			return usb_ep_queue(gadget->ep0, slot->ep0_req, GFP_ATOMIC);
 		}
-		if (req == 0x0a) /* SET_IDLE */
+		if (req == 0x0a && !(type & USB_DIR_IN)) /* SET_IDLE */
 			return ds5_queue_ep0(slot, NULL, 0, 0);
+		/* Any other HID-interface class request stalls here: it must not fall
+		 * through to the audio-control branch below. */
+		return -EOPNOTSUPP;
 	}
 
-	/* UAC SET_CUR / GET_CUR for mute and volume */
-	if ((type & USB_TYPE_MASK) == USB_TYPE_CLASS) {
+	/* UAC SET_CUR / GET_CUR for mute and volume (audio interfaces 0-2 only) */
+	if ((type & USB_TYPE_MASK) == USB_TYPE_CLASS && (type & USB_RECIP_MASK) == USB_RECIP_INTERFACE &&
+	    (wIndex & 0xff) <= 2) {
 		u8 cs = wValue >> 8;
 
 		if ((type & USB_DIR_IN) && (req == 0x81 || req == 0x82 || req == 0x83 || req == 0x84)) {

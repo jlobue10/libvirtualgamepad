@@ -51,5 +51,12 @@ $guardStart = if ($tmpStart -ge 0) { $text.LastIndexOf('if (-not $FromPcap)', $t
 $guard = if ($guardStart -ge 0) { $text.Substring($guardStart, $tmpStart - $guardStart) } else { 'missing' }
 Check ($guardStart -ge 0 -and $guard -notmatch '\n\}' -and $guard -match '\{\s*$') 'the capture directory is only created when not reprocessing a pcap'
 
+# -VendorId is spliced into tshark display filters and PnP regexes: four hex digits only.
+$hidScript = Join-Path $PSScriptRoot '..\capture\Get-SteamControllerHid.ps1'
+$hidText = Get-Content -LiteralPath $hidScript -Raw
+foreach ($pair in @(@('Capture-SteamController.ps1', $text), @('Get-SteamControllerHid.ps1', $hidText))) {
+    Check ($pair[1] -match "ValidatePattern\('\^\[0-9A-Fa-f\]\{4\}\$'\)\]\s*\r?\n\s*\[string\] \`$VendorId") "$($pair[0]) validates -VendorId as four hex digits"
+}
+
 if ($failures -ne 0) { throw "$failures capture-helper gate(s) failed" }
 Write-Host 'capture helper gates passed'

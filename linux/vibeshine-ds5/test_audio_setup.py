@@ -59,17 +59,21 @@ static int failure, queue_calls, enables, disables, acknowledgements, pcm_events
 static void ds5_push_event(struct ds5_slot *slot, u8 type, const void *data, unsigned int len) {
   (void)slot; (void)data; (void)len; if (type==VIBESHINE_DS5_EVENT_PCM) ++pcm_events;
 }
+// dummy_enable refuses an already-enabled endpoint; the production enable sets desc first.
 static int usb_ep_enable(struct usb_ep *ep) {
-  ++enables; if (failure==0) return -EIO;
+  ++enables; if (ep->enabled || !ep->desc) { ++invalid_queues; return -EINVAL; }
+  if (failure==0) return -EIO;
   ep->enabled=true; return 0;
 }
 // Modelled on vibeshine_ds5_udc.c: a linked request or a missing descriptor is -EINVAL, a
-// disabled endpoint -ESHUTDOWN; otherwise the request joins the endpoint's list.
+// disabled endpoint -ESHUTDOWN; the injected failure applies only to a request the real
+// UDC would have accepted, so a double queue is always counted.
 static int usb_ep_queue(struct usb_ep *ep, struct usb_request *req, int flags) {
   (void)flags;
-  if (++queue_calls==failure) return -ENOMEM;
+  ++queue_calls;
   if (req->linked || !ep->desc) { ++invalid_queues; return -EINVAL; }
   if (!ep->enabled) return -ESHUTDOWN;
+  if (queue_calls==failure) return -ENOMEM;
   req->linked=true; ep->list[ep->queued++]=req; return 0;
 }
 // Completing a request unlinks it first; the handler may requeue it (so the list is
@@ -80,7 +84,7 @@ static void give_back_all(struct usb_ep *ep, int status) {
   for (int i=0;i<n;++i) { batch[i]->linked=false; batch[i]->status=status; batch[i]->actual=0; if (batch[i]->complete) batch[i]->complete(ep, batch[i]); }
 }
 static void usb_ep_disable(struct usb_ep *ep) {
-  ++disables; ep->enabled=false;
+  ++disables; ep->enabled=false; ep->desc=NULL;   // dummy_disable clears desc too
   give_back_all(ep, -ESHUTDOWN);   // the real UDC nukes synchronously with -ESHUTDOWN
 }
 static void usb_ep_dequeue(struct usb_ep *ep, struct usb_request *req) {
@@ -121,8 +125,8 @@ int main(void) {
             "SET_INTERFACE returns the endpoint/queue error without acknowledging success");
       check(slot.alt1==0 && slot.alt2==0 && !slot.iso_out_enabled && !slot.iso_in_enabled,
             "failed setup does not publish an active alternate setting");
-      check(!out.enabled && !in.enabled && out.queued==0 && in.queued==0,
-            "failed setup disables its endpoint and retires any partially queued requests");
+      check(!out.enabled && !in.enabled && out.queued==0 && in.queued==0 && disables==(fail==0 ? 0 : 1),
+            "failed setup disables its endpoint (once, and only when it was enabled) and retires any partially queued requests");
       bool none_linked=true;
       for (int i=0;i<DS5_ISO_OUT_Q;++i) none_linked&=!outs[i].linked;
       for (int i=0;i<DS5_ISO_IN_Q;++i) none_linked&=!ins[i].linked;
@@ -130,8 +134,8 @@ int main(void) {
       failure=-1; queue_calls=0;
       result=set_interface(&slot,direction,1);
       struct usb_ep *ep=direction==1 ? &out : &in;
-      check(result==0 && ep->enabled && ep->queued==depth && queue_calls==depth,
-            "a retry after failure queues the complete audio pipeline");
+      check(result==0 && ep->enabled && ep->queued==depth && queue_calls==depth && enables==2,
+            "a retry after failure re-enables once and queues the complete audio pipeline");
       check((direction==1 ? slot.alt1 : slot.alt2)==1 &&
             (direction==1 ? slot.iso_out_enabled : slot.iso_in_enabled),
             "successful setup publishes its alternate setting");

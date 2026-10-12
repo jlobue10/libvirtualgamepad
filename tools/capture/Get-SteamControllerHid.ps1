@@ -18,6 +18,7 @@
 #>
 [CmdletBinding()]
 param(
+    [ValidatePattern('^[0-9A-Fa-f]{4}$')]
     [string] $VendorId = '28DE'
 )
 
