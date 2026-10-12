@@ -23,6 +23,8 @@ jobs:
         run: python3 driver/tests/test_sc26_keepalive.py
       - name: Test the Vibepollo pin tool's rewrite rules
         run: python3 tools/capture/test_update_pins.py
+      - name: Test Linux DualSense file ownership and slot reuse under ASan/UBSan
+        run: python3 linux/vibeshine-ds5/test_slot_lifecycle.py
 
   driver:
     runs-on: windows-2022

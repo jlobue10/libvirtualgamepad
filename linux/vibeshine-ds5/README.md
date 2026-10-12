@@ -29,3 +29,17 @@ sudo insmod vibeshine_ds5.ko
 HID feature reports (calibration 0x05, pairing 0x09, firmware 0x20, sensor
 enable 0x08) are answered in the kernel so `libScePad` can initialize without
 a round-trip.
+
+File operations serialize lifecycle changes per open fd. Blocking reads bind to
+one slot generation, so DESTROY followed by CREATE on the same fd cannot feed a
+retired read the new controller's feedback. An unbound fd cannot read or destroy
+a replacement owner's slot.
+
+Run the portable ownership/concurrency regression without loading a module:
+
+```sh
+python3 linux/vibeshine-ds5/test_slot_lifecycle.py
+```
+
+The harness runs production file operations with fake USB/FIFO boundaries and
+ASan/UBSan. Kernel builds and live USB behavior require separate validation.
