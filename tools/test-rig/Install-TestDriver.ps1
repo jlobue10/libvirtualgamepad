@@ -58,7 +58,10 @@ if (-not $testsigning) {
     exit 2
 }
 
-$PackageDir = (Resolve-Path $PackageDir).Path
+if (-not (Test-Path -LiteralPath $PackageDir -PathType Container)) {
+    throw "missing package directory: $PackageDir"
+}
+$PackageDir = (Resolve-Path -LiteralPath $PackageDir).Path
 $cer = Join-Path $PackageDir 'driver\VibeshineVhfGamepad.cer'
 $inf = Join-Path $PackageDir 'driver\VibeshineVhfGamepad.inf'
 $cat = Join-Path $PackageDir 'driver\VibeshineVhfGamepad.cat'

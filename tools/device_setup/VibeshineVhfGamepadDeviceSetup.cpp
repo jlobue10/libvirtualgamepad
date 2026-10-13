@@ -1137,8 +1137,11 @@ void print_device_diagnostics(const wchar_t *const stage) {
 
 void print_status() {
   const auto devices = enumerate_root_devices();
+  // Registered but absent nodes: `remove` deletes them, `install` ignores them.
+  const auto registered = enumerate_root_devices(false);
   const bool ready = source_device_interface_ready();
   std::wcout << L"{\"root_device_count\":" << devices.size()
+             << L",\"phantom_root_devices\":" << (registered.size() > devices.size() ? registered.size() - devices.size() : 0)
              << L",\"source_interface_ready\":" << (ready ? L"true" : L"false")
              << L",\"source_interface_state\":\"" << lvg::device_setup::probe_verdict_name(g_last_probe_verdict) << L"\"";
   if (!devices.empty()) {
@@ -1293,16 +1296,28 @@ void print_status() {
   // Every registered node, present or phantom: remove_device_instance opens by instance id.
   const auto devices = enumerate_root_devices(false);
   DWORD removed = 0;
+  DWORD failed = 0;
   bool reboot_required = false;
   for (const auto &device : devices) {
-    const auto result = remove_device_instance(device.instance_id);
-    if (result.removed) {
-      ++removed;
+    // One node's failure (a phantom DIF_REMOVE refusal, a predicate mismatch) must not
+    // leave the remaining nodes, possibly the present one, untouched.
+    try {
+      const auto result = remove_device_instance(device.instance_id);
+      if (result.removed) {
+        ++removed;
+      }
+      reboot_required = reboot_required || result.reboot_required;
+    } catch (const std::exception &failure) {
+      ++failed;
+      std::wcerr << L"remove: " << device.instance_id << L": " << failure.what() << std::endl;
     }
-    reboot_required = reboot_required || result.reboot_required;
   }
   std::wcout << L"{\"removed_root_devices\":" << removed
+             << L",\"failed_root_devices\":" << failed
              << L",\"reboot_required\":" << (reboot_required ? L"true" : L"false") << L"}" << std::endl;
+  if (failed != 0) {
+    return 1;
+  }
   return reboot_required ? k_exit_reboot_required : 0;
 }
 

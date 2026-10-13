@@ -71,6 +71,7 @@ static struct usb_request *queued;
 static int usb_ep_queue(struct usb_ep *ep,struct usb_request *req,int flags) {
   (void)ep; (void)flags;
   if(queue_error)return queue_error;
+  if(queued)return -EINVAL;  // a UDC refuses a request that is still linked
   req->status=-EINPROGRESS; req->actual=0; queued=req; return 0;
 }
 @@METHODS@@
@@ -80,6 +81,7 @@ static void check(bool ok,const char *name) {
 }
 static void complete(struct usb_ep *ep,int status,unsigned int actual) {
   struct usb_request *r=queued; queued=NULL;
+  if(!r){ ++checks; ++failures; printf("FAIL completion with nothing queued\n"); return; }
   r->status=status; r->actual=actual; r->complete(ep,r);
 }
 static int setup(struct usb_gadget *g,u8 type,u8 request,u16 value,u16 index,u16 length) {
@@ -133,10 +135,10 @@ int main(void) {
   check(setup(&gadget,0xa1,0x81,0x200,0,2)==0 && slot.ep0_pending_cs==0,"an IN reply clears a selector no completion retired");
   put_unaligned_le16((u16)-2048,data); complete(&ep,0,2);
   check(slot.volume==-1024,"...and its bytes are not applied as volume");
-  slot.ep0_pending_cs=1;
+  slot.ep0_pending_cs=1; slot.mute=0;
   check(setup(&gadget,0x21,9,0x205,3,2)==0 && slot.ep0_pending_cs==0,"a HID SET_REPORT clears a stale audio selector");
   data[0]=1; complete(&ep,0,2);
-  check(slot.mute==1,"...and the mute set earlier is untouched by it");
+  check(slot.mute==0,"...and its bytes are not applied as mute");
   printf("%d checks; %d failures\n",checks,failures);
   return failures!=0;
 }

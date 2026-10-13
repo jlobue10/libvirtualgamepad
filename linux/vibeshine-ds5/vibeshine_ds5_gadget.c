@@ -28,7 +28,8 @@
 /* Offset of the HID class descriptor (09 21 ...) inside ds5_config_desc: interface 3 at
  * 0xc3, its HID descriptor at 0xcc, endpoints at 0xd5/0xdc. Checked at module init. */
 #define DS5_HID_DESC_OFFSET 0xcc
-#define DS5_EVENT_FIFO 16
+/* PCM packets arrive at 1 kHz while haptic audio plays: 64 entries = 64 ms of slack. */
+#define DS5_EVENT_FIFO 64
 
 static const u8 ds5_report_desc[] = {
 	0x05, 0x01, 0x09, 0x05, 0xa1, 0x01, 0x85, 0x01, 0x09, 0x30, 0x09, 0x31, 0x09, 0x32, 0x09, 0x35,
@@ -151,7 +152,13 @@ struct ds5_slot {
 	struct usb_request *req_iso_in[DS5_ISO_IN_Q];
 	wait_queue_head_t wait;
 	spinlock_t evlock;
-	DECLARE_KFIFO(events, struct vibeshine_ds5_event, DS5_EVENT_FIFO);
+	DECLARE_KFIFO(events, struct vibeshine_ds5_event, DS5_EVENT_FIFO);	/* PCM only */
+	/* A HID output report is a full-state message (rumble, lightbar, trigger
+	 * programs): the latest one wins, read ahead of the PCM FIFO, so audio
+	 * pressure can never evict it. */
+	struct vibeshine_ds5_event output;
+	bool output_valid;
+	u32 pcm_dropped;	/* PCM packets the FIFO refused since CREATE */
 	u8 mac[6];
 	u8 input[VIBESHINE_DS5_INPUT_SIZE];
 	u8 config;
@@ -206,7 +213,12 @@ static void ds5_push_event(struct ds5_slot *slot, u32 type, const void *data, u3
 	if (data && size)
 		memcpy(ev.data, data, size);
 	spin_lock_irqsave(&slot->evlock, flags);
-	kfifo_put(&slot->events, ev);
+	if (type == VIBESHINE_DS5_EVENT_OUTPUT) {
+		slot->output = ev;
+		slot->output_valid = true;
+	} else if (!kfifo_put(&slot->events, ev)) {
+		slot->pcm_dropped++;
+	}
 	spin_unlock_irqrestore(&slot->evlock, flags);
 	wake_up_interruptible(&slot->wait);
 }
@@ -915,6 +927,8 @@ static long ds5_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		memcpy(slot->mac, create.mac, 6);
 		spin_lock_irqsave(&slot->evlock, flags);
 		INIT_KFIFO(slot->events);
+		slot->output_valid = false;
+		slot->pcm_dropped = 0;
 		spin_unlock_irqrestore(&slot->evlock, flags);
 		WRITE_ONCE(slot->generation, slot->generation + 1);
 		slot->created = true;
@@ -1031,7 +1045,8 @@ static ssize_t ds5_read(struct file *file, char __user *buf, size_t count, loff_
 		/* Never hold either mutex while sleeping: DESTROY must be able to wake us.
 		 * The owner pointer alone cannot detect DESTROY/CREATE by the same fd. */
 		if (!(file->f_flags & O_NONBLOCK)) {
-			ret = wait_event_interruptible(slot->wait, kfifo_len(&slot->events) > 0 ||
+			ret = wait_event_interruptible(slot->wait, READ_ONCE(slot->output_valid) ||
+						       kfifo_len(&slot->events) > 0 ||
 						       READ_ONCE(slot->owner) != file ||
 						       READ_ONCE(slot->generation) != generation);
 			if (ret)
@@ -1047,7 +1062,13 @@ static ssize_t ds5_read(struct file *file, char __user *buf, size_t count, loff_
 			ret = -ENODEV;
 		} else {
 			spin_lock_irqsave(&slot->evlock, flags);
-			ret = kfifo_get(&slot->events, &ev) ? 0 : -EAGAIN;
+			if (slot->output_valid) {
+				ev = slot->output;
+				slot->output_valid = false;
+				ret = 0;
+			} else {
+				ret = kfifo_get(&slot->events, &ev) ? 0 : -EAGAIN;
+			}
 			spin_unlock_irqrestore(&slot->evlock, flags);
 		}
 		mutex_unlock(&slot->lock);
@@ -1080,7 +1101,7 @@ static __poll_t ds5_poll(struct file *file, poll_table *wait)
 	poll_wait(file, &slot->wait, wait);
 	if (!slot->created || slot->owner != file)
 		mask = POLLERR | POLLHUP;
-	else if (kfifo_len(&slot->events))
+	else if (slot->output_valid || kfifo_len(&slot->events))
 		mask |= POLLIN | POLLRDNORM;
 	mutex_unlock(&slot->lock);
 	mutex_unlock(&ctx->lock);
