@@ -628,6 +628,21 @@ inline constexpr std::int32_t stick_touch_deflection = 3276;
   return r;
 }
 
+// The button word an input report is classified on for queueing (an edge makes the
+// report a transition that survives until the host reads it). The stick-touch bits
+// derived from stick deflection (clients without the stick-touch capability) are
+// left out: a stick resting on the threshold would otherwise turn every snapshot
+// into a transition and crowd real button edges out of the transition queue while
+// the host has no read pending. A client's own stick-touch bits are real edges and
+// stay in.
+[[nodiscard]] inline constexpr std::uint32_t classify_buttons(const state &st,
+                                                              std::uint32_t buttons) noexcept {
+  if (st.stick_touch_from_deflection) {
+    buttons &= ~(btn_left_stick_touch | btn_right_stick_touch);
+  }
+  return buttons;
+}
+
 // Motion in SDL axis order -> device axes. SDL reads device X as x, device Z as
 // y, and -device Y as z, so the inverse is x->X, y->Z, -z->Y.
 inline void apply_accel_milli(state &st, const std::int32_t x, const std::int32_t y,

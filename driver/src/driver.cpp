@@ -1126,9 +1126,11 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
     // Classify on the encoded button word: the trigger-click bits (set at >= 0xF0),
     // pad touch, grip and stick-touch latches only exist there, and an edge on any
     // of them must travel as a transition rather than be overwritten by the next
-    // continuous snapshot while VHF has no read pending.
-    const auto sc26_kind =
-      slot.pump.classify(sc26_report.buttons, request.left_trigger, request.right_trigger);
+    // continuous snapshot while VHF has no read pending. Stick touch derived from
+    // deflection is left out (classify_buttons): it is not an edge the client sent.
+    const auto sc26_kind = slot.pump.classify(
+      lvg::sc26_usb::classify_buttons(slot.sc26.device, sc26_report.buttons),
+      request.left_trigger, request.right_trigger);
     // First input state of a Steam Controller: start the keep-alive cadence.
     const bool start_keepalive =
       context->sc26_keepalive_timer != nullptr && !context->sc26_timer_running;
