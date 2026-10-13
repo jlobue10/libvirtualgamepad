@@ -56,7 +56,8 @@ static void mutex_init(struct mutex *m) { assert(!pthread_mutex_init(&m->native,
 static void mutex_unlock(struct mutex *m) { assert(!pthread_mutex_unlock(&m->native)); }
 struct usb_gadget { int disconnects; };
 struct usb_request { void *buf; unsigned int length; };
-struct fifo { struct vibeshine_ds5_event event; bool full; };
+#define FAKE_FIFO_DEPTH 16
+struct fifo { struct vibeshine_ds5_event event[FAKE_FIFO_DEPTH]; unsigned head, tail; };
 struct ds5_slot {
   struct mutex lock;
   struct usb_gadget *gadget;
@@ -67,6 +68,9 @@ struct ds5_slot {
   void *ep_int_in;
   int wait, evlock;
   struct fifo events;
+  struct vibeshine_ds5_event output;
+  bool output_valid;
+  u32 pcm_dropped;
   u8 input[VIBESHINE_DS5_INPUT_SIZE], mac[6];
 };
 static struct ds5_slot ds5_slots[VIBESHINE_DS5_SLOTS];
@@ -91,12 +95,18 @@ static void *kzalloc(size_t size, int flags) { return calloc(1, size); }
 #define smp_store_release(x, value) (*(x) = (value))
 #define spin_lock_irqsave(lock, flags) ((void)(lock), (void)(flags))
 #define spin_unlock_irqrestore(lock, flags) ((void)(lock), (void)(flags))
-#define INIT_KFIFO(f) ((f).full = false)
-#define kfifo_len(f) ((f)->full ? 1 : 0)
+#define INIT_KFIFO(f) ((f).head = (f).tail = 0)
+#define kfifo_len(f) ((f)->tail - (f)->head)
 static bool kfifo_get(struct fifo *f, struct vibeshine_ds5_event *event) {
-  if (!f->full) return false;
-  *event = f->event; f->full = false; return true;
+  if (f->head == f->tail) return false;
+  *event = f->event[f->head++ % FAKE_FIFO_DEPTH]; return true;
 }
+// A full kfifo refuses the offered element (drop-newest), as the kernel's does.
+static bool kfifo_put(struct fifo *f, struct vibeshine_ds5_event ev) {
+  if (f->tail - f->head == FAKE_FIFO_DEPTH) return false;
+  f->event[f->tail++ % FAKE_FIFO_DEPTH] = ev; return true;
+}
+#define wake_up_interruptible(q) ((void)(q))
 static int copy_from_user(void *dst, const void *src, size_t size) { memcpy(dst, src, size); return 0; }
 #define copy_to_user copy_from_user
 static void usb_gadget_connect(struct usb_gadget *g) { (void)g; }
@@ -118,8 +128,9 @@ static int create(struct file *file, unsigned int slot) {
   return ds5_ioctl(file, VIBESHINE_DS5_CREATE, (unsigned long)&request);
 }
 static void event(unsigned int slot, u8 marker) {
-  ds5_slots[slot].events.event.data[0] = marker;
-  ds5_slots[slot].events.full = true;
+  struct vibeshine_ds5_event ev = {.type = VIBESHINE_DS5_EVENT_PCM, .size = 1};
+  ev.data[0] = marker;
+  assert(kfifo_put(&ds5_slots[slot].events, ev));
 }
 static struct file *reused_file;
 static void reuse_same_fd(void) {
@@ -156,6 +167,25 @@ int main(void) {
         "the current owner receives its queued feedback");
   file.f_flags = O_NONBLOCK;
   check(ds5_read(&file, (char *)&received, sizeof(received), NULL) == -EAGAIN, "an empty nonblocking read returns EAGAIN");
+  // D32-01: audio pressure never evicts a HID output report, and refused PCM packets are counted.
+  {
+    u8 pcm[4] = {0}, report[4] = {2, 0xaa};
+    for (int i = 0; i < FAKE_FIFO_DEPTH + 1; ++i) { pcm[0] = (u8)i; ds5_push_event(&ds5_slots[0], VIBESHINE_DS5_EVENT_PCM, pcm, sizeof(pcm)); }
+    ds5_push_event(&ds5_slots[0], VIBESHINE_DS5_EVENT_OUTPUT, report, sizeof(report));
+    check(ds5_slots[0].pcm_dropped == 1 && ds5_slots[0].output_valid, "a full PCM FIFO refuses the packet and counts it, the output report is kept");
+    check(ds5_read(&file, (char *)&received, sizeof(received), NULL) == sizeof(received) &&
+          received.type == VIBESHINE_DS5_EVENT_OUTPUT && received.data[1] == 0xaa,
+          "the output report is read ahead of the queued PCM packets");
+    int drained = 0;
+    while (ds5_read(&file, (char *)&received, sizeof(received), NULL) == sizeof(received)) { ++drained; }
+    check(drained == FAKE_FIFO_DEPTH && received.type == VIBESHINE_DS5_EVENT_PCM, "the PCM packets that fit are read in order afterwards");
+    ds5_push_event(&ds5_slots[0], VIBESHINE_DS5_EVENT_OUTPUT, report, sizeof(report));
+    report[1] = 0xbb;
+    ds5_push_event(&ds5_slots[0], VIBESHINE_DS5_EVENT_OUTPUT, report, sizeof(report));
+    check(ds5_read(&file, (char *)&received, sizeof(received), NULL) == sizeof(received) && received.data[1] == 0xbb &&
+          ds5_read(&file, (char *)&received, sizeof(received), NULL) == -EAGAIN,
+          "a newer output report replaces an unread one (latest wins)");
+  }
   file.f_flags = 0;
   reused_file = &file; wait_hook = reuse_same_fd;
   check(ds5_read(&file, (char *)&received, sizeof(received), NULL) == -ENODEV,
@@ -231,7 +261,7 @@ int main(void) {
 code = prefix
 if 'struct ds5_file {' in source:
     code += block('struct ds5_file {') + ';\n'
-for marker in ['static int ds5_open(', 'static int ds5_release(', 'static long ds5_ioctl(',
+for marker in ['static void ds5_push_event(', 'static int ds5_open(', 'static int ds5_release(', 'static long ds5_ioctl(',
                'static ssize_t ds5_write(', 'static ssize_t ds5_read(', 'static __poll_t ds5_poll(']:
     code += block(marker) + '\n'
 code += suffix
