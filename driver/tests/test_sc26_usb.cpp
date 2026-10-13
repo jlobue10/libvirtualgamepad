@@ -455,6 +455,17 @@ int main() {
     check(encode_haptic_ack(stop, sizeof(stop), ack, 5) == 0, "ack needs a 6-byte buffer");
   }
 
+  {
+    // L42-01: stick touch derived from deflection is not a classification edge, so a stick
+    // resting on the threshold cannot turn every snapshot into a transition.
+    state st {};
+    check(classify_buttons(st, btn_a | btn_left_stick_touch | btn_right_stick_touch) == btn_a,
+          "deflection-derived stick touch is masked out of the classification word");
+    st.stick_touch_from_deflection = false;
+    check(classify_buttons(st, btn_a | btn_left_stick_touch) == (btn_a | btn_left_stick_touch),
+          "a client's own stick-touch bit stays a classification edge");
+  }
+
   if (failures == 0) std::printf("PASS: sc26 usb contract\n");
   return failures == 0 ? 0 : 1;
 }
