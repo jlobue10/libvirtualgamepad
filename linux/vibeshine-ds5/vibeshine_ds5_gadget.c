@@ -205,6 +205,7 @@ static void ds5_push_event(struct ds5_slot *slot, u32 type, const void *data, u3
 {
 	struct vibeshine_ds5_event ev = {};
 	unsigned long flags;
+	u32 dropped = 0;
 
 	if (size > sizeof(ev.data))
 		size = sizeof(ev.data);
@@ -217,9 +218,13 @@ static void ds5_push_event(struct ds5_slot *slot, u32 type, const void *data, u3
 		slot->output = ev;
 		slot->output_valid = true;
 	} else if (!kfifo_put(&slot->events, ev)) {
-		slot->pcm_dropped++;
+		dropped = ++slot->pcm_dropped;
 	}
 	spin_unlock_irqrestore(&slot->evlock, flags);
+	/* D33-01: overflow stays invisible to the reader (no UAPI change here), so say it in the log. */
+	if (dropped)
+		pr_debug_ratelimited("vibeshine_ds5: slot %u PCM FIFO full, %u packets dropped since CREATE\n",
+				     (unsigned int)(slot - ds5_slots), dropped);
 	wake_up_interruptible(&slot->wait);
 }
 

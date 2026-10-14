@@ -813,16 +813,26 @@ struct driver_update_result {
     case lvg::device_setup::driver_update_verdict::publisher_not_trusted:
       throw std::runtime_error(
           "UpdateDriverForPlugAndPlayDevicesW failed with Win32 error " + std::to_string(error) +
-          ": the driver package's publisher is not trusted on this machine, so the non-interactive "
-          "install cannot accept it. Install the publisher certificate into "
-          "LocalMachine\\TrustedPublisher (tools\\trust-test-certificate.ps1 for a local test "
-          "package), then retry the setup.");
+          (error == lvg::device_setup::k_win32_error_authenticode_publisher_not_trusted
+               ? ": the driver package's publisher was not established as trusted on this machine "
+                 "(declined at an earlier prompt or listed under LocalMachine\\Disallowed), so the "
+                 "non-interactive install cannot accept it. Remove it from Disallowed if present and "
+                 "install the publisher certificate into LocalMachine\\TrustedPublisher, then retry."
+               : ": the driver package's publisher is not trusted on this machine, so the non-interactive "
+                 "install cannot accept it. Install the publisher certificate into "
+                 "LocalMachine\\TrustedPublisher (tools\\trust-test-certificate.ps1 for a local test "
+                 "package), then retry the setup."));
     case lvg::device_setup::driver_update_verdict::signature_os_mismatch:
       throw std::runtime_error(
           "UpdateDriverForPlugAndPlayDevicesW failed with Win32 error " + std::to_string(error) +
           ": the driver package's signature targets a different Windows version. "
           "Use a driver package signed for this version of Windows.");
     default:
+      if (error == ERROR_SUCCESS) {
+        // FALSE without a last error: name it instead of "failed with Win32 error 0".
+        throw std::runtime_error(
+            "UpdateDriverForPlugAndPlayDevicesW (non-interactive) returned FALSE without a Win32 error");
+      }
       SetLastError(error);
       throw_last_error("UpdateDriverForPlugAndPlayDevicesW (non-interactive)");
   }

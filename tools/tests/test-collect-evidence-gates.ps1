@@ -30,5 +30,11 @@ $sample = @(
 $kept = @($sample | Select-String -CaseSensitive -Pattern '^\s*"SDL_GamepadBind' | ForEach-Object { $_.Line })
 Check ($kept.Count -eq 1 -and $kept[0] -match 'SDL_GamepadBind') 'the anchored pattern keeps the binding line and drops token-like hex lines'
 
+# L44-03: the host log is reduced to the virtual-gamepad lines; the full log is never copied, and an
+# absent log leaves a marker in system.txt instead of silently omitting the file.
+Check ($text -notmatch 'Copy-Item\s+\$VibepolloLog') 'the full host log is never copied into the evidence zip'
+Check ($text -match "Select-String -Pattern 'gamepad\|vhf\|Steam Controller\|virtual'") 'the host log is reduced to virtual-gamepad lines'
+Check ($text -match 'vibepollo log: not found at \$VibepolloLog') 'an absent host log is recorded in system.txt'
+
 if ($failures -ne 0) { throw "$failures collect-evidence gate(s) failed" }
 Write-Host 'collect-evidence gates passed'

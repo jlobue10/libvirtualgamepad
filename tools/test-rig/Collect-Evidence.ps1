@@ -43,6 +43,9 @@ if (Test-Path $VibepolloLog) {
     # Only the virtual-gamepad lines; the full host log is deliberately not copied (see the header).
     Get-Content $VibepolloLog | Select-String -Pattern 'gamepad|vhf|Steam Controller|virtual' | ForEach-Object { $_.Line } |
         Select-Object -Last 400 | Set-Content (Join-Path $OutDir 'vibepollo-gamepad-lines.txt')
+} else {
+    # Distinguish "no host log" from "a log with no matching lines" (an empty file).
+    "vibepollo log: not found at $VibepolloLog" | Add-Content $sys
 }
 $zip = "$OutDir.zip"
 # Windows ships bsdtar; Compress-Archive's module does not load on every machine.
