@@ -816,7 +816,12 @@ struct driver_update_result {
           ": the driver package's publisher is not trusted on this machine, so the non-interactive "
           "install cannot accept it. Install the publisher certificate into "
           "LocalMachine\\TrustedPublisher (tools\\trust-test-certificate.ps1 for a local test "
-          "package) or run the setup interactively once to accept the driver-trust prompt.");
+          "package), then retry the setup.");
+    case lvg::device_setup::driver_update_verdict::signature_os_mismatch:
+      throw std::runtime_error(
+          "UpdateDriverForPlugAndPlayDevicesW failed with Win32 error " + std::to_string(error) +
+          ": the driver package's signature targets a different Windows version. "
+          "Use a driver package signed for this version of Windows.");
     default:
       SetLastError(error);
       throw_last_error("UpdateDriverForPlugAndPlayDevicesW (non-interactive)");

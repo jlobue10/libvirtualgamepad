@@ -89,6 +89,7 @@ enum class driver_update_verdict {
   installed,
   declined,
   publisher_not_trusted,
+  signature_os_mismatch,
   failed,
 };
 constexpr unsigned long k_win32_error_no_more_items = 259;                          // ERROR_NO_MORE_ITEMS
@@ -105,8 +106,10 @@ constexpr unsigned long k_win32_error_signature_osattribute_mismatch = 0xE000024
       return driver_update_verdict::declined;
     case k_win32_error_authenticode_trust_not_established:
     case k_win32_error_authenticode_publisher_not_trusted:
-    case k_win32_error_signature_osattribute_mismatch:
       return driver_update_verdict::publisher_not_trusted;
+    case k_win32_error_signature_osattribute_mismatch:
+      // A package signed for another Windows version is not a trust failure.
+      return driver_update_verdict::signature_os_mismatch;
     default:
       return driver_update_verdict::failed;
   }
