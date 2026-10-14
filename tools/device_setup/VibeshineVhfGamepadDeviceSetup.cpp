@@ -480,6 +480,10 @@ DWORD WINAPI open_protocol_device_worker(void *context) {
 lvg::device_setup::probe_verdict g_last_probe_verdict = lvg::device_setup::probe_verdict::absent;
 static_assert(ERROR_ACCESS_DENIED == lvg::device_setup::k_win32_error_access_denied);
 static_assert(ERROR_SHARING_VIOLATION == lvg::device_setup::k_win32_error_sharing_violation);
+static_assert(ERROR_NO_MORE_ITEMS == lvg::device_setup::k_win32_error_no_more_items);
+static_assert(ERROR_AUTHENTICODE_TRUST_NOT_ESTABLISHED == lvg::device_setup::k_win32_error_authenticode_trust_not_established);
+static_assert(ERROR_AUTHENTICODE_PUBLISHER_NOT_TRUSTED == lvg::device_setup::k_win32_error_authenticode_publisher_not_trusted);
+static_assert(ERROR_SIGNATURE_OSATTRIBUTE_MISMATCH == lvg::device_setup::k_win32_error_signature_osattribute_mismatch);
 
 // A broken UMDF endpoint can ignore CreateFile or overlapped-I/O cancellation.
 // Retain at most one such probe until it completes, rather than returning while
@@ -786,23 +790,37 @@ struct driver_update_result {
 
 [[nodiscard]] driver_update_result update_driver(const std::wstring &inf_path) {
   BOOL reboot_required = FALSE;
-  if (!UpdateDriverForPlugAndPlayDevicesW(
-          nullptr,
-          lvg::k_root_hardware_id,
-          inf_path.c_str(),
-          0,
-          &reboot_required)) {
-    const DWORD error = GetLastError();
-    // With zero install flags Windows correctly declines to downgrade an
-    // equal/newer already-selected package. The source node still exists and
-    // may already be ready, so this is not an installation failure.
-    if (error == ERROR_NO_MORE_ITEMS) {
+  // Non-interactive: the tool runs from installer custom actions and service
+  // sessions where a driver-trust prompt has no desktop to appear on and the
+  // call would block until the installer's timeout. A publisher Windows has not
+  // established as trusted fails instead, with the error named below. No force
+  // flag: Windows still declines to downgrade an equal/newer selected package.
+  const BOOL succeeded = UpdateDriverForPlugAndPlayDevicesW(
+      nullptr,
+      lvg::k_root_hardware_id,
+      inf_path.c_str(),
+      INSTALLFLAG_NONINTERACTIVE,
+      &reboot_required);
+  const DWORD error = succeeded ? ERROR_SUCCESS : GetLastError();
+  switch (lvg::device_setup::classify_driver_update(succeeded != FALSE, error)) {
+    case lvg::device_setup::driver_update_verdict::installed:
+      return {.updated = true, .reboot_required = reboot_required != FALSE};
+    case lvg::device_setup::driver_update_verdict::declined:
+      // Windows declined to downgrade an equal/newer already-selected package.
+      // The source node still exists and may already be ready, so this is not
+      // an installation failure (the DriverVer attestation decides).
       return {};
-    }
-    SetLastError(error);
-    throw_last_error("UpdateDriverForPlugAndPlayDevicesW");
+    case lvg::device_setup::driver_update_verdict::publisher_not_trusted:
+      throw std::runtime_error(
+          "UpdateDriverForPlugAndPlayDevicesW failed with Win32 error " + std::to_string(error) +
+          ": the driver package's publisher is not trusted on this machine, so the non-interactive "
+          "install cannot accept it. Install the publisher certificate into "
+          "LocalMachine\\TrustedPublisher (tools\\trust-test-certificate.ps1 for a local test "
+          "package) or run the setup interactively once to accept the driver-trust prompt.");
+    default:
+      SetLastError(error);
+      throw_last_error("UpdateDriverForPlugAndPlayDevicesW (non-interactive)");
   }
-  return {.updated = true, .reboot_required = reboot_required != FALSE};
 }
 
 struct remove_device_result {
