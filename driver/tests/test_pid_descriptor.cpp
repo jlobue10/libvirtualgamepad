@@ -1042,6 +1042,71 @@ int main() {
       }
     }
 
+    // Steam's settings writes on the control channel become steam_settings
+    // events, nine triples each, in order; LOAD_DEFAULT_SETTINGS is one empty
+    // event; other commands and malformed transfers yield none.
+    {
+      feedback_event events[3] {};
+      std::uint8_t cmd[64] {};
+      cmd[0] = lvg::sc26_usb::features_report_id;
+      cmd[1] = lvg::sc26_usb::cmd_set_settings_values;
+      cmd[2] = 12;  // four triples
+      const std::uint8_t ids[] = {48, 7, 8, 49};
+      for (std::size_t i = 0; i < 4; ++i) {
+        cmd[3 + i * 3] = ids[i];
+        cmd[4 + i * 3] = static_cast<std::uint8_t>(i + 1);
+      }
+      check(apply_sc26_settings(cmd, sizeof(cmd), 5, events, 3) == 1,
+            "sc26 four-triple settings write is one event");
+      steam_settings_feedback s {};
+      std::memcpy(&s, events[0].payload, sizeof(s));
+      check(events[0].type == feedback_type::steam_settings && events[0].payload_size == sizeof(s) &&
+              events[0].controller_id == 5 && events[0].header.version == k_protocol_version &&
+              s.command == 0x87 && s.count == 4 && s.triples[0] == 48 && s.triples[1] == 1 &&
+              s.triples[9] == 49 && s.triples[10] == 4 && s.triples[11] == 0,
+            "sc26 settings event carries the triples verbatim");
+      cmd[2] = 60;  // twenty triples: events of 9, 9 and 2
+      for (std::size_t i = 0; i < 20; ++i) {
+        cmd[3 + i * 3] = static_cast<std::uint8_t>(i);
+        cmd[4 + i * 3] = 0xAA;
+        cmd[5 + i * 3] = 0x55;
+      }
+      check(apply_sc26_settings(cmd, sizeof(cmd), 0, events, 3) == 3,
+            "sc26 twenty-triple write splits into three events");
+      std::memcpy(&s, events[1].payload, sizeof(s));
+      check(s.count == 9 && s.triples[0] == 9 && s.triples[24] == 17,
+            "sc26 middle settings chunk continues where the first ended");
+      std::memcpy(&s, events[2].payload, sizeof(s));
+      check(s.count == 2 && s.triples[0] == 18 && s.triples[3] == 19 && s.triples[4] == 0xAA &&
+              s.triples[5] == 0x55 && s.triples[6] == 0,
+            "sc26 last settings chunk carries the tail in order");
+      check(apply_sc26_settings(cmd, sizeof(cmd), 0, events, 2) == 0,
+            "sc26 settings write that does not fit is not forwarded in part");
+      cmd[2] = 61;  // a trailing partial triple is ignored, as the responder ignores it
+      check(apply_sc26_settings(cmd, sizeof(cmd), 0, events, 3) == 3,
+            "sc26 trailing partial triple is ignored");
+      cmd[2] = 0;
+      check(apply_sc26_settings(cmd, sizeof(cmd), 0, events, 3) == 0,
+            "sc26 empty settings write forwards nothing");
+      cmd[1] = lvg::sc26_usb::cmd_load_default_settings;
+      check(apply_sc26_settings(cmd, sizeof(cmd), 0, events, 3) == 1, "sc26 load-defaults is one event");
+      std::memcpy(&s, events[0].payload, sizeof(s));
+      check(s.command == 0x8E && s.count == 0, "sc26 load-defaults event has no triples");
+      cmd[1] = lvg::sc26_usb::cmd_get_settings_values;
+      cmd[2] = 3;
+      check(apply_sc26_settings(cmd, sizeof(cmd), 0, events, 3) == 0, "sc26 settings reads are not forwarded");
+      cmd[1] = lvg::sc26_usb::cmd_set_settings_values;
+      cmd[2] = 12;
+      check(apply_sc26_settings(cmd, 10, 0, events, 3) == 0,
+            "sc26 settings write longer than its transfer is refused");
+      cmd[0] = lvg::sc26_usb::features_report_id_2;
+      check(apply_sc26_settings(cmd, sizeof(cmd), 0, events, 3) == 0,
+            "sc26 settings on feature report 2 are not forwarded");
+      check(apply_sc26_settings(nullptr, sizeof(cmd), 0, events, 3) == 0 &&
+              apply_sc26_settings(cmd, 2, 0, events, 3) == 0,
+            "sc26 settings forwarding refuses a null or headerless transfer");
+    }
+
     // Grip sense: released until the client sends a grip bit, then explicit. Motion
     // samples never imply a held grip (a streaming client sends them continuously).
     {

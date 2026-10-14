@@ -724,6 +724,15 @@ int main(int argc, char **argv) {
                      (haptic.report[0] == sc::haptic_rumble_id && (left_speed | right_speed) != 0);
             std::printf("  [%llus] feedback steam_haptic 0x%02x side=%u len=%u%s\n", at_s,
                         haptic.report[0], haptic.report[1], haptic.length, active ? "  -> pressing A" : "");
+          } else if (event.type == lvg::feedback_type::steam_settings) {
+            lvg::steam_settings_feedback settings {};
+            std::memcpy(&settings, event.payload, sizeof(settings));
+            std::printf("  [%llus] feedback steam_settings 0x%02x:", at_s, settings.command);
+            for (unsigned i = 0; i < settings.count && i < lvg::k_steam_settings_triples_max; ++i) {
+              std::printf(" %u=%u", settings.triples[i * 3],
+                          settings.triples[i * 3 + 1] | (settings.triples[i * 3 + 2] << 8));
+            }
+            std::printf("\n");
           } else {
             lvg::generic_rumble_rgb_feedback rumble {};
             std::memcpy(&rumble, event.payload, sizeof(rumble));

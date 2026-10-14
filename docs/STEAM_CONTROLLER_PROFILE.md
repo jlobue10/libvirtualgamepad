@@ -147,6 +147,16 @@ event (`apply_sc26_output`) and answers a zero-repeat 0x81 with the 0x44 ack the
 event on a client with the real pads or renders rumble from it (`synthesize_steam_rumble`); see
 `SC26_USB_COMPATIBILITY.md` for the per-report table.
 
+Steam's control-channel settings writes (SET_SETTINGS_VALUES 0x87, LOAD_DEFAULT_SETTINGS 0x8E) are
+forwarded the same way since beta.148, as `feedback_type::steam_settings` events of at most nine
+`(id, u16)` triples (`apply_sc26_settings`, a per-slot queue drained ahead of the haptic queue). The
+virtual device still keeps its own settings table for the GET family. The reason is haptic strength:
+over USB Steam configures the unit at connect and when its controller UI opens (pad modes, click
+pressure, and several haptic-related ids: haptics enabled, master gain in dB, intensity), while a
+unit streamed over BLE only ever received the client's own three settings and ran its haptics at
+firmware defaults. The client applies the forwarded triples minus the ids it owns or that would
+change the BLE link or the input path (see the Android fork's `SteamControllerBle`).
+
 ## 3. Vibepollo side (fork `jlobue10/Vibepollo`, branch `fork/2.0.0`)
 - `vhf_profile_e::steam_controller`; `vhf_gamepad::offers(client, lvg::profile::steam_controller)`.
 - `vhf_desired_profile()`: `metadata.type == LI_CTYPE_STEAM` → steam_controller (guard with

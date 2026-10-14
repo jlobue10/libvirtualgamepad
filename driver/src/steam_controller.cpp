@@ -16,6 +16,9 @@ static_assert(sc::report_size(sc::haptic_lfo_id) <= sizeof(steam_haptic_feedback
 static_assert(sc::report_size(sc::haptic_sweep_id) <= sizeof(steam_haptic_feedback::report));
 static_assert(sc::report_size(sc::haptic_script_id) <= sizeof(steam_haptic_feedback::report));
 static_assert(sizeof(steam_haptic_feedback) <= sizeof(feedback_event::payload));
+static_assert(sizeof(steam_settings_feedback) <= sizeof(feedback_event::payload));
+// Twenty triples fit a 64-byte SET_SETTINGS_VALUES; three events carry them.
+static_assert((sc::feature_report_size - 3) / 3 <= 3 * k_steam_settings_triples_max);
 
 void sc26_state::reset() noexcept {
   device.reset();
@@ -289,6 +292,59 @@ bool apply_sc26_output(
   event->payload_size = sizeof(payload);
   std::memcpy(event->payload, &payload, sizeof(payload));
   return true;
+}
+
+std::size_t apply_sc26_settings(
+  const std::uint8_t *const data,
+  const std::size_t size,
+  const std::uint32_t controller_id,
+  feedback_event *const events,
+  const std::size_t capacity) noexcept {
+  if (data == nullptr || events == nullptr || size < 3 || data[0] != sc::features_report_id) {
+    return 0;
+  }
+  const std::uint8_t command = data[1];
+  const std::size_t length = data[2];
+  if (length > size - 3) {
+    return 0;  // the responder refuses this transfer too
+  }
+  const std::uint8_t *const payload = data + 3;
+  std::size_t triples = 0;
+  if (command == sc::cmd_set_settings_values) {
+    triples = length / 3;  // a trailing partial triple is ignored, as set_feature ignores it
+    if (triples == 0) {
+      return 0;
+    }
+  } else if (command != sc::cmd_load_default_settings) {
+    return 0;
+  }
+  const std::size_t needed = command == sc::cmd_load_default_settings
+    ? 1
+    : (triples + k_steam_settings_triples_max - 1) / k_steam_settings_triples_max;
+  if (needed > capacity) {
+    return 0;
+  }
+  for (std::size_t n = 0; n < needed; ++n) {
+    steam_settings_feedback chunk {};
+    chunk.command = command;
+    const std::size_t first = n * k_steam_settings_triples_max;
+    const std::size_t count = triples - first < k_steam_settings_triples_max
+      ? triples - first
+      : k_steam_settings_triples_max;
+    chunk.count = static_cast<std::uint8_t>(count);
+    if (count != 0) {
+      std::memcpy(chunk.triples, payload + first * 3, count * 3);
+    }
+    feedback_event &event = events[n];
+    event = {};
+    event.header.size = sizeof(event);
+    event.header.version = k_protocol_version;
+    event.controller_id = controller_id;
+    event.type = feedback_type::steam_settings;
+    event.payload_size = sizeof(chunk);
+    std::memcpy(event.payload, &chunk, sizeof(chunk));
+  }
+  return needed;
 }
 
 bool set_sc26_feature(

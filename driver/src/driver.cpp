@@ -85,6 +85,12 @@ constexpr std::uint64_t k_sc26_battery_period_us = 3500000;
 // two per-side stops arrive 0.7 ms apart; a click is repeated to keep a pad
 // buzzing), which one pending feedback slot would coalesce.
 constexpr std::uint8_t k_haptic_queue_capacity = 8;
+// Steam's settings writes travel ahead of haptics and are never coalesced:
+// connect-time setup is one 20-triple write (three events) and the controller
+// UI adds a few more. Eight events hold two full writes between polls.
+constexpr std::uint8_t k_settings_queue_capacity = 8;
+// A 64-byte SET_SETTINGS_VALUES carries twenty triples: three events.
+constexpr std::size_t k_settings_events_per_write = 3;
 
 enum class slot_state : std::uint8_t {
   empty,
@@ -109,6 +115,11 @@ struct controller_slot {
   lvg::feedback_event haptic_queue[k_haptic_queue_capacity];
   std::uint8_t haptic_head;
   std::uint8_t haptic_count;
+  // Steam's settings writes for a Steam Controller, oldest first; drained
+  // ahead of `haptic_queue`. The oldest is dropped when full.
+  lvg::feedback_event settings_queue[k_settings_queue_capacity];
+  std::uint8_t settings_head;
+  std::uint8_t settings_count;
   // Submissions that copied `vhf` under state_lock and are still inside
   // VhfReadReportSubmit. Teardown nulls `vhf`, waits for zero, then deletes:
   // VhfDelete only waits for VHF's own callbacks, not for the keep-alive
@@ -353,6 +364,7 @@ void destroy_owned_controller(
   slot.state = slot_state::stopping;
   slot.feedback_pending = false;
   slot.haptic_count = 0;
+  slot.settings_count = 0;
   vhf = slot.vhf;
   slot.vhf = nullptr;
   unlock_context(context);
@@ -1239,6 +1251,10 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
     status = STATUS_ACCESS_DENIED;
   } else if (slot.state != slot_state::active) {
     status = STATUS_DEVICE_NOT_READY;
+  } else if (slot.settings_count != 0) {
+    *output = slot.settings_queue[slot.settings_head];
+    slot.settings_head = static_cast<std::uint8_t>((slot.settings_head + 1) % k_settings_queue_capacity);
+    --slot.settings_count;
   } else if (slot.haptic_count != 0) {
     *output = slot.haptic_queue[slot.haptic_head];
     slot.haptic_head = static_cast<std::uint8_t>((slot.haptic_head + 1) % k_haptic_queue_capacity);
@@ -1753,6 +1769,21 @@ void evt_vhf_set_feature(
       const bool accepted = set_sc26_feature(transfer->reportId, transfer->reportBuffer,
                                              transfer->reportBufferLen, &slot->sc26);
       status = accepted ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
+      if (accepted && transfer->reportId == k_sc26_features_report_id) {
+        // A settings write also goes to the client, whole and in order, so a
+        // real controller behind it runs with Steam's settings.
+        lvg::feedback_event events[k_settings_events_per_write] {};
+        const std::size_t n = apply_sc26_settings(transfer->reportBuffer, transfer->reportBufferLen,
+                                                  slot->controller_id, events, k_settings_events_per_write);
+        for (std::size_t i = 0; i < n; ++i) {
+          if (slot->settings_count == k_settings_queue_capacity) {
+            slot->settings_head = static_cast<std::uint8_t>((slot->settings_head + 1) % k_settings_queue_capacity);
+            --slot->settings_count;
+          }
+          slot->settings_queue[(slot->settings_head + slot->settings_count) % k_settings_queue_capacity] = events[i];
+          ++slot->settings_count;
+        }
+      }
     }
     unlock_context(context);
     if (operation_handle != nullptr) VhfAsyncOperationComplete(operation_handle, status);
@@ -2347,6 +2378,7 @@ void stop_owned_controllers(device_context *const context, const bool forget_tar
     auto &slot = context->controllers[index];
     slot.feedback_pending = false;
     slot.haptic_count = 0;
+    slot.settings_count = 0;
     if (slot.state == slot_state::active && slot.vhf != nullptr) {
       slot.state = slot_state::stopping;
       handles[index] = slot.vhf;
