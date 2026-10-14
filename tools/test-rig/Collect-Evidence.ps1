@@ -4,6 +4,12 @@
   the VHF driver state, the HID children Windows sees, Steam's controller logs and gamepad
   bindings, and Vibepollo's log lines about the virtual gamepad. Zips the folder.
 
+  The zip is meant to be attached to issues and PRs, so it carries only what the gamepad
+  investigation needs: from Steam's config.vdf only the gamepad binding keys (never the
+  login-token hex), and from Vibepollo's log only the lines about the virtual gamepad
+  (the full sunshine.log names clients, their addresses and pairing activity, and is not
+  copied). Widen the line filter below if an investigation needs more of the host log.
+
 .EXAMPLE
   .\Collect-Evidence.ps1                      # -> .\evidence-<machine>-<timestamp>.zip
 #>
@@ -34,9 +40,9 @@ if (Test-Path $vdf) {
     Get-Content $vdf | Select-String -CaseSensitive -Pattern '^\s*"SDL_GamepadBind' | ForEach-Object { $_.Line.Trim() } | Set-Content (Join-Path $OutDir 'steam-config-gamepad-lines.txt')
 }
 if (Test-Path $VibepolloLog) {
+    # Only the virtual-gamepad lines; the full host log is deliberately not copied (see the header).
     Get-Content $VibepolloLog | Select-String -Pattern 'gamepad|vhf|Steam Controller|virtual' | ForEach-Object { $_.Line } |
         Select-Object -Last 400 | Set-Content (Join-Path $OutDir 'vibepollo-gamepad-lines.txt')
-    Copy-Item $VibepolloLog (Join-Path $OutDir 'sunshine.log')
 }
 $zip = "$OutDir.zip"
 # Windows ships bsdtar; Compress-Archive's module does not load on every machine.

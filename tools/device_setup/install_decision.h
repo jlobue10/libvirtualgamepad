@@ -78,6 +78,40 @@ constexpr unsigned long k_win32_error_sharing_violation = 32;  // ERROR_SHARING_
   }
 }
 
+// Why UpdateDriverForPlugAndPlayDevices did not select the staged package. The
+// tool installs non-interactively (INSTALLFLAG_NONINTERACTIVE): a publisher that
+// Windows has not yet established as trusted must fail with a clear message
+// instead of a driver-trust prompt that nobody can see from an installer custom
+// action or a service session, where the call would otherwise block until the
+// installer's timeout. Windows declining to downgrade an equal/newer selected
+// package (ERROR_NO_MORE_ITEMS) is not a failure: the node may already be ready.
+enum class driver_update_verdict {
+  installed,
+  declined,
+  publisher_not_trusted,
+  failed,
+};
+constexpr unsigned long k_win32_error_no_more_items = 259;                          // ERROR_NO_MORE_ITEMS
+constexpr unsigned long k_win32_error_authenticode_trust_not_established = 0xE0000242;  // ERROR_AUTHENTICODE_TRUST_NOT_ESTABLISHED
+constexpr unsigned long k_win32_error_authenticode_publisher_not_trusted = 0xE0000243;  // ERROR_AUTHENTICODE_PUBLISHER_NOT_TRUSTED
+constexpr unsigned long k_win32_error_signature_osattribute_mismatch = 0xE0000244;      // ERROR_SIGNATURE_OSATTRIBUTE_MISMATCH
+[[nodiscard]] constexpr driver_update_verdict classify_driver_update(const bool succeeded,
+                                                                     const unsigned long update_error) noexcept {
+  if (succeeded) {
+    return driver_update_verdict::installed;
+  }
+  switch (update_error) {
+    case k_win32_error_no_more_items:
+      return driver_update_verdict::declined;
+    case k_win32_error_authenticode_trust_not_established:
+    case k_win32_error_authenticode_publisher_not_trusted:
+    case k_win32_error_signature_osattribute_mismatch:
+      return driver_update_verdict::publisher_not_trusted;
+    default:
+      return driver_update_verdict::failed;
+  }
+}
+
 constexpr int k_exit_ok = 0;
 constexpr int k_exit_not_ready = 3;
 constexpr int k_exit_reboot = 3010;

@@ -57,6 +57,23 @@ int main() {
   check(classify_open(k_win32_error_sharing_violation) == probe_verdict::in_use, "a sharing violation means a client holds the interface");
   check(classify_open(k_win32_error_access_denied) == probe_verdict::denied, "access denied is reported as denied");
   check(classify_open(2) == probe_verdict::absent, "file not found is absent");
+
+  // L44-02: the staged package is installed non-interactively; an untrusted publisher
+  // is reported as such instead of blocking on a prompt nobody can see.
+  using lvg::device_setup::classify_driver_update;
+  using lvg::device_setup::driver_update_verdict;
+  using lvg::device_setup::k_win32_error_authenticode_publisher_not_trusted;
+  using lvg::device_setup::k_win32_error_authenticode_trust_not_established;
+  using lvg::device_setup::k_win32_error_no_more_items;
+  using lvg::device_setup::k_win32_error_signature_osattribute_mismatch;
+  check(classify_driver_update(true, 0) == driver_update_verdict::installed, "a successful update selected the package");
+  check(classify_driver_update(false, k_win32_error_no_more_items) == driver_update_verdict::declined,
+        "Windows declining an equal/newer package is not a failure");
+  check(classify_driver_update(false, k_win32_error_authenticode_trust_not_established) == driver_update_verdict::publisher_not_trusted &&
+            classify_driver_update(false, k_win32_error_authenticode_publisher_not_trusted) == driver_update_verdict::publisher_not_trusted &&
+            classify_driver_update(false, k_win32_error_signature_osattribute_mismatch) == driver_update_verdict::publisher_not_trusted,
+        "an untrusted publisher is reported as such");
+  check(classify_driver_update(false, k_win32_error_access_denied) == driver_update_verdict::failed, "other errors stay failures");
   check(interface_ready(probe_verdict::in_use) && interface_ready(probe_verdict::answered), "in-use and answered interfaces are ready");
   check(!interface_ready(probe_verdict::denied) && !interface_ready(probe_verdict::absent), "denied and absent interfaces are not ready");
   check(attestation_due(install_outcome {.ready = interface_ready(probe_verdict::in_use)}), "an in-use interface still requires the DriverVer attestation");
