@@ -88,6 +88,20 @@ void sc26_tick(sc26_state *state, std::uint64_t now_us) noexcept;
   sc26_state *state,
   feedback_event *event) noexcept;
 
+// A control-channel SetFeature carrying SET_SETTINGS_VALUES (0x87) or
+// LOAD_DEFAULT_SETTINGS (0x8E) becomes steam_settings feedback events of at
+// most k_steam_settings_triples_max triples each, in the order written.
+// `data` starts at the report id, as set_sc26_feature's buffer does. Returns
+// the number of events written to `events`: 0 for any other command, an
+// empty write, a malformed transfer, or a write that would not fit
+// `capacity` (a settings write is forwarded whole or not at all).
+[[nodiscard]] std::size_t apply_sc26_settings(
+  const std::uint8_t *data,
+  std::size_t size,
+  std::uint32_t controller_id,
+  feedback_event *events,
+  std::size_t capacity) noexcept;
+
 // Control channel. set returns false only for a malformed transfer; get
 // returns the bytes written or 0.
 [[nodiscard]] bool set_sc26_feature(

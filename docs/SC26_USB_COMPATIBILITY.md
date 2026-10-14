@@ -72,7 +72,7 @@ Interrupt traffic in the same capture:
 | Descriptor, identity | the captured 372-byte descriptor, VID 28DE PID 1302 bcdDevice 0307 | `sc26_usb.h`, `profile.cpp` |
 | GET_ATTRIBUTES_VALUES | the six captured tags in the captured order; build times and board revision default to the captured unit's | `sc26_usb::set_feature` |
 | GET_STRING_ATTRIBUTE | tag 0 board serial, tag 1 unit serial, fixed 20-byte reply; serials are synthetic (`LVGSC26…`), never a real unit's | same |
-| SET_SETTINGS_VALUES and the GET_SETTINGS family | stored and read back as `(id, u16)` triples; lizard mode and IMU mode tracked | same |
+| SET_SETTINGS_VALUES and the GET_SETTINGS family | stored and read back as `(id, u16)` triples; lizard mode and IMU mode tracked. SET_SETTINGS_VALUES and LOAD_DEFAULT_SETTINGS are also forwarded verbatim as `steam_settings` feedback events (beta.148; nine triples per event, a 20-triple write is three events in order, drained ahead of haptics) so a client with the real controller can give its firmware Steam's settings instead of the defaults it boots with over BLE | same, `apply_sc26_settings` |
 | GET_DEVICE_INFO 0xF2 | 41 / 34 / 9-byte replies shaped like the unit's, carrying the state's build time, board revision and serial | same |
 | 0xED keyed values | `user/wireless_transport` answers one byte `00` (USB); `esb/bond` and `esb/bond_2` answer empty (no bonded puck); other keys answer empty | same |
 | 0xC1, 0xDC, 0xE2 | acknowledged, no reply payload, not counted as unknown | same |
@@ -96,6 +96,7 @@ Interrupt traffic in the same capture:
 | Battery | report 0x43 with level and charge state | emitted on a client battery update while a VHF read is pending, and every 3.5 s by the keep-alive worker while someone reads (an update without a reader clears that period so the first ready tick sends the fresh value) |
 | LEDs | none | the controller has no host-controlled LED |
 | Rumble / haptics | 0x80..0x85 → `steam_haptic` (verbatim) | 0x86..0x89 accepted, not forwarded |
+| Settings | SET_SETTINGS_VALUES / LOAD_DEFAULT_SETTINGS → `steam_settings` (verbatim, ≤ 9 triples per event) | the virtual device still answers GET_SETTINGS from its own table; the GET family is not forwarded |
 | Trigger rumble | none | not a feature of the device |
 | Feature reports | report 1 control channel as above; report 2 declared, never used by Steam | the driver refuses Get/SetFeature on report 2 |
 

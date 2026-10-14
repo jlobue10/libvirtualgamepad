@@ -119,6 +119,14 @@ enum class feedback_type : std::uint16_t {
   // 0x82, games with 0x80. A client with the real pads replays the report; one
   // without renders rumble from it.
   steam_haptic = 6,
+  // Steam's control-channel settings for a Steam Controller (2026), exactly as
+  // the host wrote them (steam_settings_feedback): SET_SETTINGS_VALUES 0x87 as
+  // (id, u16) triples, at most nine per event (a longer write becomes several
+  // events, in order), or LOAD_DEFAULT_SETTINGS 0x8E with no triples. The
+  // virtual device keeps answering GET_SETTINGS from its own table; a client
+  // with the real controller forwards the write so the firmware runs with
+  // Steam's settings (haptic gain and intensity among them), not its defaults.
+  steam_settings = 7,
 };
 
 // DualSense adaptive trigger modes, as the console's output report encodes them.
@@ -313,6 +321,18 @@ struct steam_haptic_feedback {
   std::uint8_t report[12];
 };
 
+// A control-channel settings write as Steam sent it: command 0x87
+// (SET_SETTINGS_VALUES) with `count` (id, lo, hi) triples, or 0x8E
+// (LOAD_DEFAULT_SETTINGS) with count 0. A 64-byte report holds twenty triples;
+// the driver splits a write into events of at most k_steam_settings_triples_max.
+inline constexpr std::uint8_t k_steam_settings_triples_max = 9;
+struct steam_settings_feedback {
+  std::uint8_t command;
+  std::uint8_t count;
+  std::uint8_t reserved[3];
+  std::uint8_t triples[k_steam_settings_triples_max * 3];
+};
+
 struct raw_hid_report_feedback {
   raw_hid_operation operation;
   std::uint8_t report_id;
@@ -349,6 +369,8 @@ inline constexpr std::uint16_t k_feedback_payload_unknown = 0xFFFF;
       return sizeof(playstation_output_feedback);
     case feedback_type::steam_haptic:
       return sizeof(steam_haptic_feedback);
+    case feedback_type::steam_settings:
+      return sizeof(steam_settings_feedback);
   }
   return k_feedback_payload_unknown;
 }
@@ -370,6 +392,8 @@ static_assert(sizeof(raw_hid_report_feedback) == 16);
 static_assert(sizeof(trigger_effect_feedback) == 11);
 static_assert(sizeof(playstation_output_feedback) == 32);
 static_assert(sizeof(steam_haptic_feedback) == 16);
+static_assert(sizeof(steam_settings_feedback) == 32);
+static_assert(sizeof(steam_settings_feedback) <= sizeof(feedback_event::payload));
 // Exactly fills the payload; anything larger needs another version bump.
 static_assert(sizeof(playstation_output_feedback) <= sizeof(feedback_event::payload));
 static_assert(sizeof(feedback_event) == 48);
