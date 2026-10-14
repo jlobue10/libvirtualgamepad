@@ -70,9 +70,10 @@ int main() {
   check(classify_driver_update(false, k_win32_error_no_more_items) == driver_update_verdict::declined,
         "Windows declining an equal/newer package is not a failure");
   check(classify_driver_update(false, k_win32_error_authenticode_trust_not_established) == driver_update_verdict::publisher_not_trusted &&
-            classify_driver_update(false, k_win32_error_authenticode_publisher_not_trusted) == driver_update_verdict::publisher_not_trusted &&
-            classify_driver_update(false, k_win32_error_signature_osattribute_mismatch) == driver_update_verdict::publisher_not_trusted,
+            classify_driver_update(false, k_win32_error_authenticode_publisher_not_trusted) == driver_update_verdict::publisher_not_trusted,
         "an untrusted publisher is reported as such");
+  check(classify_driver_update(false, k_win32_error_signature_osattribute_mismatch) == driver_update_verdict::signature_os_mismatch,
+        "a Windows-version signature mismatch does not recommend changing publisher trust");
   check(classify_driver_update(false, k_win32_error_access_denied) == driver_update_verdict::failed, "other errors stay failures");
   check(interface_ready(probe_verdict::in_use) && interface_ready(probe_verdict::answered), "in-use and answered interfaces are ready");
   check(!interface_ready(probe_verdict::denied) && !interface_ready(probe_verdict::absent), "denied and absent interfaces are not ready");
