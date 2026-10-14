@@ -1861,9 +1861,11 @@ int main() {
     check(pump.classify(0, 40, 0) == report_kind::transition, "a trigger leaving rest is discrete");
     check(pump.classify(0, 200, 0) == report_kind::continuous, "further travel is continuous");
     check(pump.classify(0, 0, 0) == report_kind::transition, "a trigger returning to rest is discrete");
-    // The driver classifies SC26 reports on the encoded button word, so the
+    // The driver classifies SC26 reports on the encoded button word with the
+    // deflection-derived stick touch masked out (classify_buttons, L42-01), so the
     // synthesised full-pull click (>= 0xF0, the value the host ends a batch at)
-    // is a transition while travel below it stays continuous.
+    // is a transition while travel below it stays continuous, and a stick resting
+    // on the touch threshold cannot turn every snapshot into a transition.
     sc26_state clicks {};
     clicks.reset();
     input_state_request pull {};
@@ -1872,13 +1874,25 @@ int main() {
     const auto sc26_classify = [&](const std::uint8_t lt) {
       pull.left_trigger = lt;
       const auto word = encode_sc26_input(pull, &clicks).buttons;
-      return pump.classify(static_cast<std::uint32_t>(word), lt, pull.right_trigger);
+      // As driver.cpp does: deflection-derived stick touch is not a classification edge.
+      return pump.classify(sc26_usb::classify_buttons(clicks.device, word), lt, pull.right_trigger);
     };
     check(sc26_classify(0x10) == report_kind::transition, "sc26 trigger leaving rest is discrete");
     check(sc26_classify(0xEF) == report_kind::continuous, "sc26 travel to 0xEF is continuous");
     check(sc26_classify(0xF0) == report_kind::transition, "sc26 full pull at 0xF0 is a transition");
     check(sc26_classify(0xFF) == report_kind::continuous, "sc26 travel past the click is continuous");
     check(sc26_classify(0xEF) == report_kind::transition, "sc26 click release at 0xEF is a transition");
+    pull.left_x = static_cast<std::int16_t>(sc26_usb::stick_touch_deflection + 1);
+    check(sc26_classify(0xEF) == report_kind::continuous, "sc26 deflection crossing the touch threshold is continuous");
+    pull.left_x = 0;
+    check(sc26_classify(0xEF) == report_kind::continuous, "sc26 deflection leaving the threshold is continuous");
+    pull.buttons = button_mask::left_stick_touch;
+    check(sc26_classify(0xEF) == report_kind::transition, "sc26 client stick touch is a transition");
+    pull.buttons = 0;
+    check(sc26_classify(0xEF) == report_kind::transition, "sc26 client stick-touch release is a transition");
+    pull.left_x = static_cast<std::int16_t>(sc26_usb::stick_touch_deflection + 1);
+    check(sc26_classify(0xEF) == report_kind::continuous, "sc26 deflection stays silent once the client reported touch");
+    pull.left_x = 0;
   }
 
   {

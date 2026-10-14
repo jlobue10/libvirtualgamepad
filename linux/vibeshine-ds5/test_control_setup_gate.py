@@ -49,6 +49,8 @@ for ok, name in (
      'the HID SET_REPORT and UAC SET_CUR data stages each stall when the ep0 request is gone'),
     ('slot->ep0_pending_cs = 0;' in hid and 'slot->ep0_pending_cs = 0;' in block('static int ds5_queue_ep0('),
      'a HID OUT stage and every ep0 IN reply/ack clear a stale audio selector before queueing'),
+    ('pr_debug_ratelimited' in block('static void ds5_push_event(') and 'dropped = ++slot->pcm_dropped' in block('static void ds5_push_event('),
+     'a refused PCM packet increments the per-CREATE count and is logged'),
 ):
     print(('PASS: ' if ok else 'FAIL: ') + name)
     failures += not ok

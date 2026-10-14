@@ -107,6 +107,8 @@ static bool kfifo_put(struct fifo *f, struct vibeshine_ds5_event ev) {
   f->event[f->tail++ % FAKE_FIFO_DEPTH] = ev; return true;
 }
 #define wake_up_interruptible(q) ((void)(q))
+static unsigned pr_debug_calls;
+#define pr_debug_ratelimited(...) (++pr_debug_calls)
 static int copy_from_user(void *dst, const void *src, size_t size) { memcpy(dst, src, size); return 0; }
 #define copy_to_user copy_from_user
 static void usb_gadget_connect(struct usb_gadget *g) { (void)g; }
@@ -173,6 +175,7 @@ int main(void) {
     for (int i = 0; i < FAKE_FIFO_DEPTH + 1; ++i) { pcm[0] = (u8)i; ds5_push_event(&ds5_slots[0], VIBESHINE_DS5_EVENT_PCM, pcm, sizeof(pcm)); }
     ds5_push_event(&ds5_slots[0], VIBESHINE_DS5_EVENT_OUTPUT, report, sizeof(report));
     check(ds5_slots[0].pcm_dropped == 1 && ds5_slots[0].output_valid, "a full PCM FIFO refuses the packet and counts it, the output report is kept");
+    check(pr_debug_calls == 1, "a refused PCM packet is logged (ratelimited), an accepted one is not");
     check(ds5_read(&file, (char *)&received, sizeof(received), NULL) == sizeof(received) &&
           received.type == VIBESHINE_DS5_EVENT_OUTPUT && received.data[1] == 0xaa,
           "the output report is read ahead of the queued PCM packets");
