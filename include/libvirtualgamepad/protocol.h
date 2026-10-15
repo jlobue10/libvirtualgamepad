@@ -178,6 +178,44 @@ struct query_info_request {
   request_header header;
 };
 
+// Feedback the driver had to discard for one controller, so a host can tell a
+// quiet controller from one whose output is being thrown away. Each counter is
+// monotonic for the life of the slot (destroy resets it) and saturates at 255
+// on the wire; the driver keeps the full count. Steam's haptic and settings
+// rings and the input pump drop the oldest entry when the host stops polling.
+struct feedback_counters {
+  // Ordinary (non-stop) Steam haptic events evicted from the per-slot ring to
+  // admit a newer one. A stop that replaced an older equivalent stop is a
+  // coalescing, not an eviction, and is not counted.
+  std::uint8_t haptic_evicted;
+  // Settings events (one chunk of a SET_SETTINGS_VALUES write, or a
+  // LOAD_DEFAULT_SETTINGS) evicted from the settings ring.
+  std::uint8_t settings_evicted;
+  // Input transitions (button, D-pad, trigger-threshold, touch lifecycle) the
+  // report pump dropped because VHF had no read pending for too long.
+  std::uint8_t transitions_dropped;
+  // Steam Controller feature commands the driver acknowledged without
+  // understanding (sc26_usb::feature_state::unknown_commands).
+  std::uint8_t unknown_commands;
+};
+
+[[nodiscard]] constexpr std::uint8_t saturate_counter(const std::uint32_t value) noexcept {
+  return value > 0xFFu ? std::uint8_t {0xFF} : static_cast<std::uint8_t>(value);
+}
+
+// ioctl_query_info answers two request shapes without a version bump; the
+// header's size field is what tells them apart:
+//   * query_info_request (8 bytes): the device-wide answer, `counters` all
+//     zero. This is the handshake every host sends, and hosts built before
+//     the counters existed reject a response whose word 24..27 is non-zero,
+//     so the device query must keep it zero.
+//   * controller_id_request (12 bytes): the same answer with `counters`
+//     filled for that slot (STATUS_NOT_FOUND if empty, STATUS_ACCESS_DENIED
+//     if another handle owns it). A driver that predates the counters answers
+//     this shape with STATUS_INVALID_BUFFER_SIZE, which the client reports as
+//     ERROR_REVISION_MISMATCH.
+// `counters` occupies the word that was `reserved` before; the layout and
+// size are unchanged.
 struct query_info_response {
   request_header header;
   std::uint16_t minimum_protocol_version;
@@ -185,7 +223,7 @@ struct query_info_response {
   profile_mask_t available_profiles;
   std::uint32_t available_features;
   std::uint32_t maximum_controllers;
-  std::uint32_t reserved;
+  feedback_counters counters;
 };
 
 struct controller_id_request {
@@ -380,7 +418,9 @@ inline constexpr std::uint16_t k_feedback_payload_unknown = 0xFFFF;
 static_assert(sizeof(request_header) == 8);
 static_assert(sizeof(create_controller_request) == 16);
 static_assert(sizeof(query_info_request) == 8);
+static_assert(sizeof(feedback_counters) == 4);
 static_assert(sizeof(query_info_response) == 28);
+static_assert(offsetof(query_info_response, counters) == 24);
 static_assert(sizeof(controller_id_request) == 12);
 static_assert(sizeof(input_state_request) == 28);
 static_assert(sizeof(touch_state_request) == 22);

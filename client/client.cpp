@@ -269,10 +269,43 @@ DWORD client::query_info() noexcept {
       response.minimum_protocol_version > k_protocol_version ||
       response.maximum_protocol_version < k_protocol_version ||
       response.maximum_controllers == 0 || response.maximum_controllers > k_max_controllers ||
-      response.reserved != 0) {
+      response.counters.haptic_evicted != 0 || response.counters.settings_evicted != 0 ||
+      response.counters.transitions_dropped != 0 || response.counters.unknown_commands != 0) {
+    // The device query carries no counters: a non-zero word there is the
+    // other protocol generation, as it was before the word had a meaning.
     return ERROR_REVISION_MISMATCH;
   }
   info_ = response;
+  return ERROR_SUCCESS;
+}
+
+DWORD client::query_feedback_counters(
+  const std::uint32_t controller_id,
+  feedback_counters *const counters) noexcept {
+  if (counters == nullptr || controller_id >= maximum_controllers()) {
+    return ERROR_INVALID_PARAMETER;
+  }
+
+  controller_id_request request {};
+  initialize_header(&request.header, sizeof(request));
+  request.controller_id = controller_id;
+
+  query_info_response response {};
+  DWORD bytes = 0;
+  const DWORD status = issue(
+    ioctl_query_info,
+    &request,
+    sizeof(request),
+    &response,
+    sizeof(response),
+    &bytes);
+  if (status != ERROR_SUCCESS) {
+    return status;
+  }
+  if (bytes != sizeof(response) || !valid_request(&response, bytes)) {
+    return ERROR_INVALID_DATA;
+  }
+  *counters = response.counters;
   return ERROR_SUCCESS;
 }
 

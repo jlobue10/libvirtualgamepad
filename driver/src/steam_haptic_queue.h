@@ -28,9 +28,12 @@ inline unsigned haptic_stop_key(const lvg::feedback_event &event) {
     return steam_haptic_stop_key(haptic.report, haptic.length);
 }
 
+// `evicted`, when given, is incremented once for each ordinary (non-stop)
+// event thrown away to admit `event` into a full ring. A stop that replaces
+// an older equivalent stop coalesces rather than evicts and is not counted.
 template<std::size_t Capacity>
 bool enqueue_haptic(lvg::feedback_event (&queue)[Capacity], std::uint8_t &head, std::uint8_t &count,
-                    const lvg::feedback_event &event) {
+                    const lvg::feedback_event &event, std::uint32_t *const evicted = nullptr) {
     // Seven distinct stop keys (0x80, 0x81 x3 sides, 0x82 x3 sides): one more slot keeps an
     // ordinary effect admissible even when every stop is pending, so enqueue cannot refuse.
     static_assert(Capacity >= 8 && Capacity <= 255);
@@ -46,6 +49,7 @@ bool enqueue_haptic(lvg::feedback_event (&queue)[Capacity], std::uint8_t &head, 
             if (haptic_stop_key(queue[(head + i) % Capacity]) == 0) { victim = i; break; }
         }
         if (victim == count) return false;
+        if (evicted != nullptr) ++*evicted;
     }
     if (victim < count) {
         for (std::size_t i = victim; i + 1 < count; ++i) queue[(head + i) % Capacity] = queue[(head + i + 1) % Capacity];
@@ -54,5 +58,21 @@ bool enqueue_haptic(lvg::feedback_event (&queue)[Capacity], std::uint8_t &head, 
     queue[(head + count) % Capacity] = event;
     ++count;
     return true;
+}
+
+// Steam's settings writes travel whole and in order, so this ring never
+// coalesces: a full ring drops its oldest event (which may be chunk 1 of a
+// three-chunk SET_SETTINGS_VALUES write) and counts it in `evicted`.
+template<std::size_t Capacity>
+void enqueue_settings(lvg::feedback_event (&queue)[Capacity], std::uint8_t &head, std::uint8_t &count,
+                      const lvg::feedback_event &event, std::uint32_t &evicted) {
+    static_assert(Capacity >= 1 && Capacity <= 255);
+    if (count == Capacity) {
+        head = static_cast<std::uint8_t>((head + 1) % Capacity);
+        --count;
+        ++evicted;
+    }
+    queue[(head + count) % Capacity] = event;
+    ++count;
 }
 } // namespace lvg::driver

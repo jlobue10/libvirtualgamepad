@@ -111,7 +111,7 @@ struct controller_slot {
   bool feedback_pending;
   lvg::feedback_event feedback;
   // Haptic reports of a Steam Controller, oldest first; drained one per poll
-  // ahead of `feedback`. The oldest is dropped when full.
+  // ahead of `feedback`. The oldest ordinary event is dropped when full.
   lvg::feedback_event haptic_queue[k_haptic_queue_capacity];
   std::uint8_t haptic_head;
   std::uint8_t haptic_count;
@@ -120,6 +120,13 @@ struct controller_slot {
   lvg::feedback_event settings_queue[k_settings_queue_capacity];
   std::uint8_t settings_head;
   std::uint8_t settings_count;
+  // Events the two rings above threw away because the host did not poll in
+  // time. Written under state_lock, monotonic until reset_slot zeroes the
+  // slot, and read back by ioctl_query_info with a controller_id_request
+  // (feedback_counters_of) together with the pump's dropped transitions and
+  // the feature channel's unknown commands.
+  std::uint32_t haptic_evicted;
+  std::uint32_t settings_evicted;
   // Submissions that copied `vhf` under state_lock and are still inside
   // VhfReadReportSubmit. Teardown nulls `vhf`, waits for zero, then deletes:
   // VhfDelete only waits for VHF's own callbacks, not for the keep-alive
@@ -1229,6 +1236,63 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
   return status;
 }
 
+// The device-wide half of ioctl_query_info, the same for both request shapes.
+void fill_query_info(lvg::query_info_response *const output) noexcept {
+  *output = {};
+  output->header.size = sizeof(*output);
+  output->header.version = lvg::k_protocol_version;
+  output->minimum_protocol_version = lvg::k_protocol_version;
+  output->maximum_protocol_version = lvg::k_protocol_version;
+  output->available_profiles = lvg::driver::available_profiles();
+  // Advertised device-wide; a profile without a touchpad, motion
+  // sensors, or a battery answers those IOCTLs with STATUS_NOT_SUPPORTED.
+  output->available_features = lvg::feature_input_state | lvg::feature_feedback |
+                               lvg::feature_touch | lvg::feature_motion |
+                               lvg::feature_battery |
+                               lvg::feature_hid_feature_reports;
+  output->maximum_controllers = lvg::k_max_controllers;
+}
+
+// What this slot has had to discard since it was created, saturated to the
+// wire's u8 fields. Caller holds state_lock: every source is written under it.
+[[nodiscard]] lvg::feedback_counters feedback_counters_of(const controller_slot &slot) noexcept {
+  lvg::feedback_counters counters {};
+  counters.haptic_evicted = lvg::saturate_counter(slot.haptic_evicted);
+  counters.settings_evicted = lvg::saturate_counter(slot.settings_evicted);
+  counters.transitions_dropped = lvg::saturate_counter(slot.pump.dropped_transitions());
+  counters.unknown_commands = lvg::saturate_counter(slot.sc26.features.unknown_commands);
+  return counters;
+}
+
+// ioctl_query_info with a controller_id_request: the device-wide answer plus
+// the slot's feedback_counters. The slot only has to exist and belong to the
+// caller; a stopping slot still reports what it dropped, and reset_slot zeroes
+// the counters once it is released.
+[[nodiscard]] NTSTATUS query_controller_info(
+  device_context *const context,
+  const WDFFILEOBJECT owner,
+  const lvg::controller_id_request &request,
+  lvg::query_info_response *const output) noexcept {
+  if (request.controller_id >= lvg::k_max_controllers) {
+    return STATUS_INVALID_PARAMETER;
+  }
+
+  auto &slot = context->controllers[request.controller_id];
+  fill_query_info(output);
+  lock_context(context);
+  NTSTATUS status = STATUS_SUCCESS;
+  // The same ladder as poll_feedback: emptiness first, then ownership.
+  if (slot.state == slot_state::empty) {
+    status = STATUS_NOT_FOUND;
+  } else if (!is_owned_by(slot, owner)) {
+    status = STATUS_ACCESS_DENIED;
+  } else {
+    output->counters = feedback_counters_of(slot);
+  }
+  unlock_context(context);
+  return status;
+}
+
 // `request` must not alias `output` (the IOCTL path passes a copy): every
 // field of the request is read before and after the event is stored.
 [[nodiscard]] NTSTATUS poll_feedback(
@@ -1429,7 +1493,8 @@ void evt_vhf_write_report(
         // effects remain ordered; an equivalent newer stop moves to the tail.
         // Cannot refuse at the production capacity (see the static_assert): the
         // ring always has an evictable ordinary effect when every stop is pending.
-        std::ignore = lvg::driver::enqueue_haptic(slot->haptic_queue, slot->haptic_head, slot->haptic_count, event);
+        std::ignore = lvg::driver::enqueue_haptic(slot->haptic_queue, slot->haptic_head, slot->haptic_count, event,
+                                                  &slot->haptic_evicted);
         ack_size = lvg::sc26_usb::encode_haptic_ack(transfer->reportBuffer, transfer->reportBufferLen,
                                                     ack, sizeof(ack));
         status = STATUS_SUCCESS;
@@ -1776,12 +1841,8 @@ void evt_vhf_set_feature(
         const std::size_t n = apply_sc26_settings(transfer->reportBuffer, transfer->reportBufferLen,
                                                   slot->controller_id, events, k_settings_events_per_write);
         for (std::size_t i = 0; i < n; ++i) {
-          if (slot->settings_count == k_settings_queue_capacity) {
-            slot->settings_head = static_cast<std::uint8_t>((slot->settings_head + 1) % k_settings_queue_capacity);
-            --slot->settings_count;
-          }
-          slot->settings_queue[(slot->settings_head + slot->settings_count) % k_settings_queue_capacity] = events[i];
-          ++slot->settings_count;
+          enqueue_settings(slot->settings_queue, slot->settings_head, slot->settings_count, events[i],
+                           slot->settings_evicted);
         }
       }
     }
@@ -2221,9 +2282,26 @@ void evt_io_device_control(
 
   switch (io_control_code) {
     case lvg::ioctl_query_info: {
-      lvg::query_info_request *input = nullptr;
-      status = retrieve_request(request, &input);
+      // Two request shapes share this code (protocol.h, query_info_response):
+      // the 8-byte device query every host sends, and a controller_id_request
+      // asking for one slot's feedback_counters as well. METHOD_BUFFERED
+      // shares one buffer for input and output, so the request is copied out
+      // before the response overwrites it.
+      PVOID raw = nullptr;
+      size_t bytes = 0;
+      status = WdfRequestRetrieveInputBuffer(request, sizeof(lvg::request_header), &raw, &bytes);
       if (!NT_SUCCESS(status)) {
+        break;
+      }
+      lvg::controller_id_request controller_query {};
+      bool per_controller = false;
+      if (lvg::valid_request(static_cast<const lvg::query_info_request *>(raw), bytes)) {
+        per_controller = false;
+      } else if (lvg::valid_request(static_cast<const lvg::controller_id_request *>(raw), bytes)) {
+        std::memcpy(&controller_query, raw, sizeof(controller_query));
+        per_controller = true;
+      } else {
+        status = STATUS_INVALID_BUFFER_SIZE;
         break;
       }
       if (output_buffer_length < sizeof(lvg::query_info_response)) {
@@ -2236,20 +2314,15 @@ void evt_io_device_control(
         sizeof(*output),
         reinterpret_cast<PVOID *>(&output),
         nullptr);
+      if (!NT_SUCCESS(status)) {
+        break;
+      }
+      if (per_controller) {
+        status = query_controller_info(context, owner, controller_query, output);
+      } else {
+        fill_query_info(output);
+      }
       if (NT_SUCCESS(status)) {
-        *output = {};
-        output->header.size = sizeof(*output);
-        output->header.version = lvg::k_protocol_version;
-        output->minimum_protocol_version = lvg::k_protocol_version;
-        output->maximum_protocol_version = lvg::k_protocol_version;
-        output->available_profiles = lvg::driver::available_profiles();
-        // Advertised device-wide; a profile without a touchpad, motion
-        // sensors, or a battery answers those IOCTLs with STATUS_NOT_SUPPORTED.
-        output->available_features = lvg::feature_input_state | lvg::feature_feedback |
-                                     lvg::feature_touch | lvg::feature_motion |
-                                     lvg::feature_battery |
-                                     lvg::feature_hid_feature_reports;
-        output->maximum_controllers = lvg::k_max_controllers;
         information = sizeof(*output);
       }
       break;
