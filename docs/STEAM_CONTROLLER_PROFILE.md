@@ -333,10 +333,11 @@ step 3 is next.
   Two feature-channel notes: 0x8F (`cmd_trigger_haptic_pulse`, the legacy control-channel
   pulse) is acknowledged but not forwarded and not counted, since Steam 2026 drives haptics
   through 0x81 output reports; a command the driver does not know (say a hypothetical 0xEA) is
-  acknowledged with an empty reply and counted in `unknown_commands`. The 8-byte device query every host sends
-  keeps that word zero, so hosts built before the counters still handshake, and a driver built
-  before them answers the controller shape with `ERROR_REVISION_MISMATCH`. Steam Controller
-  evictions are not logged by the driver (it has no trace infrastructure); poll the counters.
+  acknowledged with an empty reply and counted in `unknown_commands`. The 8-byte device query
+  every host sends keeps that word zero, so hosts built before the counters still handshake,
+  and a driver built before them answers the controller shape with `ERROR_REVISION_MISMATCH`.
+  Steam Controller evictions are not logged by the driver (it has no trace infrastructure);
+  poll the counters.
   Add a `raw_hid_report_feedback` event if Steam misbehaves and the capture does not explain it.
 
 ### 7.6 Working notes
