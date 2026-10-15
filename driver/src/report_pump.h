@@ -55,8 +55,9 @@ class report_pump {
  public:
   void reset() noexcept;
 
-  // Records a report for delivery. Returns false when a transition had to be
-  // discarded because the queue was full, which the caller may want to log.
+  // Records a report for delivery. Returns false when something was discarded
+  // because the ordered queue was full: the oldest queued entry when the new
+  // report is a transition, the new report itself when it is an aside.
   bool enqueue(const void *data, std::uint32_t length, std::uint8_t report_id, report_kind kind) noexcept;
 
   // Marks VHF able to accept another report.
@@ -87,6 +88,9 @@ class report_pump {
     return transition_count_;
   }
 
+  // Transitions evicted from the full ordered queue to admit a newer
+  // transition. Asides never count: one that finds the queue full is dropped
+  // in place of a transition, and one a transition evicts is regenerated.
   [[nodiscard]] std::uint32_t dropped_transitions() const noexcept {
     return dropped_;
   }
@@ -99,6 +103,7 @@ class report_pump {
   report_buffer priority_[k_priority_capacity] {};
   std::uint8_t priority_count_ {};
   report_buffer transitions_[k_transition_capacity] {};
+  bool transition_aside_[k_transition_capacity] {};
   std::uint8_t transition_head_ {};
   std::uint8_t transition_count_ {};
   report_buffer latest_ {};

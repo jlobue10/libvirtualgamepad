@@ -191,8 +191,13 @@ struct feedback_counters {
   // Settings events (one chunk of a SET_SETTINGS_VALUES write, or a
   // LOAD_DEFAULT_SETTINGS) evicted from the settings ring.
   std::uint8_t settings_evicted;
-  // Input transitions (button, D-pad, trigger-threshold, touch lifecycle) the
-  // report pump dropped because VHF had no read pending for too long.
+  // Input transitions (button, D-pad, trigger-threshold, touch lifecycle)
+  // evicted from the report pump's 16-deep ordered ring to admit a newer
+  // transition because VHF had no read pending for too long. Asides (the
+  // 0x43 battery level, the 0x44 haptic ack) share that ring but never
+  // count: a new aside that finds the ring full is dropped instead of
+  // evicting a transition, and an aside a transition evicts is regenerated
+  // by the next stop pulse or battery tick.
   std::uint8_t transitions_dropped;
   // Steam Controller feature commands the driver acknowledged without
   // understanding (sc26_usb::feature_state::unknown_commands).

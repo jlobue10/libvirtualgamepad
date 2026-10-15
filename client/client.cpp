@@ -282,6 +282,9 @@ DWORD client::query_info() noexcept {
 DWORD client::query_feedback_counters(
   const std::uint32_t controller_id,
   feedback_counters *const counters) noexcept {
+  if (!connected()) {
+    return ERROR_INVALID_HANDLE;
+  }
   if (counters == nullptr || controller_id >= maximum_controllers()) {
     return ERROR_INVALID_PARAMETER;
   }

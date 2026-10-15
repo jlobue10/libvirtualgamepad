@@ -1911,6 +1911,83 @@ int main() {
   }
 
   {
+    // Asides share the ordered ring with transitions but are regenerated (the
+    // next stop pulse acks again, the next tick reports the battery), so a
+    // full ring drops a new aside rather than a queued button edge, and an
+    // aside is never a dropped transition however it leaves the ring.
+    const std::uint8_t ack[6] = {0x44, 4, 2, 0, 0, 0};
+    std::uint8_t edge[2] = {0xA1, 0};
+    report_buffer out {};
+
+    // 16 transitions, then an aside: the aside is dropped, nothing is counted.
+    report_pump pump;
+    pump.reset();
+    for (int i = 0; i < k_transition_capacity; ++i) {
+      edge[1] = static_cast<std::uint8_t>(i);
+      check(pump.enqueue(edge, sizeof(edge), 0x42, report_kind::transition), "edge queued");
+    }
+    check(!pump.enqueue(ack, sizeof(ack), 0x44, report_kind::aside),
+          "an aside finding the ring full is refused");
+    check(pump.transitions_waiting() == k_transition_capacity && pump.dropped_transitions() == 0,
+          "the refused aside evicted nothing and counted nothing, got " +
+            std::to_string(pump.dropped_transitions()));
+    bool only_edges = true;
+    for (int i = 0; i < k_transition_capacity; ++i) {
+      pump.set_ready();
+      only_edges = only_edges && take_report(pump, out) && out.report_id == 0x42 && out.data[1] == i;
+    }
+    pump.set_ready();
+    check(only_edges && !take_report(pump, out), "every edge goes out in order and the aside is gone");
+
+    // 16 asides, then a transition: the oldest aside is evicted, nothing is counted.
+    pump.reset();
+    for (int i = 0; i < k_transition_capacity; ++i) {
+      check(pump.enqueue(ack, sizeof(ack), 0x44, report_kind::aside), "ack queued");
+    }
+    check(!pump.enqueue(edge, sizeof(edge), 0x42, report_kind::transition),
+          "a transition finding the ring full of asides reports an eviction");
+    check(pump.transitions_waiting() == k_transition_capacity && pump.dropped_transitions() == 0,
+          "an evicted aside is not a dropped transition, got " +
+            std::to_string(pump.dropped_transitions()));
+    std::uint8_t last_id = 0;
+    int acks = 0;
+    for (int i = 0; i < k_transition_capacity; ++i) {
+      pump.set_ready();
+      if (take_report(pump, out)) {
+        last_id = out.report_id;
+        acks += out.report_id == 0x44;
+      }
+    }
+    check(acks == k_transition_capacity - 1 && last_id == 0x42,
+          "15 asides go out and the transition follows them");
+
+    // An aside at the head, 15 transitions behind it, then a transition: the
+    // aside is the victim and the counter stays at zero.
+    pump.reset();
+    check(pump.enqueue(ack, sizeof(ack), 0x44, report_kind::aside), "oldest ack queued");
+    for (int i = 0; i < k_transition_capacity - 1; ++i) {
+      check(pump.enqueue(edge, sizeof(edge), 0x42, report_kind::transition), "edge queued behind it");
+    }
+    check(!pump.enqueue(edge, sizeof(edge), 0x42, report_kind::transition) &&
+            pump.dropped_transitions() == 0,
+          "the head aside is evicted and not counted");
+    pump.set_ready();
+    check(take_report(pump, out) && out.report_id == 0x42, "a transition is now at the head");
+
+    // 16 transitions, then a transition: that is the one dropped transition.
+    pump.reset();
+    for (int i = 0; i < k_transition_capacity; ++i) {
+      check(pump.enqueue(edge, sizeof(edge), 0x42, report_kind::transition), "edge queued");
+    }
+    check(!pump.enqueue(edge, sizeof(edge), 0x42, report_kind::transition) &&
+            pump.dropped_transitions() == 1,
+          "a transition evicting a transition counts once, got " +
+            std::to_string(pump.dropped_transitions()));
+    pump.reset();
+    check(pump.dropped_transitions() == 0 && pump.transitions_waiting() == 0, "reset clears the ring and the count");
+  }
+
+  {
     // Classification drives all of the above, so it has to agree with what a
     // player would call a discrete change.
     report_pump pump;
