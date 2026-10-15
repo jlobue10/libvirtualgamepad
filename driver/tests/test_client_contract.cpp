@@ -41,6 +41,7 @@ struct fake_driver {
   DWORD last_input_size {0};
   DWORD output_bytes {0};
   lvg::feedback_event event {};
+  lvg::query_info_response info {};
 } driver;
 
 BOOL WINAPI fake_DeviceIoControl(
@@ -59,6 +60,8 @@ BOOL WINAPI fake_DeviceIoControl(
   }
   if (output != nullptr && output_size >= sizeof(driver.event)) {
     std::memcpy(output, &driver.event, sizeof(driver.event));
+  } else if (output != nullptr && output_size >= sizeof(driver.info)) {
+    std::memcpy(output, &driver.info, sizeof(driver.info));
   }
   *bytes = driver.output_bytes;
   return TRUE;
@@ -178,6 +181,46 @@ int main() {
     driver.event = good_event(1);
     driver.event.header.size = sizeof(driver.event) - 8;
     check(c.poll_feedback(1, &out) == ERROR_INVALID_DATA, "a wrong header size is rejected");
+    c.handle_ = INVALID_HANDLE_VALUE;
+  }
+  {
+    // query_feedback_counters is the controller shape of ioctl_query_info: the
+    // counters ride in the word the device query keeps zero.
+    auto c = connected_client();
+    lvg::feedback_counters counters {};
+    driver.last_code = 0;
+    check(c.query_feedback_counters(0, nullptr) == ERROR_INVALID_PARAMETER, "counters with no output are refused");
+    check(c.query_feedback_counters(4, &counters) == ERROR_INVALID_PARAMETER,
+          "counters for an out-of-range slot are refused");
+    check(driver.last_code == 0, "those pre-flight failures never reach the driver");
+    driver.info = {};
+    driver.info.header.size = sizeof(driver.info);
+    driver.info.header.version = lvg::k_protocol_version;
+    driver.info.minimum_protocol_version = lvg::k_protocol_version;
+    driver.info.maximum_protocol_version = lvg::k_protocol_version;
+    driver.info.maximum_controllers = 4;
+    driver.info.counters = {5, 1, 3, 2};
+    driver.output_bytes = sizeof(driver.info);
+    check(c.query_feedback_counters(2, &counters) == ERROR_SUCCESS &&
+            driver.last_code == lvg::ioctl_query_info &&
+            driver.last_input_size == sizeof(lvg::controller_id_request) &&
+            counters.haptic_evicted == 5 && counters.settings_evicted == 1 &&
+            counters.transitions_dropped == 3 && counters.unknown_commands == 2,
+          "the counters query sends a controller_id_request on ioctl_query_info and reads back all four");
+    check(c.query_info() == ERROR_REVISION_MISMATCH,
+          "a device query answered with a non-zero counters word is another protocol generation");
+    driver.info.counters = {};
+    check(c.query_info() == ERROR_SUCCESS && driver.last_input_size == sizeof(lvg::query_info_request),
+          "the device query still sends the 8-byte request and accepts a zero counters word");
+    driver.output_bytes = sizeof(driver.info) - 1;
+    check(c.query_feedback_counters(2, &counters) == ERROR_INVALID_DATA, "a short counters response is rejected");
+    driver.output_bytes = sizeof(driver.info);
+    driver.result = FALSE;
+    driver.error = ERROR_INVALID_USER_BUFFER;
+    check(c.query_feedback_counters(2, &counters) == ERROR_REVISION_MISMATCH,
+          "a driver that predates the counters (STATUS_INVALID_BUFFER_SIZE) is ERROR_REVISION_MISMATCH");
+    driver.result = TRUE;
+    driver.error = ERROR_SUCCESS;
     c.handle_ = INVALID_HANDLE_VALUE;
   }
   if (failures == 0) {

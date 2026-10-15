@@ -318,9 +318,18 @@ step 3 is next.
   gamepad = `vhf_steam`, stream from the headset.
 - Vibepollo logs: `%ProgramFiles%\Vibepollo\config\sunshine.log`; look for
   "will use the Vibepollo virtual gamepad driver" and the profile description
-  "a Steam Controller (2026)". Unknown feature commands are counted in the driver
-  (`feature_state.unknown_commands`) but not yet surfaced; add a `raw_hid_report_feedback`
-  event if Steam misbehaves and the capture does not explain it.
+  "a Steam Controller (2026)". What the driver had to throw away is counted per slot and read
+  back with `lvg::client::query_feedback_counters` (`ioctl_query_info` issued with a
+  `controller_id_request`; `protocol.h`, `feedback_counters`): `query_info_response::counters`
+  carries four u8 counters that saturate at 255 and reset when the slot is destroyed - ordinary
+  haptic events evicted from the 8-deep haptic ring (a stop coalescing into an equal pending stop
+  is not counted), settings chunks evicted from the 8-deep settings ring (one may be chunk 1 of a
+  three-chunk `SET_SETTINGS_VALUES` write), input transitions the report pump dropped, and unknown
+  feature commands (`feature_state.unknown_commands`). The 8-byte device query every host sends
+  keeps that word zero, so hosts built before the counters still handshake, and a driver built
+  before them answers the controller shape with `ERROR_REVISION_MISMATCH`. Steam Controller
+  evictions are not logged by the driver (it has no trace infrastructure); poll the counters.
+  Add a `raw_hid_report_feedback` event if Steam misbehaves and the capture does not explain it.
 
 ### 7.6 Working notes
 - `gh` in the driver clone targets Nonary's repo through the `upstream` remote unless

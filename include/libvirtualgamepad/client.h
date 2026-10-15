@@ -80,6 +80,15 @@ class client final {
     std::uint32_t controller_id,
     feedback_event *event) noexcept;
 
+  // What the driver has discarded for this slot since it was created (see
+  // feedback_counters): a diagnostic read, cheap enough to log on a timer.
+  // ERROR_REVISION_MISMATCH here means the driver predates the counters; the
+  // rest of the error contract above applies (ERROR_NOT_FOUND for an empty
+  // slot, ERROR_ACCESS_DENIED for another handle's).
+  [[nodiscard]] DWORD query_feedback_counters(
+    std::uint32_t controller_id,
+    feedback_counters *counters) noexcept;
+
  private:
   [[nodiscard]] DWORD query_info() noexcept;
   [[nodiscard]] DWORD issue(

@@ -40,5 +40,40 @@ int main() {
   bool ordered = count == 2 && !lvg::driver::haptic_stop_key(queue[head]) &&
                  lvg::driver::haptic_stop_key(queue[(head + 1) % 8]);
   std::printf("%s repeated stop remains after the intervening start\n", ordered ? "PASS" : "FAIL");
-  return !protected_stops || !bounded || !ordered;
+
+  // Eviction accounting: an ordinary event displaced from a full ring is counted
+  // once; a stop coalescing into an older equivalent stop is not an eviction.
+  count = 0; head = 2;
+  std::uint32_t evicted = 0;
+  auto send_counted = [&](unsigned type, unsigned side, bool stop) {
+    return lvg::driver::enqueue_haptic(queue, head, count, make_event(type, side, stop), &evicted);
+  };
+  for (unsigned n = 0; n < 8; ++n) send_counted(0x81, 0, false);
+  bool counted = evicted == 0 && count == 8;
+  for (unsigned n = 0; n < 5; ++n) send_counted(0x81, 0, false);
+  counted = counted && evicted == 5 && count == 8;
+  send_counted(0x82, 1, true);   // no equal stop pending: evicts an ordinary event
+  send_counted(0x82, 1, true);   // equal stop pending: coalesces, nothing evicted
+  send_counted(0x80, 0, true);   // another family: evicts an ordinary event
+  counted = counted && evicted == 7 && count == 8;
+  std::printf("%s ordinary evictions are counted and stop coalescing is not\n", counted ? "PASS" : "FAIL");
+
+  // The settings ring: nine undrained chunks into eight slots evict the first.
+  lvg::feedback_event ring[8] {};
+  std::uint8_t ring_head = 3, ring_count = 0;
+  std::uint32_t ring_evicted = 0;
+  for (unsigned n = 0; n < 9; ++n) {
+    lvg::feedback_event event {};
+    event.type = lvg::feedback_type::steam_settings;
+    event.payload[0] = static_cast<std::uint8_t>(n);
+    lvg::driver::enqueue_settings(ring, ring_head, ring_count, event, ring_evicted);
+  }
+  bool settings = ring_evicted == 1 && ring_count == 8 && ring[ring_head].payload[0] == 1 &&
+                  ring[(ring_head + 7) % 8].payload[0] == 8;
+  std::printf("%s the ninth undrained settings chunk evicts the oldest and counts it once\n", settings ? "PASS" : "FAIL");
+
+  bool saturates = lvg::saturate_counter(0) == 0 && lvg::saturate_counter(255) == 255 &&
+                   lvg::saturate_counter(256) == 255 && lvg::saturate_counter(0xFFFFFFFFu) == 255;
+  std::printf("%s the wire counter saturates at 255\n", saturates ? "PASS" : "FAIL");
+  return !protected_stops || !bounded || !ordered || !counted || !settings || !saturates;
 }

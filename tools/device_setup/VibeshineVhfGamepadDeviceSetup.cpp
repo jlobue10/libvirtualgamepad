@@ -530,7 +530,10 @@ void reap_completed_protocol_query_probe() {
          response.minimum_protocol_version <= lvg::k_protocol_version &&
          response.maximum_protocol_version >= lvg::k_protocol_version &&
          response.maximum_controllers > 0 && response.maximum_controllers <= lvg::k_max_controllers &&
-         response.reserved == 0;
+         // The 8-byte device query carries no counters (protocol.h,
+         // query_info_response): a non-zero word there is another generation.
+         response.counters.haptic_evicted == 0 && response.counters.settings_evicted == 0 &&
+         response.counters.transitions_dropped == 0 && response.counters.unknown_commands == 0;
 }
 
 [[nodiscard]] bool complete_protocol_query_probe(protocol_query_probe *probe) {
