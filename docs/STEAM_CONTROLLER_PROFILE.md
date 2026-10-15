@@ -324,11 +324,20 @@ step 3 is next.
   carries four u8 counters that saturate at 255 and reset when the slot is destroyed - ordinary
   haptic events evicted from the 8-deep haptic ring (a stop coalescing into an equal pending stop
   is not counted), settings chunks evicted from the 8-deep settings ring (one may be chunk 1 of a
-  three-chunk `SET_SETTINGS_VALUES` write), input transitions the report pump dropped, and unknown
-  feature commands (`feature_state.unknown_commands`). The 8-byte device query every host sends
-  keeps that word zero, so hosts built before the counters still handshake, and a driver built
-  before them answers the controller shape with `ERROR_REVISION_MISMATCH`. Steam Controller
-  evictions are not logged by the driver (it has no trace infrastructure); poll the counters.
+  three-chunk `SET_SETTINGS_VALUES` write), input transitions the report pump evicted from its
+  16-deep ordered ring to admit a newer transition, and unknown feature commands
+  (`feature_state.unknown_commands`). The 0x43 battery and 0x44 haptic-ack asides share the
+  pump's ring but never count as dropped transitions: a new aside that finds the ring full is
+  dropped rather than evicting a queued button edge (the next stop pulse acks again, the next
+  tick reports the battery), and an aside a transition evicts is regenerated the same way.
+  Two feature-channel notes: 0x8F (`cmd_trigger_haptic_pulse`, the legacy control-channel
+  pulse) is acknowledged but not forwarded and not counted, since Steam 2026 drives haptics
+  through 0x81 output reports; a command the driver does not know (say a hypothetical 0xEA) is
+  acknowledged with an empty reply and counted in `unknown_commands`. The 8-byte device query
+  every host sends keeps that word zero, so hosts built before the counters still handshake,
+  and a driver built before them answers the controller shape with `ERROR_REVISION_MISMATCH`.
+  Steam Controller evictions are not logged by the driver (it has no trace infrastructure);
+  poll the counters.
   Add a `raw_hid_report_feedback` event if Steam misbehaves and the capture does not explain it.
 
 ### 7.6 Working notes

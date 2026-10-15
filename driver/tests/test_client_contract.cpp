@@ -99,6 +99,10 @@ int main() {
     lvg::feedback_event event {};
     check(c.poll_feedback(0, &event) == ERROR_INVALID_HANDLE,
           "poll on an unconnected client is ERROR_INVALID_HANDLE");
+    lvg::feedback_counters counters {};
+    check(c.query_feedback_counters(0, &counters) == ERROR_INVALID_HANDLE,
+          "counters on an unconnected client is ERROR_INVALID_HANDLE, not the"
+          " ERROR_INVALID_PARAMETER a zero maximum_controllers() would imply");
     c.handle_ = INVALID_HANDLE_VALUE;
   }
   {

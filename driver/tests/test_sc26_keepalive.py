@@ -257,6 +257,7 @@ with tempfile.TemporaryDirectory(prefix='sc26-keepalive-') as directory:
                        '  const WDFFILEOBJECT owner,\n  const lvg::battery_state_request &request) noexcept')
     battery = battery.replace('slot->selected_profile == lvg::profile::', 'slot->selected_profile == (int)lvg::profile::')
     (work/'test.cpp').write_text(prefix+'\n'.join(map(function, signatures))+'\n'+motion+'\n'+battery+suffix)
-    subprocess.run(['g++','-std=c++17','-Wall','-Wextra','-fsanitize=address,undefined',
+    sanitize = [] if sys.platform == 'win32' else ['-fsanitize=address,undefined']
+    subprocess.run(['g++','-std=c++17','-Wall','-Wextra',*sanitize,
                     str(work/'test.cpp'),'-o',str(work/'test')],check=True)
     raise SystemExit(subprocess.run([str(work/'test')]).returncode)
