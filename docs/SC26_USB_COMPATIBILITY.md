@@ -50,8 +50,11 @@ matches on the vendor collection (usage page 0xFF00).
 
 Totals: 165 SET_REPORT and 25 GET_REPORT feature transfers; no other control
 transfers once enumerated. Steam did not offer a firmware update for this unit
-(firmware build 0x6A4D85E3), which is why the virtual device returns that build
-time.
+(firmware build 0x6A4D85E3 = 2026-07-07 23:04 UTC), which is why the virtual
+device returns that build time by default. The constants are only defaults: a
+host that has read the real controller's attributes replaces them per slot
+(`ioctl_set_steam_controller_attributes`, see "Forwarded attributes" below), so
+Steam judges the firmware the user actually holds.
 
 Interrupt traffic in the same capture:
 
@@ -70,10 +73,10 @@ Interrupt traffic in the same capture:
 | Operation | Behaviour | Where |
 | --- | --- | --- |
 | Descriptor, identity | the captured 372-byte descriptor, VID 28DE PID 1302 bcdDevice 0307 | `sc26_usb.h`, `profile.cpp` |
-| GET_ATTRIBUTES_VALUES | the six captured tags in the captured order; build times and board revision default to the captured unit's | `sc26_usb::set_feature` |
-| GET_STRING_ATTRIBUTE | tag 0 board serial, tag 1 unit serial, fixed 20-byte reply; serials are synthetic (`LVGSC26…`), never a real unit's | same |
+| GET_ATTRIBUTES_VALUES | the six captured tags in the captured order; build times, board revision and capabilities default to the captured unit's and are replaced per slot by the real controller's when the host forwards them (`ioctl_set_steam_controller_attributes`); product id 0x1302 and the 4000 us interval never change | `sc26_usb::set_feature`, `apply_attributes` |
+| GET_STRING_ATTRIBUTE | tag 0 board serial, tag 1 unit serial, fixed 20-byte reply; serials are synthetic (`LVGSC26…`) unless the host forwards the real controller's | same |
 | SET_SETTINGS_VALUES and the GET_SETTINGS family | stored and read back as `(id, u16)` triples; lizard mode and IMU mode tracked. SET_SETTINGS_VALUES and LOAD_DEFAULT_SETTINGS are also forwarded verbatim as `steam_settings` feedback events (beta.148; nine triples per event, a 20-triple write is three events in order, drained ahead of haptics) so a client with the real controller can give its firmware Steam's settings instead of the defaults it boots with over BLE | same, `apply_sc26_settings` |
-| GET_DEVICE_INFO 0xF2 | 41 / 34 / 9-byte replies shaped like the unit's, carrying the state's build time, board revision and serial | same |
+| GET_DEVICE_INFO 0xF2 | 41 / 34 / 9-byte replies shaped like the unit's, carrying the state's build time, board revision, build id (the placeholder `000000000000` unless forwarded) and serial | same |
 | 0xED keyed values | `user/wireless_transport` answers one byte `00` (USB); `esb/bond` and `esb/bond_2` answer empty (no bonded puck); other keys answer empty | same |
 | 0xC1, 0xDC, 0xE2 | acknowledged, no reply payload, not counted as unknown | same |
 | Unknown commands | acknowledged with an empty reply and counted (`feature_state.unknown_commands`) | same |
@@ -83,6 +86,51 @@ Interrupt traffic in the same capture:
 | Input 0x43 | battery figures shaped like the unit's | `sc26_usb::encode_battery` |
 | Input 0x44 | sent after each zero-repeat 0x81 pulse, as the unit does (`encode_haptic_ack`) | `evt_vhf_write_report` |
 | Input 0x40, 0x41, 0x45, 0x79, 0x7B | never sent (lizard mode off, no BLE) | n/a |
+
+## Forwarded attributes and Steam's firmware-update notice
+
+Steam compares the attributes a controller reports with the firmware it ships
+and shows "controller firmware update available" when they are behind. For the
+virtual device those were constants from one unit, so Steam on the host could
+offer an update for a controller it cannot reach. The host may now
+forward what it read from the real controller (the Moonlight client reads
+GET_ATTRIBUTES_VALUES, GET_DEVICE_INFO 0 and both GET_STRING_ATTRIBUTE serials
+at link setup over USB, BLE or the puck and sends them with the arrival event),
+through `lvg::client::set_steam_controller_attributes` →
+`ioctl_set_steam_controller_attributes` (0x808, `protocol.h`):
+
+- `steam_controller_attributes_request` is 80 bytes: the 8-byte header,
+  `controller_id`, `flags`, firmware build time, bootloader build time, board
+  revision, capabilities (u32 each), then `build_id[16]`, `unit_serial[16]`,
+  `board_serial[16]` (ASCII, NUL padded). `flags` says which fields the host
+  read (`sc_attr_firmware_build_time` 0x01, `sc_attr_bootloader_build_time`
+  0x02, `sc_attr_board_revision` 0x04, `sc_attr_capabilities` 0x08,
+  `sc_attr_build_id` 0x40, `sc_attr_serials` 0x80; the client's radio and
+  dongle bits 0x10/0x20 have no tag in the wired reply and are ignored).
+- Only flagged fields change; the product id (the virtual device is wired,
+  whatever the real one is on) and the connection interval never do. A serial
+  or build id is kept only when it is non-empty printable ASCII (0x20..0x7E)
+  up to its first NUL; it is cut at 15 characters and terminated at [15].
+  Otherwise the synthetic per-slot serial or the placeholder build id stays,
+  so a host that read nothing changes nothing.
+- The slot has to exist, belong to the caller and run the Steam Controller
+  profile (`STATUS_NOT_FOUND` / `STATUS_ACCESS_DENIED` / `STATUS_NOT_SUPPORTED`,
+  the latter never `STATUS_INVALID_DEVICE_REQUEST`, see next point). A starting
+  slot is accepted, so the host sends right after `create_controller`.
+  `create_controller` resets the feature state, so attributes are per slot
+  creation; a later call replaces them and Steam, which re-polls 0x83
+  periodically, picks the change up.
+- No protocol version bump: the request is new and nothing existing changes
+  shape (the feedback-counters precedent). A driver built before it fails the
+  unknown control code with `STATUS_INVALID_DEVICE_REQUEST`, which the client
+  reports as `ERROR_REVISION_MISMATCH`; the host logs once and the virtual
+  device keeps its defaults.
+- Pinned by `driver/tests/test_sc26_usb.cpp` (replies, order, sanitising),
+  `driver/tests/test_sc26_attributes.py` (the production handler under
+  ASan/UBSan) and `driver/tests/test_client_contract.cpp` (request layout and
+  error mapping).
+
+**Never start a controller firmware update from Steam while streaming.** The update would target the virtual controller on the host, not the real controller; it cannot succeed and may leave Steam confused. Update firmware with the controller connected directly to a PC running Steam.
 
 ## Capability table
 
@@ -99,6 +147,7 @@ Interrupt traffic in the same capture:
 | Settings | SET_SETTINGS_VALUES / LOAD_DEFAULT_SETTINGS → `steam_settings` (verbatim, ≤ 9 triples per event) | the virtual device still answers GET_SETTINGS from its own table; the GET family is not forwarded |
 | Trigger rumble | none | not a feature of the device |
 | Feature reports | report 1 control channel as above; report 2 declared, never used by Steam | the driver refuses Get/SetFeature on report 2 |
+| Firmware attributes | 0x83 / 0xF2 / 0xAE answer the real controller's build times, board revision, capabilities, build id and serials once the host forwards them (`ioctl_set_steam_controller_attributes`) | defaults are the captured unit's; never start a firmware update from Steam while streaming |
 
 ## Privacy and provenance
 
@@ -108,7 +157,11 @@ Interrupt traffic in the same capture:
   build without asking for an update.
 - Per-unit values seen in the capture (the unit serial, the board serial, the
   12-character build id, the bonded-device record) are not copied into the
-  driver. The virtual device returns synthetic serials and an all-zero build id.
+  driver. By default the virtual device returns synthetic serials and an
+  all-zero build id. When the host forwards the streaming user's own
+  controller's attributes, the virtual device echoes that controller's serials
+  and build id to Steam on the host for the slot's lifetime; nothing is stored
+  beyond it.
 - The captures themselves, committed under `captures/`, contain the author's
   unit serial and board serial. They are the evidence for this document and are
   committed knowingly.
@@ -120,10 +173,13 @@ Interrupt traffic in the same capture:
 - `driver/tests/test_sc26_usb.cpp`: walks the compiled-in descriptor and pins
   every report size to `report_size()`, checks the three collections, pins the
   0x42 offsets, replays the captured Steam command sequence and asserts every
-  reply length matches the real unit's, and checks the haptic decode including
-  the captured click pulse. `test_pid_descriptor.cpp` checks the profile is
-  now served and the advertised mask is 0x17C; `test_profile_identity.cpp`
-  checks the PnP ID agrees with the HID VID/PID.
+  reply length matches the real unit's, checks the haptic decode including
+  the captured click pulse, and checks that forwarded attributes reach the
+  0x83 / 0xF2 / 0xAE replies with the sanitising rules above.
+  `test_pid_descriptor.cpp` checks the profile is now served and the
+  advertised mask is 0x17C; `test_profile_identity.cpp` checks the PnP ID
+  agrees with the HID VID/PID. `test_sc26_attributes.py` runs the production
+  `ioctl_set_steam_controller_attributes` handler under ASan/UBSan.
 - Real Windows HID enumeration evidence for the real unit:
   `captures/steam-controller-hid.txt`.
 - Virtual device on the test rig (Hyper-V Windows 11 Pro 26300 VM, test signing

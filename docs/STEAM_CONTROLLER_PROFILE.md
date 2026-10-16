@@ -194,9 +194,10 @@ change the BLE link or the input path (see the Android fork's `SteamControllerBl
   resulting installer replaces 2.0.0 on the host (pairing state survives).
 
 ## 6. Risks
-Steam firmware-update prompts or refusals (mitigated by echoing the real controller's build
-times), Steam updates changing the handshake, no documentation of Steam's checks (only the
-capture), test signing vs. Secure Boot/anti-cheat, and upstream acceptance (profile contract §35–48).
+Steam firmware-update prompts or refusals (mitigated by echoing the real controller's attributes,
+§7.11; a firmware update must never be started from Steam while streaming), Steam updates changing
+the handshake, no documentation of Steam's checks (only the capture), test signing vs. Secure
+Boot/anti-cheat, and upstream acceptance (profile contract §35–48).
 
 ## 7. Continuing on Windows (handoff for the capture and test phase)
 
@@ -556,6 +557,52 @@ Next on the Windows host, in order:
    `vhf_local_test_package=true`, merge Vibepollo PR #1 then #2 into `feat/steam-controller-profile`.
 3. `Collect-Evidence.ps1`, then the upstream PRs (driver first, then Vibepollo without the
    local-test input and fork pins; the Moonlight fork stays a fork).
+
+### 7.11 Firmware attributes and Steam's update notice (2026-10-16)
+
+Steam on the host showed "controller firmware update available" for the streamed controller: the
+virtual device answered GET_ATTRIBUTES_VALUES (0x83) and GET_DEVICE_INFO 0 (0xF2) with the
+constants captured from one wired unit on 2026-10-05 (`sc26_usb.h`: firmware build 0x6A4D85E3 =
+2026-07-07 23:04 UTC, bootloader 0x68D2F92E, board revision 0x4A, build id placeholder
+`000000000000`), and Steam judged those, not the controller in the user's hands. Nothing forwarded
+the real values: the Moonlight client never read them.
+
+Fix, end to end: the client reads the real controller's attributes at link setup on every transport
+(BLE, USB cable, puck) and sends them with the arrival event
+(`LiSendSteamControllerAttributesEvent`, `LI_CCAP_STEAM_ATTRIBUTES` 0x4000 in moonlight-common-c);
+Vibepollo hands them to the driver through `lvg::client::set_steam_controller_attributes(id, attrs)`;
+the virtual device echoes them. Steam then sees the real firmware build and build id and offers an
+update only when the real controller needs one. Steam re-polls 0x83 periodically, so a late update
+is picked up.
+
+Driver side (`docs/SC26_USB_COMPATIBILITY.md` "Forwarded attributes" has the field table):
+- `ioctl_set_steam_controller_attributes` (0x808) with the 80-byte
+  `steam_controller_attributes_request` (header, `controller_id`, `flags`, firmware/bootloader
+  build time, board revision, capabilities, `build_id[16]`, `unit_serial[16]`, `board_serial[16]`).
+  `flags` (`steam_controller_attribute_flags`, the client's `LI_SCATTR_*` values) says which
+  fields were read; only those are applied. **No protocol version bump**: the request is new and
+  nothing existing changes shape, the same way the feedback counters rode on a new request shape.
+  A driver built before it fails the unknown code with `STATUS_INVALID_DEVICE_REQUEST`, which the
+  client maps to `ERROR_REVISION_MISMATCH`; Vibepollo logs once ("driver predates firmware
+  attributes") and the virtual device keeps its defaults.
+- Rules (`sc26_usb::apply_attributes`): product id stays 0x1302 and the connection interval 4000 us
+  whatever the real transport; a serial or build id is kept only when it is non-empty printable
+  ASCII (0x20..0x7E) up to its first NUL, cut at 15 characters and terminated at [15], else the
+  synthetic per-slot serial / placeholder build id stays; `create_controller` resets everything,
+  so attributes are per slot creation (a destroyed slot never leaks a serial into the next).
+  Handle contract: empty slot `ERROR_NOT_FOUND`, another handle's `ERROR_ACCESS_DENIED`, a slot
+  of another profile `ERROR_NOT_SUPPORTED` (deliberately not the old driver's
+  `STATUS_INVALID_DEVICE_REQUEST`); a starting slot is accepted, so the host may send right after
+  `create_controller`.
+- Tests: `test_sc26_usb` (0x83/0xF2/0xAE reflect applied attributes, tag order, product id and
+  interval untouched, sanitising, empty serial keeps the synthetic one, reset),
+  `test_sc26_attributes.py` (the production handler with the shipping `steam_controller.cpp`
+  under ASan/UBSan, in both CI workflows), `test_client_contract` (80-byte request, verbatim
+  fields, `ERROR_INVALID_FUNCTION` → `ERROR_REVISION_MISMATCH`).
+
+**Never start a controller firmware update from Steam while streaming.** The update would target the virtual controller on the host, not the real controller; it cannot succeed and may leave Steam confused. Update firmware with the controller connected directly to a PC running Steam.
+The warning is repeated in Vibepollo's option help and host log and in the Moonlight client's
+Steam Controller settings and stream log.
 
 ## 8. Field fixes after the first stream (2026-10-07)
 
