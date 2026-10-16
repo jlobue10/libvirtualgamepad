@@ -1316,6 +1316,41 @@ void fill_query_info(lvg::query_info_response *const output) noexcept {
   return status;
 }
 
+// ioctl_set_steam_controller_attributes: the real controller's firmware
+// attributes for a Steam Controller slot, applied straight into its feature
+// state so Steam's next GET_ATTRIBUTES_VALUES / GET_DEVICE_INFO read them;
+// nothing goes on the wire here. The slot only has to exist and belong to the
+// caller (the same ladder as the counters query, so a host may send them as
+// soon as create_controller returns), and must run the Steam Controller
+// profile: another profile has no control channel to answer with them, which
+// is STATUS_NOT_SUPPORTED like a touch submit on an Xbox pad, never
+// STATUS_INVALID_DEVICE_REQUEST, which is what a driver built before this
+// IOCTL answers and the client reads as a protocol generation. create_controller
+// resets the feature state, so the attributes are per slot creation.
+[[nodiscard]] NTSTATUS set_steam_controller_attributes(
+  device_context *const context,
+  const WDFFILEOBJECT owner,
+  const lvg::steam_controller_attributes_request &request) noexcept {
+  if (request.controller_id >= lvg::k_max_controllers) {
+    return STATUS_INVALID_PARAMETER;
+  }
+
+  auto &slot = context->controllers[request.controller_id];
+  lock_context(context);
+  NTSTATUS status = STATUS_SUCCESS;
+  if (slot.state == slot_state::empty) {
+    status = STATUS_NOT_FOUND;
+  } else if (!is_owned_by(slot, owner)) {
+    status = STATUS_ACCESS_DENIED;
+  } else if (!is_steam_controller(slot.selected_profile)) {
+    status = STATUS_NOT_SUPPORTED;
+  } else {
+    lvg::driver::apply_sc26_attributes(request, &slot.sc26);
+  }
+  unlock_context(context);
+  return status;
+}
+
 // `request` must not alias `output` (the IOCTL path passes a copy): every
 // field of the request is read before and after the event is stored.
 [[nodiscard]] NTSTATUS poll_feedback(
@@ -2397,6 +2432,14 @@ void evt_io_device_control(
       status = retrieve_request(request, &input);
       if (NT_SUCCESS(status)) {
         status = destroy_controller(context, owner, *input);
+      }
+      break;
+    }
+    case lvg::ioctl_set_steam_controller_attributes: {
+      lvg::steam_controller_attributes_request *input = nullptr;
+      status = retrieve_request(request, &input);
+      if (NT_SUCCESS(status)) {
+        status = set_steam_controller_attributes(context, owner, *input);
       }
       break;
     }
