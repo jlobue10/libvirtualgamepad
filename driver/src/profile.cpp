@@ -5,6 +5,7 @@
 
 #include "dualsense.h"
 #include "dualshock4.h"
+#include "steam_controller.h"
 #include "switch_pro.h"
 #include "xbox_one.h"
 #include "xbox_series.h"
@@ -66,6 +67,7 @@ namespace {
 constexpr wchar_t k_ds4_hardware_ids[] = L"HID\\VID_054C&PID_09CC\0";
 constexpr wchar_t k_ds5_hardware_ids[] = L"HID\\VID_054C&PID_0CE6\0";
 constexpr wchar_t k_switch_hardware_ids[] = L"HID\\VID_057E&PID_2009\0";
+constexpr wchar_t k_sc26_hardware_ids[] = L"HID\\VID_28DE&PID_1302\0";
 
 [[nodiscard]] const profile_definition &dualshock4_profile() noexcept {
   static const profile_definition definition = [] {
@@ -107,6 +109,24 @@ constexpr wchar_t k_switch_hardware_ids[] = L"HID\\VID_057E&PID_2009\0";
     value.version_number = k_switch_version;
     value.hardware_ids = k_switch_hardware_ids;
     value.hardware_ids_bytes = sizeof(k_switch_hardware_ids);
+    return value;
+  }();
+  return definition;
+}
+
+// Steam Controller (2026). Steam speaks to the wired controller over HIDAPI,
+// so the vendor collection, the Triton state report, the control channel and
+// the haptic output reports are the contract, exactly as sc26_usb.h pins them.
+[[nodiscard]] const profile_definition &steam_controller_profile() noexcept {
+  static const profile_definition definition = [] {
+    profile_definition value {};
+    value.id = profile::steam_controller;
+    value.report_descriptor = sc26_descriptor(&value.report_descriptor_size);
+    value.vendor_id = k_sc26_vendor_id;
+    value.product_id = k_sc26_product_id;
+    value.version_number = k_sc26_version;
+    value.hardware_ids = k_sc26_hardware_ids;
+    value.hardware_ids_bytes = sizeof(k_sc26_hardware_ids);
     return value;
   }();
   return definition;
@@ -186,6 +206,11 @@ const profile_definition *find_profile(const profile id) noexcept {
       return &dualsense_profile();
     case profile::switch_pro:
       return &switch_pro_profile();
+    case profile::steam_controller:
+      // Gated on the real descriptor: the provisional one in sc26_usb.h only
+      // carries the report shape, and a host that walks the real controller's
+      // collections would not recognise it.
+      return lvg::sc26_usb::report_descriptor_is_provisional ? nullptr : &steam_controller_profile();
   }
   return nullptr;
 }
@@ -200,6 +225,7 @@ profile_mask_t available_profiles() noexcept {
     profile::dualshock_4,
     profile::dualsense,
     profile::switch_pro,
+    profile::steam_controller,
   };
 
   profile_mask_t mask = 0;

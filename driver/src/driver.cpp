@@ -11,6 +11,7 @@
 #include <wdf.h>
 #include <vhf.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -18,6 +19,8 @@
 
 #include "libvirtualgamepad/protocol.h"
 #include "dualsense.h"
+#include "steam_controller.h"
+#include "steam_haptic_queue.h"
 #include "dualshock4.h"
 #include "pid_ff.h"
 #include "profile.h"
@@ -26,7 +29,28 @@
 #include "xbox_one.h"
 #include "xbox_series.h"
 
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+  #define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+
 namespace {
+
+// Microseconds from the performance counter, for the Steam Controller report
+// clock and its grip-sense window (steam_controller.h).
+std::uint64_t now_us() noexcept {
+  static LARGE_INTEGER frequency {};
+  if (frequency.QuadPart == 0) {
+    QueryPerformanceFrequency(&frequency);
+  }
+  LARGE_INTEGER counter {};
+  QueryPerformanceCounter(&counter);
+  if (frequency.QuadPart <= 0) {
+    return 0;
+  }
+  const auto ticks = static_cast<std::uint64_t>(counter.QuadPart);
+  const auto hz = static_cast<std::uint64_t>(frequency.QuadPart);
+  return (ticks / hz) * 1'000'000u + ((ticks % hz) * 1'000'000u) / hz;
+}
 
 using lvg::driver::encode_generic_feedback;
 using lvg::driver::encode_generic_input;
@@ -43,6 +67,30 @@ using lvg::driver::profile_definition;
 // durations only need to look continuous to a human hand, and the timer stops
 // itself as soon as nothing is playing.
 constexpr LONG k_pid_tick_ms = 10;
+
+// The Steam Controller (2026) streams its state report at ~250 Hz whether or
+// not anything changed, and Steam paces its gyro integration and smoothing on
+// that cadence. The pump sends only on changes, so this timer resends the last
+// state once nothing has gone out for a tick. It runs only while a Steam
+// Controller slot is active and stops itself when none is left.
+constexpr LONG k_sc26_tick_ms = 4;
+// The keep-alive is armed for k_sc26_tick_ms after every state report that
+// goes out, so a tick normally finds the state exactly that old; the lower
+// threshold only tolerates an early wake.
+constexpr std::uint64_t k_sc26_resend_after_us = 3000;
+// The real unit reports battery (0x43) unprompted about every 3.5 s; the
+// keep-alive does the same between the client's own battery updates.
+constexpr std::uint64_t k_sc26_battery_period_us = 3500000;
+// Steam Controller haptic reports are kept in order and in number (a pulse's
+// two per-side stops arrive 0.7 ms apart; a click is repeated to keep a pad
+// buzzing), which one pending feedback slot would coalesce.
+constexpr std::uint8_t k_haptic_queue_capacity = 8;
+// Steam's settings writes travel ahead of haptics and are never coalesced:
+// connect-time setup is one 20-triple write (three events) and the controller
+// UI adds a few more. Eight events hold two full writes between polls.
+constexpr std::uint8_t k_settings_queue_capacity = 8;
+// A 64-byte SET_SETTINGS_VALUES carries twenty triples: three events.
+constexpr std::size_t k_settings_events_per_write = 3;
 
 enum class slot_state : std::uint8_t {
   empty,
@@ -62,6 +110,28 @@ struct controller_slot {
   slot_state state;
   bool feedback_pending;
   lvg::feedback_event feedback;
+  // Haptic reports of a Steam Controller, oldest first; drained one per poll
+  // ahead of `feedback`. The oldest ordinary event is dropped when full.
+  lvg::feedback_event haptic_queue[k_haptic_queue_capacity];
+  std::uint8_t haptic_head;
+  std::uint8_t haptic_count;
+  // Steam's settings writes for a Steam Controller, oldest first; drained
+  // ahead of `haptic_queue`. The oldest is dropped when full.
+  lvg::feedback_event settings_queue[k_settings_queue_capacity];
+  std::uint8_t settings_head;
+  std::uint8_t settings_count;
+  // Events the two rings above threw away because the host did not poll in
+  // time. Written under state_lock, monotonic until reset_slot zeroes the
+  // slot, and read back by ioctl_query_info with a controller_id_request
+  // (feedback_counters_of) together with the pump's dropped transitions and
+  // the feature channel's unknown commands.
+  std::uint32_t haptic_evicted;
+  std::uint32_t settings_evicted;
+  // Submissions that copied `vhf` under state_lock and are still inside
+  // VhfReadReportSubmit. Teardown nulls `vhf`, waits for zero, then deletes:
+  // VhfDelete only waits for VHF's own callbacks, not for the keep-alive
+  // worker or an IOCTL that already holds the handle.
+  std::uint32_t submits_in_flight;
   // Output reports update independently enabled fields. Keep the full state
   // across polls so coalescing never drops rumble or the other trigger.
   lvg::playstation_output_feedback playstation_feedback;
@@ -79,6 +149,12 @@ struct controller_slot {
   lvg::driver::ds4_state ds4;
   lvg::driver::ds5_state ds5;
   lvg::driver::switch_state switch_pro;
+  lvg::driver::sc26_state sc26;
+  // Sequence byte of the next Steam Controller state report handed to VHF. The
+  // encoder numbers reports as it builds them, but the pump keeps only the newest
+  // analog-only report when VHF is busy, so numbering at submission is what keeps
+  // the stream Steam reads consecutive, like the unit's.
+  std::uint8_t sc26_wire_sequence;
   // Paces input reports so reads do not always complete instantly, which would
   // leave a polling application spinning.
   lvg::driver::report_pump pump;
@@ -101,6 +177,18 @@ struct device_context {
   bool vhf_target_open;
   bool stopping;
   WDFTIMER pid_timer;
+  // Steam Controller keep-alive: a worker thread on a high-resolution waitable
+  // timer (see start_sc26_keepalive). A WDFTIMER cannot hold a 4 ms cadence in
+  // UMDF: it fires on the system clock interrupt and UseHighResolutionTimer is
+  // KMDF-only (WdfTimerCreate refuses it here).
+  HANDLE sc26_keepalive_timer;
+  HANDLE sc26_keepalive_stop;
+  HANDLE sc26_keepalive_thread;
+  bool sc26_timer_running;
+  // The worker found no Steam Controller with a VHF read pending and left the
+  // timer unarmed; the next readiness callback arms it again (arm_sc26_keepalive
+  // clears this). Keeps a 250 Hz wake-up from running while nobody reads.
+  bool sc26_timer_parked;
   controller_slot controllers[lvg::k_max_controllers];
 };
 
@@ -125,11 +213,17 @@ EVT_VHF_READY_FOR_NEXT_READ_REPORT evt_vhf_ready_for_next_report;
 EVT_VHF_ASYNC_OPERATION evt_vhf_set_feature;
 EVT_VHF_CLEANUP evt_vhf_cleanup;
 EVT_WDF_TIMER evt_pid_tick;
+EVT_WDF_OBJECT_CONTEXT_CLEANUP evt_device_cleanup;
+void start_sc26_keepalive(device_context *context) noexcept;
+void stop_sc26_keepalive(device_context *context) noexcept;
+void arm_sc26_keepalive(device_context *context) noexcept;
+void wait_for_submits(device_context *context, controller_slot &slot) noexcept;
 
 // Defined below with the PlayStation submit helpers; create_controller needs it
 // to decide whether to register the feature-report callbacks.
 [[nodiscard]] bool is_playstation(lvg::profile profile) noexcept;
 [[nodiscard]] bool is_xbox(lvg::profile profile) noexcept;
+[[nodiscard]] bool is_steam_controller(lvg::profile profile) noexcept;
 
 // Base for each controller's container identity. The low byte is replaced with
 // the controller index so every slot is its own physical device to Windows.
@@ -286,11 +380,14 @@ void destroy_owned_controller(
 
   slot.state = slot_state::stopping;
   slot.feedback_pending = false;
+  slot.haptic_count = 0;
+  slot.settings_count = 0;
   vhf = slot.vhf;
   slot.vhf = nullptr;
   unlock_context(context);
 
   if (vhf != nullptr) {
+    wait_for_submits(context, slot);
     VhfDelete(vhf, TRUE);
   }
 
@@ -355,6 +452,11 @@ void destroy_owned_controller(
   slot.ds5.reset();
   slot.ds5.features.address[0] = static_cast<std::uint8_t>(request.controller_id);
   slot.switch_pro.reset();
+  slot.sc26.reset();
+  slot.sc26_wire_sequence = 0;
+  // Per-slot serial so two virtual Steam Controllers never collide in Steam.
+  slot.sc26.features.unit_serial[9] = static_cast<char>('0' + (request.controller_id / 10) % 10);
+  slot.sc26.features.unit_serial[10] = static_cast<char>('0' + request.controller_id % 10);
   slot.pump.reset();
   unlock_context(context);
 
@@ -417,10 +519,12 @@ void destroy_owned_controller(
     config.HardwareIDs = const_cast<PWSTR>(definition->hardware_ids);
     config.HardwareIDsLength = static_cast<USHORT>(definition->hardware_ids_bytes);
   }
-  if (definition->force_feedback || is_playstation(definition->id)) {
+  if (definition->force_feedback || is_playstation(definition->id) ||
+      is_steam_controller(definition->id)) {
     // DirectInput discovers effect capacity through feature reports, and a
     // PlayStation controller is only recognized as one by hosts that can read
-    // its calibration, pairing, and firmware features.
+    // its calibration, pairing, and firmware features. Steam configures its own
+    // controller entirely through feature reports.
     config.EvtVhfAsyncOperationGetFeature = evt_vhf_get_feature;
     config.EvtVhfAsyncOperationSetFeature = evt_vhf_set_feature;
   }
@@ -482,22 +586,140 @@ void destroy_owned_controller(
   const bool exists = slot.state != slot_state::empty;
   unlock_context(context);
 
-  if (!owned) {
-    return STATUS_ACCESS_DENIED;
-  }
+  // reset_slot clears the owner, so test for emptiness first: a controller the
+  // client never created is "not found", not "someone else's".
   if (!exists) {
     return STATUS_NOT_FOUND;
+  }
+  if (!owned) {
+    return STATUS_ACCESS_DENIED;
   }
 
   destroy_owned_controller(context, owner, request.controller_id);
   return STATUS_SUCCESS;
 }
 
+// Numbers a Steam Controller state report as it leaves for VHF. Call under
+// state_lock with the report just taken from the pump.
+void stamp_sc26_sequence(controller_slot &slot, lvg::driver::report_buffer &report) noexcept {
+  if (report.report_id == lvg::driver::k_sc26_input_report_id && report.length > 1 &&
+      is_steam_controller(slot.selected_profile)) {
+    report.data[1] = slot.sc26_wire_sequence++;
+  }
+}
+
+// A report just taken from the pump for VHF: number it, and when it is a Steam
+// Controller state report, mark the clock the keep-alive goes by and (unless the
+// caller arms once for every slot afterwards) re-arm the timer. Stamping at take
+// time rather than at enqueue keeps the cadence measured from the report that
+// went on the wire, also when a snapshot waited for the readiness callback.
+// Call under state_lock.
+void mark_sc26_report_taken(
+  device_context *const context,
+  controller_slot &slot,
+  lvg::driver::report_buffer &report,
+  const bool rearm_keepalive) noexcept {
+  stamp_sc26_sequence(slot, report);
+  if (report.report_id == lvg::driver::k_sc26_input_report_id &&
+      is_steam_controller(slot.selected_profile)) {
+    slot.sc26.last_report_us = now_us();
+    if (rearm_keepalive) {
+      arm_sc26_keepalive(context);
+    }
+  }
+}
+
+// Spins until no submission that copied this slot's handle is still inside
+// VhfReadReportSubmit. Called without state_lock after slot.vhf was nulled,
+// so nothing new can start; a submit is a few microseconds.
+void wait_for_submits(device_context *const context, controller_slot &slot) noexcept {
+  for (;;) {
+    lock_context(context);
+    const bool busy = slot.submits_in_flight != 0;
+    unlock_context(context);
+    if (!busy) {
+      return;
+    }
+    SwitchToThread();
+  }
+}
+
+// The queueing half of pump_report, for a caller that already holds
+// state_lock: queues `data` (if any) and takes the next report VHF can accept
+// into `next`, capturing the handle and counting the submission in flight. The
+// caller releases the lock and finishes with submit_taken(). Encoding and
+// queueing under one lock hold keeps a resend of older state from landing
+// behind a newer input that was encoded in between. A Steam Controller state
+// report that leaves also marks the clock the keep-alive goes by and re-arms
+// it, unless the caller is the keep-alive tick, which arms once at its end.
+// Admission is accepts_vhf_callbacks: VHF may ask for reports from inside
+// VhfStart, so a Starting slot with a published handle is served like an
+// Active one; the IOCTL and keep-alive callers gate on Active themselves.
+[[nodiscard]] NTSTATUS pump_report_locked(
+  device_context *const context,
+  controller_slot &slot,
+  const void *const data,
+  const ULONG length,
+  const UCHAR report_id,
+  const lvg::driver::report_kind kind,
+  lvg::driver::report_buffer *const next,
+  bool *const have_next,
+  VHFHANDLE *const vhf,
+  const bool rearm_keepalive = true) noexcept {
+  *have_next = false;
+  *vhf = nullptr;
+  if (!accepts_vhf_callbacks(slot)) {
+    return STATUS_DEVICE_NOT_READY;
+  }
+  if (data != nullptr) {
+    std::ignore = slot.pump.enqueue(data, length, report_id, kind);
+  }
+  // The pump keeps the taken report in storage VHF may still read from after
+  // VhfReadReportSubmit returns (deferred reads); the slot's packet points at
+  // that storage, never at a copy on a caller's stack. `*next` is a copy for
+  // the caller's bookkeeping only.
+  lvg::driver::report_buffer *const taken = slot.pump.take();
+  *have_next = taken != nullptr;
+  if (*have_next) {
+    // Stamp the buffer that goes on the wire, then copy it for the caller.
+    mark_sc26_report_taken(context, slot, *taken, rearm_keepalive);
+    *next = *taken;
+    slot.read_transfer = {taken->data, taken->length, taken->report_id};
+    *vhf = slot.vhf;
+    ++slot.submits_in_flight;
+  }
+  return STATUS_SUCCESS;
+}
+
+// Submits a report taken by pump_report_locked(). Called without state_lock.
+NTSTATUS submit_taken(
+  device_context *const context,
+  controller_slot &slot,
+  const lvg::driver::report_buffer &next,
+  const VHFHANDLE vhf) noexcept {
+  // VHF reads the pump-owned buffer behind slot.read_transfer, set under the
+  // lock by pump_report_locked(); it stays valid until the next readiness
+  // callback. `next` is the caller's bookkeeping copy.
+  static_cast<void>(next);
+  const NTSTATUS status = VhfReadReportSubmit(vhf, &slot.read_transfer);
+  lock_context(context);
+  --slot.submits_in_flight;
+  if (!NT_SUCCESS(status)) {
+    // Only VHF's callback may grant another submission: manufacturing
+    // readiness here could overwrite a read VHF still holds. The keep-alive
+    // tick parks on !ready and evt_vhf_ready_for_next_report un-parks it, so
+    // there is nothing to re-arm here either.
+  }
+  unlock_context(context);
+  return status;
+}
+
 // Hands one report to VHF if it can take it now, otherwise leaves it queued for
 // the readiness callback. Takes state_lock itself and must be called without
 // it. The lifetime gate is deliberately not taken: this also runs from inside
 // VHF callbacks, where the handle is already guaranteed alive because VhfDelete
-// waits for the callback, and taking the gate there would deadlock that wait.
+// waits for the callback, and taking the gate there would deadlock that wait;
+// the in-flight count covers the other callers.
 NTSTATUS pump_report(
   device_context *const context,
   controller_slot &slot,
@@ -505,31 +727,21 @@ NTSTATUS pump_report(
   const ULONG length,
   const UCHAR report_id,
   const lvg::driver::report_kind kind) noexcept {
-  lvg::driver::report_buffer *next = nullptr;
+  lvg::driver::report_buffer next {};
+  bool have_next = false;
   VHFHANDLE vhf = nullptr;
 
   lock_context(context);
-  if (!accepts_vhf_callbacks(slot)) {
-    unlock_context(context);
-    return STATUS_DEVICE_NOT_READY;
-  }
-  if (data != nullptr) {
-    std::ignore = slot.pump.enqueue(data, length, report_id, kind);
-  }
-  next = slot.pump.take();
-  if (next != nullptr) {
-    slot.read_transfer = {next->data, next->length, next->report_id};
-  }
-  vhf = slot.vhf;
+  // pump_report_locked refuses with STATUS_DEVICE_NOT_READY unless the slot
+  // accepts VHF callbacks (accepts_vhf_callbacks): a Starting slot whose handle
+  // is published already services reports, a draining one no longer does.
+  const NTSTATUS queued = pump_report_locked(context, slot, data, length, report_id, kind, &next, &have_next, &vhf);
   unlock_context(context);
 
-  if (next == nullptr) {
-    return STATUS_SUCCESS;
+  if (!NT_SUCCESS(queued) || !have_next) {
+    return queued;
   }
-
-  // Only the VHF callback may grant another submission. A failed call must
-  // not manufacture readiness, potentially overwriting an outstanding read.
-  return VhfReadReportSubmit(vhf, &slot.read_transfer);
+  return submit_taken(context, slot, next, vhf);
 }
 
 // VHF can accept another report. Drain one, preferring initialization replies,
@@ -540,23 +752,34 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
     return;
   }
 
-  lvg::driver::report_buffer *next = nullptr;
+  lvg::driver::report_buffer next {};
+  bool have_next = false;
   VHFHANDLE vhf = nullptr;
 
   auto *const context = slot->parent;
   lock_context(context);
   if (accepts_vhf_callbacks(*slot)) {
     slot->pump.set_ready();
-    next = slot->pump.take();
-    if (next != nullptr) {
-      slot->read_transfer = {next->data, next->length, next->report_id};
+    lvg::driver::report_buffer *const taken = slot->pump.take();
+    have_next = taken != nullptr;
+    if (have_next) {
+      mark_sc26_report_taken(context, *slot, *taken, true);
+      next = *taken;
+      slot->read_transfer = {taken->data, taken->length, taken->report_id};
+      vhf = slot->vhf;
+      ++slot->submits_in_flight;
     }
-    vhf = slot->vhf;
+    if (context->sc26_timer_parked && slot->have_last_input &&
+        is_steam_controller(slot->selected_profile)) {
+      // The reader is back (Steam reopened the device, or the HID child
+      // finished starting): resume the cadence the worker parked.
+      arm_sc26_keepalive(context);
+    }
   }
   unlock_context(context);
 
-  if (next != nullptr && vhf != nullptr) {
-    std::ignore = VhfReadReportSubmit(vhf, &slot->read_transfer);
+  if (have_next) {
+    std::ignore = submit_taken(context, *slot, next, vhf);
   }
 }
 
@@ -569,6 +792,13 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
 // them alike. Only the input report differs, by the Share button.
 [[nodiscard]] bool is_xbox(const lvg::profile profile) noexcept {
   return profile == lvg::profile::xbox_series || profile == lvg::profile::xbox_one;
+}
+
+// Folds touch, motion and battery like the PlayStation pads, but battery also
+// travels in its own report and the control channel is a stateful
+// command/reply exchange over feature reports.
+[[nodiscard]] bool is_steam_controller(const lvg::profile profile) noexcept {
+  return profile == lvg::profile::steam_controller;
 }
 
 // Rebuilds and submits a PlayStation input report from the accumulated state.
@@ -599,12 +829,12 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
   UCHAR report_id = 0;
 
   if (slot.selected_profile == lvg::profile::dualshock_4) {
-    ds4_report = encode_ds4_input(slot.last_input, &slot.ds4);
+    ds4_report = encode_ds4_input(slot.last_input, &slot.ds4, now_us());
     data = &ds4_report;
     length = sizeof(ds4_report);
     report_id = k_ds4_input_report_id;
   } else {
-    ds5_report = encode_ds5_input(slot.last_input, &slot.ds5);
+    ds5_report = encode_ds5_input(slot.last_input, &slot.ds5, now_us());
     data = &ds5_report;
     length = sizeof(ds5_report);
     report_id = k_ds5_input_report_id;
@@ -621,6 +851,31 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
   device_context *const context,
   controller_slot &slot,
   const lvg::driver::report_kind kind = lvg::driver::report_kind::continuous) noexcept {
+  if (is_steam_controller(slot.selected_profile)) {
+    lock_context(context);
+    if (context->stopping || slot.state != slot_state::active || slot.vhf == nullptr) {
+      unlock_context(context);
+      return STATUS_DEVICE_NOT_READY;
+    }
+    if (!slot.have_last_input) {
+      unlock_context(context);
+      return STATUS_SUCCESS;
+    }
+    lvg::driver::sc26_tick(&slot.sc26, now_us());
+    const lvg::driver::sc26_input_report report =
+      lvg::driver::encode_sc26_input(slot.last_input, &slot.sc26);
+    lvg::driver::report_buffer next {};
+    bool have_next = false;
+    VHFHANDLE vhf = nullptr;
+    const NTSTATUS queued = pump_report_locked(context, slot, &report, sizeof(report),
+                                               lvg::driver::k_sc26_input_report_id, kind,
+                                               &next, &have_next, &vhf);
+    unlock_context(context);
+    if (!NT_SUCCESS(queued) || !have_next) {
+      return queued;
+    }
+    return submit_taken(context, slot, next, vhf);
+  }
   if (slot.selected_profile != lvg::profile::switch_pro) {
     return submit_playstation_report(context, slot, kind);
   }
@@ -658,17 +913,29 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
 
   auto &slot = context->controllers[controller_id];
   lock_context(context);
-  const bool usable = !context->stopping && is_owned_by(slot, owner) &&
+  // The same ladder as destroy/poll_feedback (client.h documents it): an empty
+  // slot is "not found", someone else's is "access denied", and only a stopping
+  // device or slot is "not ready".
+  const bool exists = slot.state != slot_state::empty;
+  const bool owned = is_owned_by(slot, owner);
+  const bool usable = !context->stopping && owned && exists &&
                       slot.state == slot_state::active && slot.vhf != nullptr;
   const lvg::profile profile = slot.selected_profile;
   unlock_context(context);
 
+  if (!exists) {
+    return STATUS_NOT_FOUND;
+  }
+  if (!owned) {
+    return STATUS_ACCESS_DENIED;
+  }
   if (!usable) {
     return STATUS_DEVICE_NOT_READY;
   }
-  if (!is_playstation(profile) && profile != lvg::profile::switch_pro) {
-    // Only the PlayStation and Switch Pro profiles have motion sensors and a
-    // battery to report against.
+  if (!is_playstation(profile) && profile != lvg::profile::switch_pro &&
+      !is_steam_controller(profile)) {
+    // Only the PlayStation, Switch Pro and Steam Controller profiles have
+    // motion sensors and a battery to report against.
     return STATUS_NOT_SUPPORTED;
   }
 
@@ -689,14 +956,24 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
   }
 
   lock_context(context);
-  // Only the PlayStation pads have a touchpad.
-  const bool applied = slot->selected_profile == lvg::profile::dualshock_4
-                         ? lvg::driver::apply_ds4_touch(request, &slot->ds4)
-                         : slot->selected_profile == lvg::profile::dualsense
-                             ? lvg::driver::apply_ds5_touch(request, &slot->ds5)
-                             : false;
+  // Only the PlayStation pads and the Steam Controller have a touch surface;
+  // a Switch Pro slot answers "not supported", as client.h documents, rather
+  // than "invalid parameter".
+  const bool has_touch = slot->selected_profile != lvg::profile::switch_pro;
+  const bool applied = has_touch &&
+                       (slot->selected_profile == lvg::profile::dualshock_4
+                          ? lvg::driver::apply_ds4_touch(request, &slot->ds4)
+                          : slot->selected_profile == lvg::profile::dualsense
+                              ? lvg::driver::apply_ds5_touch(request, &slot->ds5)
+                              : is_steam_controller(slot->selected_profile)
+                                  ? lvg::driver::apply_sc26_touch(request, &slot->sc26)
+                                  : false);
   unlock_context(context);
 
+  if (!has_touch) {
+    unlock_lifetime(context);
+    return STATUS_NOT_SUPPORTED;
+  }
   if (!applied) {
     unlock_lifetime(context);
     return STATUS_INVALID_PARAMETER;
@@ -729,12 +1006,37 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
       ? lvg::driver::apply_ds4_motion(request, &slot->ds4)
       : slot->selected_profile == lvg::profile::dualsense
           ? lvg::driver::apply_ds5_motion(request, &slot->ds5)
-          : lvg::driver::apply_switch_motion(request, &slot->switch_pro);
+          : is_steam_controller(slot->selected_profile)
+              ? lvg::driver::apply_sc26_motion(request, &slot->sc26, now_us())
+              : lvg::driver::apply_switch_motion(request, &slot->switch_pro);
   unlock_context(context);
 
   if (!applied) {
     unlock_lifetime(context);
     return STATUS_INVALID_PARAMETER;
+  }
+
+  if (is_steam_controller(slot->selected_profile)) {
+    // A streaming client sends an input state plus a gyro and an accelerometer
+    // sample per controller packet (Moonlight: three IOCTLs within a millisecond,
+    // then nothing until the next 15 ms BLE interval). Submitting a full report
+    // for each produced three reports in a burst and a ~12 ms hole, whereas the
+    // wired unit streams one report every 4 ms with the IMU folded in. The
+    // sample is folded into the state here; the keep-alive worker (4 ms) carries it in
+    // the next scheduled report, so the wire cadence stays even. Steam's stick
+    // "full circle" calibration step stalled over the stream and passed against
+    // the probe at the same rate and value cadence; the burst timing was the
+    // one stream property left (2026-10-08, probe --burst stages it).
+    if (context->sc26_keepalive_timer == nullptr || !context->sc26_timer_running) {
+      // No worker to carry the sample (the timer or its event could not be created, or
+      // no state report has started the cadence yet): send it now rather than leave the
+      // IMU frozen until the next input state change.
+      status = submit_profile_report(context, *slot);
+      unlock_lifetime(context);
+      return status;
+    }
+    unlock_lifetime(context);
+    return STATUS_SUCCESS;
   }
 
   status = submit_profile_report(context, *slot);
@@ -760,12 +1062,42 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
       ? lvg::driver::apply_ds4_battery(request, &slot->ds4)
       : slot->selected_profile == lvg::profile::dualsense
           ? lvg::driver::apply_ds5_battery(request, &slot->ds5)
-          : lvg::driver::apply_switch_battery(request, &slot->switch_pro);
+          : is_steam_controller(slot->selected_profile)
+              ? lvg::driver::apply_sc26_battery(request, &slot->sc26)
+              : lvg::driver::apply_switch_battery(request, &slot->switch_pro);
+  const bool steam = is_steam_controller(slot->selected_profile);
+  const lvg::driver::sc26_battery_report battery_report =
+    steam ? lvg::driver::encode_sc26_battery(slot->sc26) : lvg::driver::sc26_battery_report {};
+  // Same rule as the keep-alive tick: a battery aside only goes out while someone
+  // reads. Queued for a reader that may never come, it took a transition-ring slot
+  // and a readiness round trip when Steam reopened the device. Without a reader the
+  // period is cleared so the first ready tick carries the fresh value.
+  const bool steam_reader = steam && slot->pump.ready();
+  if (steam) {
+    // The client's own update restarts the keep-alive's 3.5 s battery period.
+    slot->sc26.last_battery_us = steam_reader ? now_us() : 0;
+  }
   unlock_context(context);
 
   if (!applied) {
     unlock_lifetime(context);
     return STATUS_INVALID_PARAMETER;
+  }
+
+  if (steam) {
+    // The Steam Controller carries battery in its own report rather than in
+    // the state report. It goes out in order and in number like a transition
+    // but must not discard a pending state snapshot (a transition clears the
+    // latest continuous report), so it travels as an aside, like the 0x44 ack.
+    if (!steam_reader) {
+      unlock_lifetime(context);
+      return STATUS_SUCCESS;
+    }
+    status = pump_report(context, *slot, &battery_report, sizeof(battery_report),
+                         lvg::driver::k_sc26_battery_report_id,
+                         lvg::driver::report_kind::aside);
+    unlock_lifetime(context);
+    return status;
   }
 
   status = submit_profile_report(context, *slot);
@@ -787,11 +1119,15 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
   auto &slot = context->controllers[request.controller_id];
   lock_lifetime(context);
   lock_context(context);
-  if (context->stopping || !is_owned_by(slot, owner) ||
+  if (slot.state == slot_state::empty || !is_owned_by(slot, owner) || context->stopping ||
       slot.state != slot_state::active || slot.vhf == nullptr) {
+    // Same ladder as begin_state_update / destroy / poll_feedback.
+    const NTSTATUS status = slot.state == slot_state::empty ? STATUS_NOT_FOUND :
+                            !is_owned_by(slot, owner)        ? STATUS_ACCESS_DENIED :
+                                                               STATUS_DEVICE_NOT_READY;
     unlock_context(context);
     unlock_lifetime(context);
-    return STATUS_DEVICE_NOT_READY;
+    return status;
   }
   if (is_playstation(slot.selected_profile)) {
     slot.last_input = request;
@@ -806,12 +1142,12 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
     ULONG ps_length = 0;
     UCHAR ps_report_id = 0;
     if (slot.selected_profile == lvg::profile::dualshock_4) {
-      ds4_report = encode_ds4_input(request, &slot.ds4);
+      ds4_report = encode_ds4_input(request, &slot.ds4, now_us());
       ps_data = &ds4_report;
       ps_length = sizeof(ds4_report);
       ps_report_id = k_ds4_input_report_id;
     } else {
-      ds5_report = encode_ds5_input(request, &slot.ds5);
+      ds5_report = encode_ds5_input(request, &slot.ds5, now_us());
       ps_data = &ds5_report;
       ps_length = sizeof(ds5_report);
       ps_report_id = k_ds5_input_report_id;
@@ -821,6 +1157,45 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
       pump_report(context, slot, ps_data, ps_length, ps_report_id, ps_kind);
     unlock_lifetime(context);
     return ps_status;
+  }
+
+  if (is_steam_controller(slot.selected_profile)) {
+    slot.last_input = request;
+    slot.have_last_input = true;
+    lvg::driver::sc26_tick(&slot.sc26, now_us());
+    const lvg::driver::sc26_input_report sc26_report =
+      lvg::driver::encode_sc26_input(request, &slot.sc26);
+    // Classify on the encoded button word: the trigger-click bits (set at >= 0xF0),
+    // pad touch, grip and stick-touch latches only exist there, and an edge on any
+    // of them must travel as a transition rather than be overwritten by the next
+    // continuous snapshot while VHF has no read pending. Stick touch derived from
+    // deflection is left out (classify_buttons): it is not an edge the client sent.
+    const auto sc26_kind = slot.pump.classify(
+      lvg::sc26_usb::classify_buttons(slot.sc26.device, sc26_report.buttons),
+      request.left_trigger, request.right_trigger);
+    // First input state of a Steam Controller: start the keep-alive cadence.
+    const bool start_keepalive =
+      context->sc26_keepalive_timer != nullptr && !context->sc26_timer_running;
+    if (start_keepalive) {
+      context->sc26_timer_running = true;
+    }
+    lvg::driver::report_buffer next {};
+    bool have_next = false;
+    VHFHANDLE vhf = nullptr;
+    const NTSTATUS queued = pump_report_locked(context, slot, &sc26_report, sizeof(sc26_report),
+                                               lvg::driver::k_sc26_input_report_id, sc26_kind,
+                                               &next, &have_next, &vhf);
+    unlock_context(context);
+    if (start_keepalive) {
+      // Started outside the lock: the worker takes state_lock on every tick.
+      start_sc26_keepalive(context);
+    }
+    NTSTATUS sc26_status = queued;
+    if (NT_SUCCESS(queued) && have_next) {
+      sc26_status = submit_taken(context, slot, next, vhf);
+    }
+    unlock_lifetime(context);
+    return sc26_status;
   }
 
   if (slot.selected_profile == lvg::profile::switch_pro) {
@@ -839,6 +1214,9 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
   }
 
   if (is_xbox(slot.selected_profile)) {
+    // Kept for IOCTL_HID_GET_INPUT_REPORT, which answers from the last state.
+    slot.last_input = request;
+    slot.have_last_input = true;
     // The two reports differ only in length, so the shorter one is built from
     // the same encoder and both travel the same path.
     lvg::driver::xbox_series_input_report xbox_report {};
@@ -868,6 +1246,8 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
     return STATUS_NOT_SUPPORTED;
   }
 
+  slot.last_input = request;
+  slot.have_last_input = true;
   const generic_input_report report = encode_generic_input(request);
   const auto kind =
     slot.pump.classify(request.buttons, request.left_trigger, request.right_trigger);
@@ -879,6 +1259,65 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
   return status;
 }
 
+// The device-wide half of ioctl_query_info, the same for both request shapes.
+void fill_query_info(lvg::query_info_response *const output) noexcept {
+  *output = {};
+  output->header.size = sizeof(*output);
+  output->header.version = lvg::k_protocol_version;
+  output->minimum_protocol_version = lvg::k_protocol_version;
+  output->maximum_protocol_version = lvg::k_protocol_version;
+  output->available_profiles = lvg::driver::available_profiles();
+  // Advertised device-wide; a profile without a touchpad, motion
+  // sensors, or a battery answers those IOCTLs with STATUS_NOT_SUPPORTED.
+  output->available_features = lvg::feature_input_state | lvg::feature_feedback |
+                               lvg::feature_touch | lvg::feature_motion |
+                               lvg::feature_battery |
+                               lvg::feature_hid_feature_reports;
+  output->maximum_controllers = lvg::k_max_controllers;
+}
+
+// What this slot has had to discard since it was created, saturated to the
+// wire's u8 fields. Caller holds state_lock: every source is written under it.
+[[nodiscard]] lvg::feedback_counters feedback_counters_of(const controller_slot &slot) noexcept {
+  lvg::feedback_counters counters {};
+  counters.haptic_evicted = lvg::saturate_counter(slot.haptic_evicted);
+  counters.settings_evicted = lvg::saturate_counter(slot.settings_evicted);
+  counters.transitions_dropped = lvg::saturate_counter(slot.pump.dropped_transitions());
+  counters.unknown_commands = lvg::saturate_counter(slot.sc26.features.unknown_commands);
+  return counters;
+}
+
+// ioctl_query_info with a controller_id_request: the device-wide answer plus
+// the slot's feedback_counters. The slot only has to exist and belong to the
+// caller; a stopping slot still reports what it dropped, and reset_slot zeroes
+// the counters once it is released.
+[[nodiscard]] NTSTATUS query_controller_info(
+  device_context *const context,
+  const WDFFILEOBJECT owner,
+  const lvg::controller_id_request &request,
+  lvg::query_info_response *const output) noexcept {
+  if (request.controller_id >= lvg::k_max_controllers) {
+    return STATUS_INVALID_PARAMETER;
+  }
+
+  auto &slot = context->controllers[request.controller_id];
+  fill_query_info(output);
+  lock_context(context);
+  NTSTATUS status = STATUS_SUCCESS;
+  // The same ladder as poll_feedback: emptiness first, then ownership.
+  if (slot.state == slot_state::empty) {
+    status = STATUS_NOT_FOUND;
+  } else if (!is_owned_by(slot, owner)) {
+    status = STATUS_ACCESS_DENIED;
+  } else {
+    output->counters = feedback_counters_of(slot);
+  }
+  unlock_context(context);
+  return status;
+}
+
+// `request` must not alias `output` (the IOCTL path passes a copy): every
+// field of the request is read before and after the event is stored.
 [[nodiscard]] NTSTATUS poll_feedback(
   device_context *const context,
   const WDFFILEOBJECT owner,
@@ -891,10 +1330,22 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
   auto &slot = context->controllers[request.controller_id];
   lock_context(context);
   NTSTATUS status = STATUS_SUCCESS;
-  if (!is_owned_by(slot, owner)) {
+  // As in destroy_controller: a slot the client never created has no owner, so
+  // test emptiness first or the caller is told it belongs to someone else.
+  if (slot.state == slot_state::empty) {
+    status = STATUS_NOT_FOUND;
+  } else if (!is_owned_by(slot, owner)) {
     status = STATUS_ACCESS_DENIED;
   } else if (slot.state != slot_state::active) {
     status = STATUS_DEVICE_NOT_READY;
+  } else if (slot.settings_count != 0) {
+    *output = slot.settings_queue[slot.settings_head];
+    slot.settings_head = static_cast<std::uint8_t>((slot.settings_head + 1) % k_settings_queue_capacity);
+    --slot.settings_count;
+  } else if (slot.haptic_count != 0) {
+    *output = slot.haptic_queue[slot.haptic_head];
+    slot.haptic_head = static_cast<std::uint8_t>((slot.haptic_head + 1) % k_haptic_queue_capacity);
+    --slot.haptic_count;
   } else if (!slot.feedback_pending) {
     status = STATUS_NO_MORE_ENTRIES;
   } else {
@@ -1047,6 +1498,57 @@ void evt_vhf_write_report(
   auto *const slot = static_cast<controller_slot *>(vhf_client_context);
   NTSTATUS status = STATUS_INVALID_DEVICE_REQUEST;
   bool arm_tick = false;
+
+  if (slot != nullptr && slot->parent != nullptr && transfer != nullptr &&
+      is_steam_controller(slot->selected_profile)) {
+    auto *const context = slot->parent;
+    std::uint8_t ack[6] {};
+    std::size_t ack_size = 0;
+    lock_context(context);
+    if (!accepts_vhf_callbacks(*slot)) {
+      status = STATUS_DEVICE_NOT_READY;
+    } else {
+      lvg::feedback_event event {};
+      if (transfer->reportBuffer != nullptr &&
+          lvg::driver::apply_sc26_output(transfer->reportBuffer, transfer->reportBufferLen,
+                                         slot->controller_id, &slot->sc26, &event)) {
+        // Preserve explicit actuator stops under backpressure. Ordinary repeated
+        // effects remain ordered; an equivalent newer stop moves to the tail.
+        // Cannot refuse at the production capacity (see the static_assert): the
+        // ring always has an evictable ordinary effect when every stop is pending.
+        std::ignore = lvg::driver::enqueue_haptic(slot->haptic_queue, slot->haptic_head, slot->haptic_count, event,
+                                                  &slot->haptic_evicted);
+        ack_size = lvg::sc26_usb::encode_haptic_ack(transfer->reportBuffer, transfer->reportBufferLen,
+                                                    ack, sizeof(ack));
+        status = STATUS_SUCCESS;
+      } else if (transfer->reportBuffer != nullptr && transfer->reportBufferLen > 0 &&
+                 transfer->reportBuffer[0] > lvg::sc26_usb::haptic_script_id &&
+                 lvg::sc26_usb::is_output_report(transfer->reportBuffer[0])) {
+        // One of the 0x86..0x89 reports the real descriptor declares (purpose
+        // unknown, never seen): nothing to forward, but refusing them would
+        // make Steam log write failures.
+        status = STATUS_SUCCESS;
+      } else {
+        status = STATUS_INVALID_PARAMETER;
+      }
+    }
+    const VHFHANDLE vhf = slot->vhf;
+    unlock_context(context);
+
+    // The unit answers a stop pulse on the input pipe. Submitting from inside
+    // the callback is safe without the lifetime gate (see the Switch reply
+    // below). An aside: ordered after any button change already waiting, but
+    // it must not discard the pending state snapshot the way a transition does.
+    if (ack_size != 0 && vhf != nullptr) {
+      std::ignore = pump_report(context, *slot, ack, static_cast<ULONG>(ack_size),
+                                lvg::sc26_usb::haptic_ack_report_id,
+                                lvg::driver::report_kind::aside);
+    }
+    if (operation_handle != nullptr) {
+      VhfAsyncOperationComplete(operation_handle, status);
+    }
+    return;
+  }
 
   if (slot != nullptr && slot->parent != nullptr && transfer != nullptr &&
       slot->selected_profile == lvg::profile::switch_pro) {
@@ -1243,6 +1745,27 @@ void evt_vhf_get_feature(
   NTSTATUS status = STATUS_INVALID_DEVICE_REQUEST;
 
   if (slot != nullptr && slot->parent != nullptr && transfer != nullptr &&
+      is_steam_controller(slot->selected_profile) && transfer->reportBuffer != nullptr) {
+    auto *const context = slot->parent;
+    lock_context(context);
+    if (!accepts_vhf_callbacks(*slot)) {
+      status = STATUS_DEVICE_NOT_READY;
+    } else {
+      const std::size_t written = fill_sc26_feature(
+        transfer->reportId, transfer->reportBuffer, transfer->reportBufferLen, slot->sc26);
+      status = written != 0 ? STATUS_SUCCESS
+             : transfer->reportId == k_sc26_features_report_id ? STATUS_BUFFER_TOO_SMALL
+                                                                : STATUS_INVALID_DEVICE_REQUEST;
+    }
+    unlock_context(context);
+
+    if (operation_handle != nullptr) {
+      VhfAsyncOperationComplete(operation_handle, status);
+    }
+    return;
+  }
+
+  if (slot != nullptr && slot->parent != nullptr && transfer != nullptr &&
       is_playstation(slot->selected_profile) && transfer->reportBuffer != nullptr) {
     auto *const context = slot->parent;
     lock_context(context);
@@ -1325,6 +1848,33 @@ void evt_vhf_set_feature(
   NTSTATUS status = STATUS_INVALID_DEVICE_REQUEST;
 
   if (slot != nullptr && slot->parent != nullptr && transfer != nullptr &&
+      is_steam_controller(slot->selected_profile)) {
+    auto *const context = slot->parent;
+    lock_context(context);
+    if (!accepts_vhf_callbacks(*slot)) {
+      status = STATUS_DEVICE_NOT_READY;
+    } else {
+      const bool accepted = set_sc26_feature(transfer->reportId, transfer->reportBuffer,
+                                             transfer->reportBufferLen, &slot->sc26);
+      status = accepted ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
+      if (accepted && transfer->reportId == k_sc26_features_report_id) {
+        // A settings write also goes to the client, whole and in order, so a
+        // real controller behind it runs with Steam's settings.
+        lvg::feedback_event events[k_settings_events_per_write] {};
+        const std::size_t n = apply_sc26_settings(transfer->reportBuffer, transfer->reportBufferLen,
+                                                  slot->controller_id, events, k_settings_events_per_write);
+        for (std::size_t i = 0; i < n; ++i) {
+          enqueue_settings(slot->settings_queue, slot->settings_head, slot->settings_count, events[i],
+                           slot->settings_evicted);
+        }
+      }
+    }
+    unlock_context(context);
+    if (operation_handle != nullptr) VhfAsyncOperationComplete(operation_handle, status);
+    return;
+  }
+
+  if (slot != nullptr && slot->parent != nullptr && transfer != nullptr &&
       is_playstation(slot->selected_profile)) {
     auto *const context = slot->parent;
     lock_context(context);
@@ -1394,6 +1944,204 @@ void evt_pid_tick(WDFTIMER timer) {
     // A timer may stop itself; passing FALSE keeps this from waiting on the
     // callback it is already running inside.
     WdfTimerStop(timer, FALSE);
+    if (stopping) {
+      return;
+    }
+    // A write callback may have started an effect (and the timer) between the
+    // unlock above and the stop; the stop just dequeued that start. Look again.
+    bool restarted = false;
+    lock_context(context);
+    for (auto &slot : context->controllers) {
+      restarted = restarted ||
+        (slot.state == slot_state::active && slot.force_feedback && slot.pid.needs_tick());
+    }
+    unlock_context(context);
+    if (restarted) {
+      WdfTimerStart(timer, WDF_REL_TIMEOUT_IN_MS(k_pid_tick_ms));
+    }
+  }
+}
+
+// Capture each keep-alive under state_lock, including its VHF handle and
+// in-flight reference. A slot must not be destroyed/reused between selection
+// and submission; callbacks cannot take lifetime_gate because VhfDelete waits
+// for them while holding that gate.
+bool sc26_keepalive_tick(device_context *const context) noexcept {
+  struct pending_submit {
+    controller_slot *slot;
+    lvg::driver::report_buffer report;
+    VHFHANDLE vhf;
+  } pending[lvg::k_max_controllers] {};
+  std::size_t count = 0;
+  bool any_active = false;
+  bool any_ready = false;
+  lock_context(context);
+  const std::uint64_t now = now_us();
+  if (!context->stopping) {
+    for (auto &slot : context->controllers) {
+      if (slot.state != slot_state::active || !is_steam_controller(slot.selected_profile) ||
+          slot.vhf == nullptr || !slot.have_last_input) {
+        continue;
+      }
+      any_active = true;
+      if (!slot.pump.ready()) {
+        // VHF has no read pending (Steam closed the handle, or the HID child is
+        // still starting): an encode would only overwrite the latest snapshot the
+        // readiness callback drains later. Move the cadence clock so the first
+        // resend after the reader returns is due a tick later, not at once.
+        slot.sc26.last_report_us = now;
+        continue;
+      }
+      any_ready = true;
+      // Battery goes out unprompted like the real unit's, as an aside so a
+      // pending state snapshot is kept. Only while someone reads: queued asides
+      // would otherwise pile up in the transition ring for a reader that may
+      // never come.
+      const bool battery_due = now >= slot.sc26.last_battery_us &&
+                               now - slot.sc26.last_battery_us >= k_sc26_battery_period_us;
+      if (battery_due) {
+        const auto battery = lvg::driver::encode_sc26_battery(slot.sc26);
+        std::ignore = slot.pump.enqueue(&battery, sizeof(battery),
+          lvg::driver::k_sc26_battery_report_id, lvg::driver::report_kind::aside);
+        slot.sc26.last_battery_us = now;
+      }
+      const bool resend_due =
+        now >= slot.sc26.last_report_us && now - slot.sc26.last_report_us >= k_sc26_resend_after_us;
+      if (!resend_due && !battery_due) {
+        continue;
+      }
+      lvg::driver::sc26_input_report report {};
+      if (resend_due) {
+        lvg::driver::sc26_tick(&slot.sc26, now);
+        report = lvg::driver::encode_sc26_input(slot.last_input, &slot.sc26);
+      }
+      auto &item = pending[count];
+      bool have_next = false;
+      // The tick arms the timer once below for every slot; no per-slot re-arm.
+      const auto status = pump_report_locked(context, slot,
+        resend_due ? &report : nullptr, resend_due ? static_cast<ULONG>(sizeof(report)) : 0,
+        lvg::driver::k_sc26_input_report_id, lvg::driver::report_kind::continuous,
+        &item.report, &have_next, &item.vhf, false);
+      if (NT_SUCCESS(status) && have_next) {
+        item.slot = &slot;
+        ++count;
+      }
+    }
+  }
+  if (!any_active) {
+    context->sc26_timer_running = false;
+  } else if (any_ready) {
+    arm_sc26_keepalive(context);
+  } else {
+    // Nobody reads any Steam Controller: leave the timer unarmed rather than
+    // waking every tick to find that out. evt_vhf_ready_for_next_report arms
+    // it again when a read arrives.
+    context->sc26_timer_parked = true;
+  }
+  unlock_context(context);
+  for (std::size_t i = 0; i < count; ++i) {
+    std::ignore = submit_taken(context, *pending[i].slot, pending[i].report, pending[i].vhf);
+  }
+  return any_active;
+}
+
+// Caller holds state_lock. Schedule the earliest per-controller deadline:
+// traffic from one controller must not postpone another controller's reports.
+// Each controller is due k_sc26_tick_ms after its own last report, so the wire
+// keeps the real unit's 4 ms cadence; the tick's lower k_sc26_resend_after_us
+// threshold only tolerates an early wake. A controller that is already late
+// fires the timer at once.
+void arm_sc26_keepalive(device_context *const context) noexcept {
+  if (context->sc26_keepalive_timer == nullptr || !context->sc26_timer_running) {
+    return;
+  }
+  context->sc26_timer_parked = false;
+  constexpr std::uint64_t tick_us = static_cast<std::uint64_t>(k_sc26_tick_ms) * 1000;
+  const std::uint64_t now = now_us();
+  std::uint64_t delay_us = tick_us;
+  for (const auto &slot : context->controllers) {
+    if (slot.state != slot_state::active || !is_steam_controller(slot.selected_profile) ||
+        slot.vhf == nullptr || !slot.have_last_input) {
+      continue;
+    }
+    const std::uint64_t elapsed = now >= slot.sc26.last_report_us ? now - slot.sc26.last_report_us : 0;
+    const std::uint64_t remaining = elapsed >= tick_us ? 1 : tick_us - elapsed;
+    delay_us = (std::min)(delay_us, remaining);
+  }
+  LARGE_INTEGER due {};
+  due.QuadPart = -static_cast<LONGLONG>(delay_us) * 10;  // relative, 100 ns units
+  SetWaitableTimer(context->sc26_keepalive_timer, &due, 0, nullptr, nullptr, FALSE);
+}
+
+DWORD WINAPI sc26_keepalive_thread(LPVOID parameter) {
+  auto *const context = static_cast<device_context *>(parameter);
+  const HANDLE waits[2] = {context->sc26_keepalive_stop, context->sc26_keepalive_timer};
+  for (;;) {
+    const DWORD signalled = WaitForMultipleObjects(2, waits, FALSE, INFINITE);
+    if (signalled != WAIT_OBJECT_0 + 1) {
+      break;  // the stop event, or a failed wait
+    }
+    if (!sc26_keepalive_tick(context)) {
+      break;  // idle: no Steam Controller left
+    }
+  }
+  CancelWaitableTimer(context->sc26_keepalive_timer);
+  // However it left (idle, stop event, failed wait), the next input state
+  // may start a new worker.
+  lock_context(context);
+  context->sc26_timer_running = false;
+  unlock_context(context);
+  return 0;
+}
+
+// Both run under lifetime_gate and outside state_lock, which serializes the
+// thread handle between the submit path (start) and the stop paths.
+void start_sc26_keepalive(device_context *const context) noexcept {
+  if (context->sc26_keepalive_thread != nullptr) {
+    // The previous worker left when its last controller went away; let it finish.
+    WaitForSingleObject(context->sc26_keepalive_thread, INFINITE);
+    CloseHandle(context->sc26_keepalive_thread);
+    context->sc26_keepalive_thread = nullptr;
+  }
+  // The old worker clears this flag as it exits. Publish the new generation
+  // only after joining it, so its final store cannot disable our re-arming.
+  lock_context(context);
+  context->sc26_timer_running = true;
+  context->sc26_timer_parked = false;
+  unlock_context(context);
+  ResetEvent(context->sc26_keepalive_stop);
+  LARGE_INTEGER first_due {};
+  first_due.QuadPart = -static_cast<LONGLONG>(k_sc26_tick_ms) * 10000;  // relative, 100 ns units
+  if (!SetWaitableTimer(context->sc26_keepalive_timer, &first_due, 0, nullptr, nullptr, FALSE)) {
+    lock_context(context);
+    context->sc26_timer_running = false;
+    unlock_context(context);
+    return;
+  }
+  const HANDLE thread = CreateThread(nullptr, 0, sc26_keepalive_thread, context, 0, nullptr);
+  if (thread == nullptr) {
+    CancelWaitableTimer(context->sc26_keepalive_timer);
+    lock_context(context);
+    context->sc26_timer_running = false;
+    unlock_context(context);
+    return;
+  }
+  // A 4 ms cadence should not queue behind the host's ordinary work.
+  SetThreadPriority(thread, THREAD_PRIORITY_HIGHEST);
+  context->sc26_keepalive_thread = thread;
+}
+
+void stop_sc26_keepalive(device_context *const context) noexcept {
+  if (context->sc26_keepalive_stop != nullptr) {
+    SetEvent(context->sc26_keepalive_stop);
+  }
+  if (context->sc26_keepalive_thread != nullptr) {
+    WaitForSingleObject(context->sc26_keepalive_thread, INFINITE);
+    CloseHandle(context->sc26_keepalive_thread);
+    context->sc26_keepalive_thread = nullptr;
+  }
+  if (context->sc26_keepalive_timer != nullptr) {
+    CancelWaitableTimer(context->sc26_keepalive_timer);
   }
 }
 
@@ -1418,20 +2166,28 @@ void evt_vhf_get_input_report(
       status = STATUS_DEVICE_NOT_READY;
     } else {
       // Buffer big enough for the largest report any profile produces.
+      static_assert(sizeof(ds4_input_report) <= k_max_report_bytes, "ds4_input_report must fit the VHF report buffer");
+      static_assert(sizeof(ds5_input_report) <= k_max_report_bytes, "ds5_input_report must fit the VHF report buffer");
+      static_assert(sizeof(generic_input_report) <= k_max_report_bytes, "generic_input_report must fit the VHF report buffer");
+      static_assert(sizeof(switch_input_report) <= k_max_report_bytes, "switch_input_report must fit the VHF report buffer");
+      static_assert(sizeof(xbox_series_input_report) <= k_max_report_bytes, "xbox_series_input_report must fit the VHF report buffer");
+      static_assert(sizeof(xbox_one_input_report) <= k_max_report_bytes, "xbox_one_input_report must fit the VHF report buffer");
+      static_assert(sizeof(sc26_battery_report) <= k_max_report_bytes, "sc26_battery_report must fit the VHF report buffer");
+      static_assert(sizeof(sc26_input_report) <= k_max_report_bytes, "sc26_input_report must fit the VHF report buffer");
       std::uint8_t buffer[k_max_report_bytes] {};
       std::size_t length = 0;
       std::uint8_t report_id = 0;
 
       switch (slot->selected_profile) {
         case lvg::profile::dualshock_4: {
-          const ds4_input_report report = encode_ds4_input(slot->last_input, &slot->ds4);
+          const ds4_input_report report = encode_ds4_input(slot->last_input, &slot->ds4, now_us());
           std::memcpy(buffer, &report, sizeof(report));
           length = sizeof(report);
           report_id = k_ds4_input_report_id;
           break;
         }
         case lvg::profile::dualsense: {
-          const ds5_input_report report = encode_ds5_input(slot->last_input, &slot->ds5);
+          const ds5_input_report report = encode_ds5_input(slot->last_input, &slot->ds5, now_us());
           std::memcpy(buffer, &report, sizeof(report));
           length = sizeof(report);
           report_id = k_ds5_input_report_id;
@@ -1457,6 +2213,27 @@ void evt_vhf_get_input_report(
           std::memcpy(buffer, &report, sizeof(report));
           length = sizeof(report);
           report_id = k_xbox_one_input_report_id;
+          break;
+        }
+        case lvg::profile::steam_controller: {
+          if (transfer->reportId == k_sc26_battery_report_id) {
+            // The descriptor declares 0x43 as an input report too; answer it from
+            // the current state instead of refusing the id.
+            const sc26_battery_report report = encode_sc26_battery(slot->sc26);
+            std::memcpy(buffer, &report, sizeof(report));
+            length = sizeof(report);
+            report_id = k_sc26_battery_report_id;
+            break;
+          }
+          sc26_tick(&slot->sc26, now_us());
+          const sc26_input_report report = encode_sc26_input(slot->last_input, &slot->sc26);
+          std::memcpy(buffer, &report, sizeof(report));
+          // Number it like the read stream does (stamp_sc26_sequence), not with the
+          // encoder's own counter: an app mixing HidD_GetInputReport with reads
+          // should see one consecutive sequence. Peek only; the next read stamps it.
+          buffer[1] = slot->sc26_wire_sequence;
+          length = sizeof(report);
+          report_id = k_sc26_input_report_id;
           break;
         }
         default: {
@@ -1528,9 +2305,26 @@ void evt_io_device_control(
 
   switch (io_control_code) {
     case lvg::ioctl_query_info: {
-      lvg::query_info_request *input = nullptr;
-      status = retrieve_request(request, &input);
+      // Two request shapes share this code (protocol.h, query_info_response):
+      // the 8-byte device query every host sends, and a controller_id_request
+      // asking for one slot's feedback_counters as well. METHOD_BUFFERED
+      // shares one buffer for input and output, so the request is copied out
+      // before the response overwrites it.
+      PVOID raw = nullptr;
+      size_t bytes = 0;
+      status = WdfRequestRetrieveInputBuffer(request, sizeof(lvg::request_header), &raw, &bytes);
       if (!NT_SUCCESS(status)) {
+        break;
+      }
+      lvg::controller_id_request controller_query {};
+      bool per_controller = false;
+      if (lvg::valid_request(static_cast<const lvg::query_info_request *>(raw), bytes)) {
+        per_controller = false;
+      } else if (lvg::valid_request(static_cast<const lvg::controller_id_request *>(raw), bytes)) {
+        std::memcpy(&controller_query, raw, sizeof(controller_query));
+        per_controller = true;
+      } else {
+        status = STATUS_INVALID_BUFFER_SIZE;
         break;
       }
       if (output_buffer_length < sizeof(lvg::query_info_response)) {
@@ -1543,20 +2337,15 @@ void evt_io_device_control(
         sizeof(*output),
         reinterpret_cast<PVOID *>(&output),
         nullptr);
+      if (!NT_SUCCESS(status)) {
+        break;
+      }
+      if (per_controller) {
+        status = query_controller_info(context, owner, controller_query, output);
+      } else {
+        fill_query_info(output);
+      }
       if (NT_SUCCESS(status)) {
-        *output = {};
-        output->header.size = sizeof(*output);
-        output->header.version = lvg::k_protocol_version;
-        output->minimum_protocol_version = lvg::k_protocol_version;
-        output->maximum_protocol_version = lvg::k_protocol_version;
-        output->available_profiles = lvg::driver::available_profiles();
-        // Advertised device-wide; a profile without a touchpad, motion
-        // sensors, or a battery answers those IOCTLs with STATUS_NOT_SUPPORTED.
-        output->available_features = lvg::feature_input_state | lvg::feature_feedback |
-                                     lvg::feature_touch | lvg::feature_motion |
-                                     lvg::feature_battery |
-                                     lvg::feature_hid_feature_reports;
-        output->maximum_controllers = lvg::k_max_controllers;
         information = sizeof(*output);
       }
       break;
@@ -1636,7 +2425,10 @@ void evt_io_device_control(
         reinterpret_cast<PVOID *>(&output),
         nullptr);
       if (NT_SUCCESS(status)) {
-        status = poll_feedback(context, owner, *input, output);
+        // METHOD_BUFFERED: input and output share the system buffer, so the
+        // request must be copied before the event is written over it.
+        const lvg::controller_id_request request_copy = *input;
+        status = poll_feedback(context, owner, request_copy, output);
         if (NT_SUCCESS(status)) {
           information = sizeof(*output);
         }
@@ -1671,6 +2463,7 @@ void stop_owned_controllers(device_context *const context, const bool forget_tar
   lock_lifetime(context);
   lock_context(context);
   const WDFTIMER timer = context->pid_timer;
+  context->sc26_timer_running = false;
   context->stopping = true;
   context->vhf_file_handle = nullptr;
   if (forget_target) {
@@ -1680,6 +2473,8 @@ void stop_owned_controllers(device_context *const context, const bool forget_tar
   for (std::uint32_t index = 0; index < lvg::k_max_controllers; ++index) {
     auto &slot = context->controllers[index];
     slot.feedback_pending = false;
+    slot.haptic_count = 0;
+    slot.settings_count = 0;
     if (slot.state == slot_state::active && slot.vhf != nullptr) {
       slot.state = slot_state::stopping;
       handles[index] = slot.vhf;
@@ -1692,17 +2487,20 @@ void stop_owned_controllers(device_context *const context, const bool forget_tar
 
   for (std::uint32_t index = 0; index < lvg::k_max_controllers; ++index) {
     if (handles[index] != nullptr) {
+      wait_for_submits(context, context->controllers[index]);
       VhfDelete(handles[index], TRUE);
+      // The slot has drained: release it so a restarted device can reuse it.
       lock_context(context);
       reset_slot(&context->controllers[index]);
       unlock_context(context);
     }
   }
 
-  // Stopped outside state_lock because the tick callback acquires it.
+  // Stopped outside state_lock because the tick callbacks acquire it.
   if (timer != nullptr) {
     WdfTimerStop(timer, TRUE);
   }
+  stop_sc26_keepalive(context);
   unlock_lifetime(context);
 }
 
@@ -1758,6 +2556,23 @@ NTSTATUS evt_release_hardware(WDFDEVICE device, WDFCMRESLIST) {
   return STATUS_SUCCESS;
 }
 
+void evt_device_cleanup(WDFOBJECT object) {
+  auto *const context = get_device_context(reinterpret_cast<WDFDEVICE>(object));
+  if (context == nullptr) {
+    return;
+  }
+  // Release hardware already stopped the worker; this only drops the handles.
+  stop_sc26_keepalive(context);
+  if (context->sc26_keepalive_timer != nullptr) {
+    CloseHandle(context->sc26_keepalive_timer);
+    context->sc26_keepalive_timer = nullptr;
+  }
+  if (context->sc26_keepalive_stop != nullptr) {
+    CloseHandle(context->sc26_keepalive_stop);
+    context->sc26_keepalive_stop = nullptr;
+  }
+}
+
 NTSTATUS evt_device_add(WDFDRIVER, PWDFDEVICE_INIT device_init) {
   // The INF installs this UMDF component above the inbox VHF function driver.
   // Tell WDF that this is a filter so VHF remains the sole power-policy owner
@@ -1783,6 +2598,7 @@ NTSTATUS evt_device_add(WDFDRIVER, PWDFDEVICE_INIT device_init) {
 
   WDF_OBJECT_ATTRIBUTES device_attributes;
   WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&device_attributes, device_context);
+  device_attributes.EvtCleanupCallback = evt_device_cleanup;
 
   WDFDEVICE device = nullptr;
   NTSTATUS status = WdfDeviceCreate(&device_init, &device_attributes, &device);
@@ -1813,6 +2629,28 @@ NTSTATUS evt_device_add(WDFDRIVER, PWDFDEVICE_INIT device_init) {
   if (!NT_SUCCESS(WdfTimerCreate(&timer_config, &timer_attributes, &context->pid_timer))) {
     context->pid_timer = nullptr;
   }
+
+  // Steam Controller keep-alive cadence; same optional footing as the effect clock.
+  // A UMDF WDFTIMER fires on the system clock interrupt: 15.6 ms unless some
+  // process has raised the timer resolution. The probe does (timeBeginPeriod(1)),
+  // a streaming host does not, so over a stream the 4 ms tick ran at ~64 Hz and
+  // the wire fell to ~115 reports/s with 16..19 ms gaps where the unit sends a
+  // steady 250/s; WDF_TIMER_CONFIG::UseHighResolutionTimer is KMDF-only and
+  // WdfTimerCreate refuses it here. A high-resolution waitable timer on a worker
+  // thread holds the cadence whatever the resolution (Windows 10 1803 and later;
+  // older hosts fall back to a plain waitable timer at the system resolution).
+  context->sc26_keepalive_stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+  context->sc26_keepalive_timer =
+    CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+  if (context->sc26_keepalive_timer == nullptr) {
+    context->sc26_keepalive_timer = CreateWaitableTimerExW(nullptr, nullptr, 0, TIMER_ALL_ACCESS);
+  }
+  if (context->sc26_keepalive_stop == nullptr && context->sc26_keepalive_timer != nullptr) {
+    CloseHandle(context->sc26_keepalive_timer);
+    context->sc26_keepalive_timer = nullptr;
+  }
+  context->sc26_keepalive_thread = nullptr;
+  context->sc26_timer_running = false;
 
   WDF_OBJECT_ATTRIBUTES lifetime_attributes;
   WDF_OBJECT_ATTRIBUTES_INIT(&lifetime_attributes);
