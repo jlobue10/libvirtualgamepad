@@ -5,6 +5,7 @@
 
 #include <setupapi.h>
 
+#include <cstring>
 #include <utility>
 
 namespace lvg {
@@ -310,6 +311,44 @@ DWORD client::query_feedback_counters(
   }
   *counters = response.counters;
   return ERROR_SUCCESS;
+}
+
+DWORD client::set_steam_controller_attributes(
+  const std::uint32_t controller_id,
+  const steam_controller_attributes &attributes) noexcept {
+  if (!connected()) {
+    return ERROR_INVALID_HANDLE;
+  }
+  if (controller_id >= maximum_controllers()) {
+    return ERROR_INVALID_PARAMETER;
+  }
+
+  steam_controller_attributes_request request {};
+  initialize_header(&request.header, sizeof(request));
+  request.controller_id = controller_id;
+  request.flags = attributes.flags;
+  request.firmware_build_time = attributes.firmware_build_time;
+  request.bootloader_build_time = attributes.bootloader_build_time;
+  request.board_revision = attributes.board_revision;
+  request.capabilities = attributes.capabilities;
+  static_assert(sizeof(request.build_id) == sizeof(attributes.build_id));
+  static_assert(sizeof(request.unit_serial) == sizeof(attributes.unit_serial));
+  static_assert(sizeof(request.board_serial) == sizeof(attributes.board_serial));
+  std::memcpy(request.build_id, attributes.build_id, sizeof(request.build_id));
+  std::memcpy(request.unit_serial, attributes.unit_serial, sizeof(request.unit_serial));
+  std::memcpy(request.board_serial, attributes.board_serial, sizeof(request.board_serial));
+
+  const DWORD status = issue(
+    ioctl_set_steam_controller_attributes,
+    &request,
+    sizeof(request),
+    nullptr,
+    0);
+  // A driver built before this request does not know its control code: WDF
+  // fails it with STATUS_INVALID_DEVICE_REQUEST (ERROR_INVALID_FUNCTION). That
+  // is the other protocol generation, like a rejected size, not a fault of the
+  // call; the driver keeps its captured defaults and the caller carries on.
+  return status == ERROR_INVALID_FUNCTION ? ERROR_REVISION_MISMATCH : status;
 }
 
 DWORD client::issue(

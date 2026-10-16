@@ -39,6 +39,7 @@ struct fake_driver {
   DWORD error {ERROR_SUCCESS};
   DWORD last_code {0};
   DWORD last_input_size {0};
+  std::uint8_t last_input[128] {};
   DWORD output_bytes {0};
   lvg::feedback_event event {};
   lvg::query_info_response info {};
@@ -47,7 +48,7 @@ struct fake_driver {
 BOOL WINAPI fake_DeviceIoControl(
   HANDLE,
   const DWORD code,
-  LPVOID,
+  LPVOID input,
   const DWORD input_size,
   LPVOID output,
   const DWORD output_size,
@@ -55,6 +56,10 @@ BOOL WINAPI fake_DeviceIoControl(
   LPOVERLAPPED) {
   driver.last_code = code;
   driver.last_input_size = input_size;
+  std::memset(driver.last_input, 0, sizeof(driver.last_input));
+  if (input != nullptr && input_size <= sizeof(driver.last_input)) {
+    std::memcpy(driver.last_input, input, input_size);
+  }
   if (!driver.result) {
     return FALSE;
   }
@@ -223,6 +228,58 @@ int main() {
     driver.error = ERROR_INVALID_USER_BUFFER;
     check(c.query_feedback_counters(2, &counters) == ERROR_REVISION_MISMATCH,
           "a driver that predates the counters (STATUS_INVALID_BUFFER_SIZE) is ERROR_REVISION_MISMATCH");
+    driver.result = TRUE;
+    driver.error = ERROR_SUCCESS;
+    c.handle_ = INVALID_HANDLE_VALUE;
+  }
+  {
+    // set_steam_controller_attributes: a fixed 80-byte request on its own
+    // control code; an old driver's "unknown IOCTL" is a protocol generation.
+    lvg::client unconnected;
+    lvg::steam_controller_attributes attributes {};
+    check(unconnected.set_steam_controller_attributes(0, attributes) == ERROR_INVALID_HANDLE,
+          "attributes on an unconnected client are ERROR_INVALID_HANDLE");
+    unconnected.handle_ = INVALID_HANDLE_VALUE;
+    auto c = connected_client();
+    driver.last_code = 0;
+    check(c.set_steam_controller_attributes(4, attributes) == ERROR_INVALID_PARAMETER && driver.last_code == 0,
+          "attributes for an out-of-range slot are refused before the driver");
+    attributes.flags = lvg::sc_attr_firmware_build_time | lvg::sc_attr_build_id | lvg::sc_attr_serials;
+    attributes.firmware_build_time = 0x6B123456;
+    attributes.board_revision = 0x4A;
+    std::memcpy(attributes.build_id, "26e1f7ef1955", 12);
+    std::memcpy(attributes.unit_serial, "FXA1234567890", 13);
+    std::memset(attributes.board_serial, 'B', 16);  // unterminated: copied whole, the driver bounds it
+    check(c.set_steam_controller_attributes(2, attributes) == ERROR_SUCCESS &&
+            driver.last_code == lvg::ioctl_set_steam_controller_attributes &&
+            driver.last_input_size == sizeof(lvg::steam_controller_attributes_request) &&
+            driver.last_input_size == 80,
+          "attributes go out as the 80-byte request on ioctl_set_steam_controller_attributes");
+    lvg::steam_controller_attributes_request sent {};
+    std::memcpy(&sent, driver.last_input, sizeof(sent));
+    check(lvg::valid_request(&sent, sizeof(sent)) && sent.controller_id == 2 &&
+            sent.flags == attributes.flags && sent.firmware_build_time == 0x6B123456 &&
+            sent.board_revision == 0x4A && sent.bootloader_build_time == 0 && sent.capabilities == 0 &&
+            std::memcmp(sent.build_id, attributes.build_id, 16) == 0 &&
+            std::memcmp(sent.unit_serial, attributes.unit_serial, 16) == 0 &&
+            std::memcmp(sent.board_serial, attributes.board_serial, 16) == 0,
+          "the request carries the protocol header, the slot, the flags and every field verbatim");
+    driver.result = FALSE;
+    driver.error = ERROR_INVALID_FUNCTION;
+    check(c.set_steam_controller_attributes(2, attributes) == ERROR_REVISION_MISMATCH,
+          "a driver that predates the request (STATUS_INVALID_DEVICE_REQUEST) is ERROR_REVISION_MISMATCH");
+    driver.error = ERROR_INVALID_USER_BUFFER;
+    check(c.set_steam_controller_attributes(2, attributes) == ERROR_REVISION_MISMATCH,
+          "a rejected request size is ERROR_REVISION_MISMATCH like every other IOCTL");
+    driver.error = ERROR_NOT_SUPPORTED;
+    check(c.set_steam_controller_attributes(2, attributes) == ERROR_NOT_SUPPORTED,
+          "a slot of another profile passes through as ERROR_NOT_SUPPORTED");
+    driver.error = ERROR_NOT_FOUND;
+    check(c.set_steam_controller_attributes(2, attributes) == ERROR_NOT_FOUND,
+          "an empty slot passes through as ERROR_NOT_FOUND");
+    driver.error = ERROR_ACCESS_DENIED;
+    check(c.set_steam_controller_attributes(2, attributes) == ERROR_ACCESS_DENIED,
+          "another handle's slot passes through as ERROR_ACCESS_DENIED");
     driver.result = TRUE;
     driver.error = ERROR_SUCCESS;
     c.handle_ = INVALID_HANDLE_VALUE;
