@@ -9,6 +9,24 @@
 
 namespace lvg {
 
+// The real Steam Controller's firmware attributes, as the host read them from
+// the controller the client is streaming from (sc26_usb.h names the tags).
+// `flags` is steam_controller_attribute_flags: only flagged fields are
+// applied, the rest keep the virtual device's defaults. Strings are ASCII,
+// at most 15 characters, NUL padded; the driver keeps one only when it is
+// non-empty printable ASCII, otherwise the synthetic per-slot serial or the
+// placeholder build id stays.
+struct steam_controller_attributes {
+  std::uint32_t flags {};
+  std::uint32_t firmware_build_time {};
+  std::uint32_t bootloader_build_time {};
+  std::uint32_t board_revision {};
+  std::uint32_t capabilities {};
+  char build_id[16] {};
+  char unit_serial[16] {};
+  char board_serial[16] {};
+};
+
 // Opens the driver's private WDF device interface, never a HID child path.
 // A connection owns the controller slots it creates. Closing it releases those
 // slots in the driver even if the caller did not explicitly destroy them.
@@ -88,6 +106,20 @@ class client final {
   [[nodiscard]] DWORD query_feedback_counters(
     std::uint32_t controller_id,
     feedback_counters *counters) noexcept;
+
+  // Gives a Steam Controller slot the real controller's firmware attributes,
+  // so Steam's GET_ATTRIBUTES_VALUES / GET_DEVICE_INFO / GET_STRING_ATTRIBUTE
+  // see the real firmware build and offer an update only when the real
+  // controller needs one. Send after create_controller, once per slot
+  // creation (create resets them); a later call replaces them and Steam picks
+  // the change up on its next poll. ERROR_REVISION_MISMATCH means the driver
+  // predates the request (it keeps its captured defaults); ERROR_NOT_SUPPORTED
+  // means the slot does not run profile::steam_controller; the rest of the
+  // error contract above applies (ERROR_NOT_FOUND for an empty slot,
+  // ERROR_ACCESS_DENIED for another handle's).
+  [[nodiscard]] DWORD set_steam_controller_attributes(
+    std::uint32_t controller_id,
+    const steam_controller_attributes &attributes) noexcept;
 
  private:
   [[nodiscard]] DWORD query_info() noexcept;
