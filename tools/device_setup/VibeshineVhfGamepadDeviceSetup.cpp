@@ -26,6 +26,8 @@
 
 #include "libvirtualgamepad/protocol.h"
 
+#include "install_decision.h"
+
 #pragma comment(lib, "cfgmgr32.lib")
 #pragma comment(lib, "newdev.lib")
 #pragma comment(lib, "setupapi.lib")
@@ -355,7 +357,9 @@ void validate_owned_inf_path(const std::wstring &absolute_path) {
 }
 
 [[nodiscard]] bool owned_root_devices_match_driver_version(const std::wstring &expected_version) {
-  device_info_set device_set {SetupDiGetClassDevsW(nullptr, nullptr, nullptr, DIGCF_ALLCLASSES)};
+  // DIGCF_PRESENT: a phantom (not present) root node must not count as ours, or
+  // creation is blocked and UpdateDriver reports NO_MORE_ITEMS with nothing to roll back.
+  device_info_set device_set {SetupDiGetClassDevsW(nullptr, nullptr, nullptr, DIGCF_ALLCLASSES | DIGCF_PRESENT)};
   if (device_set.get() == INVALID_HANDLE_VALUE) {
     return false;
   }
@@ -392,8 +396,13 @@ struct root_device_state {
   ULONG problem {};
 };
 
-[[nodiscard]] std::vector<root_device_state> enumerate_root_devices() {
-  device_info_set device_set {SetupDiGetClassDevsW(nullptr, nullptr, nullptr, DIGCF_ALLCLASSES)};
+// present_only (the default): a phantom (registered, not present) root node must not
+// count as ours for install/reactivate/cycle/status, or creation is blocked and
+// UpdateDriver reports NO_MORE_ITEMS with nothing to roll back. `remove` passes false
+// so a phantom is deleted too instead of accumulating one instance per failed cycle.
+[[nodiscard]] std::vector<root_device_state> enumerate_root_devices(const bool present_only = true) {
+  const DWORD flags = DIGCF_ALLCLASSES | (present_only ? DIGCF_PRESENT : 0);
+  device_info_set device_set {SetupDiGetClassDevsW(nullptr, nullptr, nullptr, flags)};
   if (device_set.get() == INVALID_HANDLE_VALUE) {
     throw_last_error("SetupDiGetClassDevsW");
   }
@@ -428,6 +437,7 @@ struct root_device_state {
 
 struct protocol_query_probe {
   std::atomic<HANDLE> device_handle {INVALID_HANDLE_VALUE};
+  std::atomic<DWORD> open_error {ERROR_SUCCESS};  // GetLastError() of a failed CreateFile, from the worker thread
   HANDLE completion_event {nullptr};
   HANDLE open_thread {nullptr};
   std::wstring device_path;
@@ -451,16 +461,29 @@ struct protocol_query_probe {
 
 DWORD WINAPI open_protocol_device_worker(void *context) {
   auto *probe = static_cast<protocol_query_probe *>(context);
-  probe->device_handle.store(CreateFileW(
+  const HANDLE handle = CreateFileW(
       probe->device_path.c_str(),
       GENERIC_READ | GENERIC_WRITE,
       0,
       nullptr,
       OPEN_EXISTING,
       FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
-      nullptr));
+      nullptr);
+  if (handle == INVALID_HANDLE_VALUE) {
+    probe->open_error.store(GetLastError());
+  }
+  probe->device_handle.store(handle);
   return 0;
 }
+
+// Verdict of the most recent probe, for the status JSON and the ready decision.
+lvg::device_setup::probe_verdict g_last_probe_verdict = lvg::device_setup::probe_verdict::absent;
+static_assert(ERROR_ACCESS_DENIED == lvg::device_setup::k_win32_error_access_denied);
+static_assert(ERROR_SHARING_VIOLATION == lvg::device_setup::k_win32_error_sharing_violation);
+static_assert(ERROR_NO_MORE_ITEMS == lvg::device_setup::k_win32_error_no_more_items);
+static_assert(ERROR_AUTHENTICODE_TRUST_NOT_ESTABLISHED == lvg::device_setup::k_win32_error_authenticode_trust_not_established);
+static_assert(ERROR_AUTHENTICODE_PUBLISHER_NOT_TRUSTED == lvg::device_setup::k_win32_error_authenticode_publisher_not_trusted);
+static_assert(ERROR_SIGNATURE_OSATTRIBUTE_MISMATCH == lvg::device_setup::k_win32_error_signature_osattribute_mismatch);
 
 // A broken UMDF endpoint can ignore CreateFile or overlapped-I/O cancellation.
 // Retain at most one such probe until it completes, rather than returning while
@@ -507,7 +530,10 @@ void reap_completed_protocol_query_probe() {
          response.minimum_protocol_version <= lvg::k_protocol_version &&
          response.maximum_protocol_version >= lvg::k_protocol_version &&
          response.maximum_controllers > 0 && response.maximum_controllers <= lvg::k_max_controllers &&
-         response.reserved == 0;
+         // The 8-byte device query carries no counters (protocol.h,
+         // query_info_response): a non-zero word there is another generation.
+         response.counters.haptic_evicted == 0 && response.counters.settings_evicted == 0 &&
+         response.counters.transitions_dropped == 0 && response.counters.unknown_commands == 0;
 }
 
 [[nodiscard]] bool complete_protocol_query_probe(protocol_query_probe *probe) {
@@ -519,10 +545,13 @@ void reap_completed_protocol_query_probe() {
       FALSE) != FALSE;
   const bool valid = completed && protocol_query_response_is_valid(probe->response, bytes_returned);
   delete probe;
+  g_last_probe_verdict = valid ? lvg::device_setup::probe_verdict::answered : lvg::device_setup::probe_verdict::absent;
   return valid;
 }
 
 [[nodiscard]] bool source_interface_accepts_protocol(const wchar_t *device_path) {
+  using lvg::device_setup::probe_verdict;
+  g_last_probe_verdict = probe_verdict::absent;
   reap_completed_protocol_query_probe();
   if (g_pending_protocol_query_probe != nullptr) {
     return false;
@@ -548,8 +577,12 @@ void reap_completed_protocol_query_probe() {
   CloseHandle(probe->open_thread);
   probe->open_thread = nullptr;
   if (probe->device_handle.load() == INVALID_HANDLE_VALUE) {
+    // A client holding the interface (Vibepollo, first alloc to last free) is
+    // not a broken driver: report it as in use rather than "not ready", which
+    // made `install` restart the live node and `status` exit 3 mid-stream.
+    g_last_probe_verdict = lvg::device_setup::classify_open(probe->open_error.load());
     delete probe;
-    return false;
+    return lvg::device_setup::interface_ready(g_last_probe_verdict);
   }
   probe->completion_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
   if (probe->completion_event == nullptr) {
@@ -572,6 +605,7 @@ void reap_completed_protocol_query_probe() {
           &probe->overlapped)) {
     const bool valid = protocol_query_response_is_valid(probe->response, bytes_returned);
     delete probe;
+    g_last_probe_verdict = valid ? probe_verdict::answered : probe_verdict::absent;
     return valid;
   }
   if (GetLastError() != ERROR_IO_PENDING) {
@@ -759,23 +793,52 @@ struct driver_update_result {
 
 [[nodiscard]] driver_update_result update_driver(const std::wstring &inf_path) {
   BOOL reboot_required = FALSE;
-  if (!UpdateDriverForPlugAndPlayDevicesW(
-          nullptr,
-          lvg::k_root_hardware_id,
-          inf_path.c_str(),
-          0,
-          &reboot_required)) {
-    const DWORD error = GetLastError();
-    // With zero install flags Windows correctly declines to downgrade an
-    // equal/newer already-selected package. The source node still exists and
-    // may already be ready, so this is not an installation failure.
-    if (error == ERROR_NO_MORE_ITEMS) {
+  // Non-interactive: the tool runs from installer custom actions and service
+  // sessions where a driver-trust prompt has no desktop to appear on and the
+  // call would block until the installer's timeout. A publisher Windows has not
+  // established as trusted fails instead, with the error named below. No force
+  // flag: Windows still declines to downgrade an equal/newer selected package.
+  const BOOL succeeded = UpdateDriverForPlugAndPlayDevicesW(
+      nullptr,
+      lvg::k_root_hardware_id,
+      inf_path.c_str(),
+      INSTALLFLAG_NONINTERACTIVE,
+      &reboot_required);
+  const DWORD error = succeeded ? ERROR_SUCCESS : GetLastError();
+  switch (lvg::device_setup::classify_driver_update(succeeded != FALSE, error)) {
+    case lvg::device_setup::driver_update_verdict::installed:
+      return {.updated = true, .reboot_required = reboot_required != FALSE};
+    case lvg::device_setup::driver_update_verdict::declined:
+      // Windows declined to downgrade an equal/newer already-selected package.
+      // The source node still exists and may already be ready, so this is not
+      // an installation failure (the DriverVer attestation decides).
       return {};
-    }
-    SetLastError(error);
-    throw_last_error("UpdateDriverForPlugAndPlayDevicesW");
+    case lvg::device_setup::driver_update_verdict::publisher_not_trusted:
+      throw std::runtime_error(
+          "UpdateDriverForPlugAndPlayDevicesW failed with Win32 error " + std::to_string(error) +
+          (error == lvg::device_setup::k_win32_error_authenticode_publisher_not_trusted
+               ? ": the driver package's publisher was not established as trusted on this machine "
+                 "(declined at an earlier prompt or listed under LocalMachine\\Disallowed), so the "
+                 "non-interactive install cannot accept it. Remove it from Disallowed if present and "
+                 "install the publisher certificate into LocalMachine\\TrustedPublisher, then retry."
+               : ": the driver package's publisher is not trusted on this machine, so the non-interactive "
+                 "install cannot accept it. Install the publisher certificate into "
+                 "LocalMachine\\TrustedPublisher (tools\\trust-test-certificate.ps1 for a local test "
+                 "package), then retry the setup."));
+    case lvg::device_setup::driver_update_verdict::signature_os_mismatch:
+      throw std::runtime_error(
+          "UpdateDriverForPlugAndPlayDevicesW failed with Win32 error " + std::to_string(error) +
+          ": the driver package's signature targets a different Windows version. "
+          "Use a driver package signed for this version of Windows.");
+    default:
+      if (error == ERROR_SUCCESS) {
+        // FALSE without a last error: name it instead of "failed with Win32 error 0".
+        throw std::runtime_error(
+            "UpdateDriverForPlugAndPlayDevicesW (non-interactive) returned FALSE without a Win32 error");
+      }
+      SetLastError(error);
+      throw_last_error("UpdateDriverForPlugAndPlayDevicesW (non-interactive)");
   }
-  return {.updated = true, .reboot_required = reboot_required != FALSE};
 }
 
 struct remove_device_result {
@@ -1110,9 +1173,13 @@ void print_device_diagnostics(const wchar_t *const stage) {
 
 void print_status() {
   const auto devices = enumerate_root_devices();
+  // Registered but absent nodes: `remove` deletes them, `install` ignores them.
+  const auto registered = enumerate_root_devices(false);
   const bool ready = source_device_interface_ready();
   std::wcout << L"{\"root_device_count\":" << devices.size()
-             << L",\"source_interface_ready\":" << (ready ? L"true" : L"false");
+             << L",\"phantom_root_devices\":" << (registered.size() > devices.size() ? registered.size() - devices.size() : 0)
+             << L",\"source_interface_ready\":" << (ready ? L"true" : L"false")
+             << L",\"source_interface_state\":\"" << lvg::device_setup::probe_verdict_name(g_last_probe_verdict) << L"\"";
   if (!devices.empty()) {
     std::wcout << L",\"instance_id\":\"" << json_escape(devices.front().instance_id)
                << L"\",\"device_status\":" << devices.front().status
@@ -1161,7 +1228,7 @@ void print_status() {
   bool device_cycle_reboot_required = false;
   bool device_cycle_succeeded = false;
   bool selected_driver_verified = false;
-  bool owned_reload_verified = !requires_live_reload;
+  bool owned_reload_verified = false;
   if (!ready || requires_live_reload) {
     try {
       const auto reactivation = reactivate_owned_root_devices();
@@ -1202,11 +1269,28 @@ void print_status() {
   // exact source node reloaded in the current session. When Windows requested
   // a reboot, also attest the driver version selected for every owned node so
   // an old compatible DLL cannot masquerade as the newly staged package.
-  if (ready && requires_live_reload && device_cycle_succeeded && !device_cycle_reboot_required) {
+  // Also attest when Windows kept an already-selected package (update_driver()
+  // returned updated=false): that is an idempotent re-run of this package only
+  // if every owned node runs this INF's DriverVer. A same-day package from
+  // another branch (lower rev-list count) or an equal-DriverVer rebuild was
+  // otherwise reported as installed with the old DLL still live.
+  lvg::device_setup::install_outcome outcome {
+    .ready = ready,
+    .updated = update_result.updated,
+    .reboot_required = reboot_required,
+    .device_cycle_succeeded = device_cycle_succeeded,
+    .device_cycle_reboot_required = device_cycle_reboot_required,
+    .version_matches = false,
+  };
+  if (lvg::device_setup::attestation_due(outcome)) {
     selected_driver_verified = owned_root_devices_match_driver_version(expected_driver_version);
+    outcome.version_matches = selected_driver_verified;
+    if (!selected_driver_verified) {
+      std::cerr << "Vibeshine VHF gamepad: the owned root device does not run the staged package's DriverVer"
+                << (update_result.updated ? "" : " (Windows kept an already-selected package)") << std::endl;
+    }
   }
-  if (ready && (!requires_live_reload ||
-                (device_cycle_succeeded && !device_cycle_reboot_required && selected_driver_verified))) {
+  if (lvg::device_setup::reload_verified(outcome)) {
     owned_reload_verified = true;
     reboot_required = false;
   }
@@ -1238,26 +1322,38 @@ void print_status() {
               << L",\"rolled_back\":" << (rolled_back ? L"true" : L"false")
              << L",\"rollback_reboot_required\":" << (rollback_reboot_required ? L"true" : L"false")
              << L",\"ready\":" << (ready ? L"true" : L"false") << L"}" << std::endl;
-  if (reboot_required) {
-    return k_exit_reboot_required;
-  }
-  return ready && owned_reload_verified ? 0 : 3;
+  static_assert(lvg::device_setup::k_exit_reboot == k_exit_reboot_required);
+  outcome.reboot_required = reboot_required;  // a rollback above may have added its own request
+  return lvg::device_setup::install_exit_code(outcome);
 }
 
 [[nodiscard]] int run_remove() {
   require_elevation();
-  const auto devices = enumerate_root_devices();
+  // Every registered node, present or phantom: remove_device_instance opens by instance id.
+  const auto devices = enumerate_root_devices(false);
   DWORD removed = 0;
+  DWORD failed = 0;
   bool reboot_required = false;
   for (const auto &device : devices) {
-    const auto result = remove_device_instance(device.instance_id);
-    if (result.removed) {
-      ++removed;
+    // One node's failure (a phantom DIF_REMOVE refusal, a predicate mismatch) must not
+    // leave the remaining nodes, possibly the present one, untouched.
+    try {
+      const auto result = remove_device_instance(device.instance_id);
+      if (result.removed) {
+        ++removed;
+      }
+      reboot_required = reboot_required || result.reboot_required;
+    } catch (const std::exception &failure) {
+      ++failed;
+      std::wcerr << L"remove: " << device.instance_id << L": " << failure.what() << std::endl;
     }
-    reboot_required = reboot_required || result.reboot_required;
   }
   std::wcout << L"{\"removed_root_devices\":" << removed
+             << L",\"failed_root_devices\":" << failed
              << L",\"reboot_required\":" << (reboot_required ? L"true" : L"false") << L"}" << std::endl;
+  if (failed != 0) {
+    return 1;
+  }
   return reboot_required ? k_exit_reboot_required : 0;
 }
 
