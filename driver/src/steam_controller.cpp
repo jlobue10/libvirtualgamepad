@@ -234,6 +234,36 @@ bool apply_sc26_motion(const motion_state_request &motion, sc26_state *const sta
   return true;
 }
 
+// The portable responder has its own flag values; the wire contract's must be
+// the same so the request's word can be handed over unchanged.
+static_assert(sc::attr_update_firmware_build_time == sc_attr_firmware_build_time);
+static_assert(sc::attr_update_bootloader_build_time == sc_attr_bootloader_build_time);
+static_assert(sc::attr_update_board_revision == sc_attr_board_revision);
+static_assert(sc::attr_update_capabilities == sc_attr_capabilities);
+static_assert(sc::attr_update_build_id == sc_attr_build_id);
+static_assert(sc::attr_update_serials == sc_attr_serials);
+static_assert(sizeof(sc::attribute_update::build_id) == sizeof(steam_controller_attributes_request::build_id));
+static_assert(sizeof(sc::attribute_update::unit_serial) == sizeof(steam_controller_attributes_request::unit_serial));
+static_assert(sizeof(sc::attribute_update::board_serial) == sizeof(steam_controller_attributes_request::board_serial));
+
+std::uint32_t apply_sc26_attributes(
+  const steam_controller_attributes_request &attributes,
+  sc26_state *const state) noexcept {
+  if (state == nullptr) {
+    return 0;
+  }
+  sc::attribute_update update {};
+  update.flags = attributes.flags;
+  update.firmware_build_time = attributes.firmware_build_time;
+  update.bootloader_build_time = attributes.bootloader_build_time;
+  update.board_revision = attributes.board_revision;
+  update.capabilities = attributes.capabilities;
+  std::memcpy(update.build_id, attributes.build_id, sizeof(update.build_id));
+  std::memcpy(update.unit_serial, attributes.unit_serial, sizeof(update.unit_serial));
+  std::memcpy(update.board_serial, attributes.board_serial, sizeof(update.board_serial));
+  return sc::apply_attributes(update, state->features);
+}
+
 bool apply_sc26_battery(const battery_state_request &battery, sc26_state *const state) noexcept {
   if (state == nullptr) {
     return false;

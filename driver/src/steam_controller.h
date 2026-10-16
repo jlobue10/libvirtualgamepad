@@ -78,6 +78,17 @@ void sc26_tick(sc26_state *state, std::uint64_t now_us) noexcept;
                                      std::uint64_t now_us) noexcept;
 [[nodiscard]] bool apply_sc26_battery(const battery_state_request &battery, sc26_state *state) noexcept;
 
+// The real controller's firmware attributes (ioctl_set_steam_controller_attributes)
+// replace the flagged fields of the feature state, so Steam's next
+// GET_ATTRIBUTES_VALUES / GET_DEVICE_INFO / GET_STRING_ATTRIBUTE read them.
+// sc26_usb::apply_attributes holds the rules: product id and connection
+// interval never change, a serial or build id that is not non-empty printable
+// ASCII keeps its current value. Returns the flags applied. Call under the
+// slot's state lock.
+std::uint32_t apply_sc26_attributes(
+  const steam_controller_attributes_request &attributes,
+  sc26_state *state) noexcept;
+
 // Haptic output reports 0x80..0x85 become a steam_haptic feedback event that
 // carries the report verbatim (the host renders or replays it). Returns false
 // for anything else, including the 0x86..0x89 reports of unknown purpose.

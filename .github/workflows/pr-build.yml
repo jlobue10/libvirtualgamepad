@@ -23,6 +23,8 @@ jobs:
         run: python3 driver/tests/test_sc26_keepalive.py
       - name: Test production feedback-drop counters and the controller query under ASan/UBSan
         run: python3 driver/tests/test_sc26_feedback_counters.py
+      - name: Test production Steam Controller attribute pass-through under ASan/UBSan
+        run: python3 driver/tests/test_sc26_attributes.py
       - name: Test the Vibepollo pin tool's rewrite rules
         run: python3 tools/capture/test_update_pins.py
       - name: Test the capture decoders on degenerate captures
