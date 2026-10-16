@@ -379,6 +379,140 @@ int main() {
     }
   }
 
+  // Attributes forwarded from a real controller (ioctl_set_steam_controller_attributes):
+  // the flagged fields replace the captured defaults in the 0x83 and 0xF2 replies, the
+  // product id and connection interval never change, strings are sanitised whole.
+  {
+    feature_state fs {};
+    fs.unit_serial = {"LVGSC260007"};  // the per-slot serial create_controller stamps
+    std::uint8_t cmd[64] {};
+    std::uint8_t reply[64] {};
+    const auto attributes = [&] {
+      std::memset(cmd, 0, sizeof(cmd));
+      cmd[0] = 1; cmd[1] = cmd_get_attributes_values; cmd[2] = 0;
+      return set_feature(cmd, sizeof(cmd), fs) && get_feature(reply, sizeof(reply), fs) == 64 && reply[2] == 30;
+    };
+    const auto device_info_0 = [&] {
+      std::memset(cmd, 0, sizeof(cmd));
+      cmd[0] = 1; cmd[1] = cmd_get_device_info; cmd[2] = 1; cmd[3] = 0;
+      return set_feature(cmd, sizeof(cmd), fs) && get_feature(reply, sizeof(reply), fs) == 64 && reply[2] == 41;
+    };
+    const auto serial = [&](const std::uint8_t tag) {
+      std::memset(cmd, 0, sizeof(cmd));
+      cmd[0] = 1; cmd[1] = cmd_get_string_attribute; cmd[2] = 0x15; cmd[3] = tag;
+      return set_feature(cmd, sizeof(cmd), fs) && get_feature(reply, sizeof(reply), fs) == 64 && reply[2] == 20;
+    };
+
+    check(std::strcmp(fs.build_id.data(), device_info_build_id) == 0, "a fresh unit carries the placeholder build id");
+    check(device_info_0() && std::memcmp(reply + 12, "000000000000", 12) == 0 && reply[24] == 0,
+          "device info 0 carries the placeholder build id at offset 9 of the payload");
+
+    attribute_update real {};
+    real.flags = attr_update_firmware_build_time | attr_update_bootloader_build_time | attr_update_board_revision |
+                 attr_update_capabilities | attr_update_build_id | attr_update_serials | 0x30u;  // radio/dongle bits ignored
+    real.firmware_build_time = 0x6B000001;
+    real.bootloader_build_time = 0x6A000002;
+    real.board_revision = 0x4B;
+    real.capabilities = 0x12345678;
+    std::memcpy(real.build_id, "26e1f7ef1955", 12);
+    std::memcpy(real.unit_serial, "FXA1234567890", 13);
+    std::memcpy(real.board_serial, "MXA0987654321", 13);
+    check(apply_attributes(real, fs) == (real.flags & ~0x30u), "every flagged field is applied, unknown bits are not reported");
+    check(attributes() && ule32(reply + 4) == product_id && ule32(reply + 4 + 25) == 4000,
+          "the product id stays 0x1302 and the interval 4000 us after a real controller's attributes");
+    check(ule32(reply + 4 + 5) == 0x12345678 && ule32(reply + 4 + 10) == 0x6A000002 &&
+            ule32(reply + 4 + 15) == 0x6B000001 && ule32(reply + 4 + 20) == 0x4B,
+          "0x83 answers the real controller's capabilities, bootloader and firmware build times and board revision");
+    const std::uint8_t expected_tags[] = {attr_product_id, attr_capabilities, attr_bootloader_build_time,
+                                          attr_firmware_build_time, attr_board_revision, attr_connection_interval_us};
+    bool order_ok = true;
+    for (unsigned i = 0; i < 6; ++i) order_ok = order_ok && reply[3 + i * 5] == expected_tags[i];
+    check(order_ok, "0x83 keeps the six tags in the captured order");
+    check(device_info_0() && ule32(reply + 4) == 0x6B000001 && ule32(reply + 8) == 0x4B &&
+            std::memcmp(reply + 12, "26e1f7ef1955", 12) == 0 && reply[24] == 0 &&
+            std::memcmp(reply + 28, "FXA1234567890", 13) == 0 && reply[41] == 0,
+          "device info 0 carries the real build time, board revision, build id and unit serial");
+    check(serial(string_attr_unit_serial) && std::memcmp(reply + 4, "FXA1234567890", 13) == 0 && reply[17] == 0,
+          "GET_STRING_ATTRIBUTE 1 answers the real unit serial");
+    check(serial(string_attr_board_serial) && std::memcmp(reply + 4, "MXA0987654321", 13) == 0 && reply[17] == 0,
+          "GET_STRING_ATTRIBUTE 0 answers the real board serial");
+
+    // Unflagged fields are left alone, also when the request carries values.
+    attribute_update partial {};
+    partial.flags = attr_update_firmware_build_time;
+    partial.firmware_build_time = 0x6B000003;
+    partial.board_revision = 1;
+    std::memcpy(partial.unit_serial, "FXA0000000000", 13);
+    check(apply_attributes(partial, fs) == attr_update_firmware_build_time, "a single flag applies a single field");
+    check(attributes() && ule32(reply + 4 + 15) == 0x6B000003 && ule32(reply + 4 + 20) == 0x4B,
+          "the unflagged board revision keeps its value");
+    check(serial(string_attr_unit_serial) && std::memcmp(reply + 4, "FXA1234567890", 13) == 0,
+          "an unflagged serial keeps its value");
+
+    // Serial sanitising: empty, non-printable, and unterminated strings.
+    attribute_update empty {};
+    empty.flags = attr_update_serials | attr_update_build_id;
+    check(apply_attributes(empty, fs) == 0, "empty serials and build id apply nothing");
+    check(serial(string_attr_unit_serial) && std::memcmp(reply + 4, "FXA1234567890", 13) == 0 &&
+            serial(string_attr_board_serial) && std::memcmp(reply + 4, "MXA0987654321", 13) == 0,
+          "empty serials keep the serials in place");
+    feature_state synthetic {};
+    synthetic.unit_serial = {"LVGSC260003"};
+    check(apply_attributes(empty, synthetic) == 0 && std::strcmp(synthetic.unit_serial.data(), "LVGSC260003") == 0 &&
+            std::strcmp(synthetic.board_serial.data(), "LVGSC26BOARD0") == 0 &&
+            std::strcmp(synthetic.build_id.data(), device_info_build_id) == 0,
+          "a host that read nothing leaves the synthetic per-slot serial and the placeholder build id");
+    attribute_update garbage {};
+    garbage.flags = attr_update_serials | attr_update_build_id;
+    std::memcpy(garbage.unit_serial, "FXA12\x01", 6);        // control character inside
+    std::memcpy(garbage.board_serial, "MXA\xff" "123", 7);   // high bit set
+    std::memcpy(garbage.build_id, "26e1f7ef\n955", 12);      // newline
+    check(apply_attributes(garbage, fs) == 0, "non-printable strings are refused whole");
+    check(serial(string_attr_unit_serial) && std::memcmp(reply + 4, "FXA1234567890", 13) == 0 &&
+            device_info_0() && std::memcmp(reply + 12, "26e1f7ef1955", 12) == 0,
+          "refused strings leave the previous values in place");
+    attribute_update mixed {};
+    mixed.flags = attr_update_serials;
+    std::memcpy(mixed.unit_serial, "FXA5555555555", 13);
+    check(apply_attributes(mixed, fs) == attr_update_serials && serial(string_attr_unit_serial) &&
+            std::memcmp(reply + 4, "FXA5555555555", 13) == 0 && serial(string_attr_board_serial) &&
+            std::memcmp(reply + 4, "MXA0987654321", 13) == 0,
+          "each serial stands on its own: a unit serial next to an empty board serial is applied");
+    attribute_update unterminated {};
+    unterminated.flags = attr_update_serials | attr_update_build_id;
+    std::memset(unterminated.unit_serial, 'A', 16);
+    std::memset(unterminated.board_serial, 'B', 16);
+    std::memset(unterminated.build_id, 'C', 16);
+    check(apply_attributes(unterminated, fs) == (attr_update_serials | attr_update_build_id),
+          "a 16-character string without a NUL is printable");
+    check(fs.unit_serial[15] == '\0' && fs.board_serial[15] == '\0' && fs.build_id[15] == '\0' &&
+            std::strlen(fs.unit_serial.data()) == 15 && std::strlen(fs.build_id.data()) == 15,
+          "stored strings are cut to 15 characters and terminated at [15]");
+    check(serial(string_attr_unit_serial) && std::memcmp(reply + 4, "AAAAAAAAAAAAAAA", 15) == 0 && reply[19] == 0 &&
+            reply[23] == 0,
+          "a 15-character serial fills the 20-byte frame's text and stays NUL padded");
+    check(device_info_0() && std::memcmp(reply + 12, "CCCCCCCCCCCCCCC", 15) == 0 && reply[27] == 0 &&
+            std::memcmp(reply + 28, "AAAAAAAAAAAAAAA", 15) == 0 && reply[43] == 0,
+          "device info 0 bounds the build id and serial at 15 characters");
+    {
+      const char ok[16] {"~ "};
+      const char none[16] {};
+      const char del[16] {"\x7f"};
+      const char ctl[16] {"ab\x1f"};
+      check(printable_attribute_string(ok) && !printable_attribute_string(none) &&
+              !printable_attribute_string(del) && !printable_attribute_string(ctl),
+            "printable means 0x20..0x7E only and at least one character");
+    }
+
+    // reset() returns to the defaults, so a destroyed slot never leaks the last
+    // stream's serial into the next controller.
+    fs.reset();
+    check(fs.attrs.firmware_build_time == captured_firmware_build_time &&
+            std::strcmp(fs.build_id.data(), device_info_build_id) == 0 &&
+            std::strcmp(fs.unit_serial.data(), "LVGSC260000") == 0,
+          "reset restores the captured defaults, the placeholder build id and the synthetic serial");
+  }
+
   // Replay of the commands Steam sent the author's unit on connect
   // (captures/sc26-steam-handshake.txt, transfers 0..18 and the later 0xC1/0xDC/0xE2/0xED).
   // Every one must be accepted and none may be unknown; the replies Steam read
