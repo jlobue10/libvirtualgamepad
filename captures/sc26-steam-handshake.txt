@@ -1,0 +1,272 @@
+Steam <-> Steam Controller (2026) feature-report conversation, from captures/sc26-steam-control.tsv
+190 transfers (SET = Steam writes a command, GET = the controller's reply Steam reads)
+
+  0   28.042s SET type=0x83 len= 0 payload=
+  1   28.054s GET type=0x83 len=30 payload=010213000002000000000a2ef9d26804e3854d6a094a0000000ba00f0000
+  2   28.054s SET type=0xae len=21 payload=010213000002000000000a2ef9d26804e3854d6a09 tag=0x01 text='\x02\x13'
+  3   28.066s GET type=0xae len=20 payload=0146584139393632343033373837000000000000 tag=0x01 text='FXA9962403787'
+  4   28.066s SET type=0x87 len= 3 payload=328403
+  5   28.072s SET type=0x87 len= 3 payload=090000
+  6   28.490s SET type=0xae len=21 payload=0000000000009fbeeea6fa7f0000f001bd04e70100 tag=0x00 text=''
+  7   28.501s GET type=0xae len=20 payload=004d584132473632333036354434000000000000 tag=0x00 text='MXA2G623065D4'
+  8   28.584s SET type=0x81 len= 0 payload=
+  9   28.590s SET type=0x87 len=15 payload=301800070700080700310200520300
+ 10   28.600s SET type=0x87 len=15 payload=1800002e000034ffff35ffff2e0000
+ 11   28.606s SET type=0x87 len= 6 payload=34ffff35ffff
+ 12   28.648s SET type=0xf2 len= 1 payload=00
+ 13   28.660s GET type=0xf2 len=41 payload=00e3854d6a4a0000003236653166376566313935350000000046584139393632343033373837000000
+ 14   28.660s SET type=0xf2 len= 1 payload=01
+ 15   28.672s GET type=0xf2 len=34 payload=01000000000000000000000000000000000000000000000000000000000000000000
+ 16   28.672s SET type=0xf2 len= 1 payload=02
+ 17   28.684s GET type=0xf2 len= 9 payload=023b0d010000000000
+ 18   28.684s SET type=0x87 len= 3 payload=2d6400
+ 19   30.072s SET type=0x87 len= 3 payload=328403
+ 20   30.078s SET type=0x87 len= 3 payload=2d6400
+ 21   30.086s SET type=0x83 len= 0 payload=
+ 22   30.097s GET type=0x83 len=30 payload=010213000002000000000a2ef9d26804e3854d6a094a0000000ba00f0000
+ 23   30.097s SET type=0xae len=21 payload=010213000002000000000a2ef9d26804e3854d6a09 tag=0x01 text='\x02\x13'
+ 24   30.109s GET type=0xae len=20 payload=0146584139393632343033373837000000000000 tag=0x01 text='FXA9962403787'
+ 25   30.143s SET type=0xae len=21 payload=007be70100009fbeeea6fa7f00008049244ee70100 tag=0x00 text='{�\x01'
+ 26   30.155s GET type=0xae len=20 payload=004d584132473632333036354434000000000000 tag=0x00 text='MXA2G623065D4'
+ 27   30.155s SET type=0x87 len= 3 payload=2d6400
+ 28   30.161s SET type=0xc1 len=16 payload=ffffffff030905ffffffffffffffffff
+ 29   30.167s SET type=0xdc len= 2 payload=0102
+ 30   30.187s SET type=0xe2 len= 2 payload=0120
+ 31   30.193s SET type=0x87 len= 3 payload=226400
+ 32   30.199s SET type=0x87 len= 3 payload=235000
+ 33   30.205s SET type=0x87 len= 3 payload=540000
+ 34   30.211s SET type=0x87 len= 3 payload=550000
+ 35   30.223s SET type=0xf2 len= 1 payload=00
+ 36   30.235s GET type=0xf2 len=41 payload=00e3854d6a4a0000003236653166376566313935350000000046584139393632343033373837000000
+ 37   30.235s SET type=0xf2 len= 1 payload=01
+ 38   30.247s GET type=0xf2 len=34 payload=01000000000000000000000000000000000000000000000000000000000000000000
+ 39   30.247s SET type=0xf2 len= 1 payload=02
+ 40   30.259s GET type=0xf2 len= 9 payload=026213010000000000
+ 41   30.259s SET type=0x81 len= 0 payload=
+ 42   30.265s SET type=0x87 len=15 payload=301800070700080700310200520300
+ 43   30.275s SET type=0x87 len=15 payload=1800002e000034ffff35ffff2e0000
+ 44   30.281s SET type=0x87 len= 6 payload=34ffff35ffff
+ 45   30.287s SET type=0x81 len= 0 payload=
+ 46   30.293s SET type=0x87 len=15 payload=300000070700080700310200520300
+ 47   30.303s SET type=0x87 len=15 payload=18000034ffff35ffff34ffff35ffff
+ 48   30.309s SET type=0x87 len= 6 payload=2e00002e0000
+ 49   30.315s SET type=0x81 len= 0 payload=
+ 50   30.321s SET type=0x87 len=15 payload=300000070700080700310200520300
+ 51   30.331s SET type=0x87 len=15 payload=18000034ffff35ffff34ffff35ffff
+ 52   30.337s SET type=0x87 len= 6 payload=2e00002e0000
+ 53   30.343s SET type=0x81 len= 0 payload=
+ 54   30.349s SET type=0x87 len=15 payload=300000070700080700310200520300
+ 55   30.359s SET type=0x87 len=15 payload=18000034ffff35ffff34ffff35ffff
+ 56   30.365s SET type=0x87 len= 6 payload=2e00002e0000
+ 57   30.371s SET type=0x81 len= 0 payload=
+ 58   30.377s SET type=0x87 len=15 payload=300000070700080700310200520300
+ 59   30.387s SET type=0x87 len=15 payload=18000034ffff35ffff34ffff35ffff
+ 60   30.393s SET type=0x87 len= 6 payload=2e00002e0000
+ 61   30.399s SET type=0x81 len= 0 payload=
+ 62   30.405s SET type=0x87 len=15 payload=300000070700080700310200520300
+ 63   30.415s SET type=0x87 len=15 payload=18000034ffff35ffff34ffff35ffff
+ 64   30.421s SET type=0x87 len= 6 payload=2e00002e0000
+ 65   30.427s SET type=0x81 len= 0 payload=
+ 66   30.433s SET type=0x87 len=15 payload=300000070700080700310200520300
+ 67   30.443s SET type=0x87 len=15 payload=18000034ffff35ffff34ffff35ffff
+ 68   30.449s SET type=0x87 len= 6 payload=2e00002e0000
+ 69   30.455s SET type=0x81 len= 0 payload=
+ 70   30.461s SET type=0x87 len=15 payload=300000070700080700310200520300
+ 71   30.471s SET type=0x87 len=15 payload=18000034ffff35ffff34ffff35ffff
+ 72   30.477s SET type=0x87 len= 6 payload=2e00002e0000
+ 73   30.483s SET type=0x81 len= 0 payload=
+ 74   30.489s SET type=0x87 len=15 payload=300000070700080700310200520300
+ 75   30.499s SET type=0x87 len=15 payload=18000034ffff35ffff34ffff35ffff
+ 76   30.505s SET type=0x87 len= 6 payload=2e00002e0000
+ 77   30.511s SET type=0x81 len= 0 payload=
+ 78   30.517s SET type=0x87 len=15 payload=300000070700080700310200520300
+ 79   30.527s SET type=0x87 len=15 payload=18000034ffff35ffff34ffff35ffff
+ 80   30.533s SET type=0x87 len= 6 payload=2e00002e0000
+ 81   30.539s SET type=0x81 len= 0 payload=
+ 82   30.545s SET type=0x87 len=15 payload=300000070700080700310200520300
+ 83   30.555s SET type=0x87 len=15 payload=18000034ffff35ffff34ffff35ffff
+ 84   30.561s SET type=0x87 len= 6 payload=2e00002e0000
+ 85   30.567s SET type=0x87 len= 3 payload=2d6400
+ 86   30.575s SET type=0x87 len= 3 payload=2d6400
+ 87   30.582s SET type=0x87 len= 3 payload=2d6400
+ 88   30.589s SET type=0x81 len= 0 payload=
+ 89   30.594s SET type=0x87 len=15 payload=300000070700080700310200520300
+ 90   30.604s SET type=0x87 len=15 payload=18000034ffff35ffff34ffff35ffff
+ 91   30.616s SET type=0x87 len= 6 payload=2e00002e0000
+ 92   30.628s SET type=0x87 len= 3 payload=2d6400
+ 93   30.642s SET type=0x87 len= 3 payload=2d6400
+ 94   30.654s SET type=0x87 len= 3 payload=2d6400
+ 95   30.666s SET type=0x87 len= 3 payload=090000
+ 96   30.676s SET type=0x87 len= 3 payload=2d6400
+ 97   30.690s SET type=0x87 len= 3 payload=2d6400
+ 98   30.702s SET type=0x87 len= 3 payload=2d6400
+ 99   30.714s SET type=0x87 len= 3 payload=2d6400
+100   30.726s SET type=0x87 len= 3 payload=2d6400
+101   30.738s SET type=0x87 len= 3 payload=2d6400
+102   30.742s SET type=0xae len= 1 payload=01
+103   30.762s GET type=0xae len=20 payload=0146584139393632343033373837000000000000 tag=0x01 text='FXA9962403787'
+104   30.762s SET type=0x83 len= 0 payload=
+105   30.776s GET type=0x83 len=30 payload=010213000002000000000a2ef9d26804e3854d6a094a0000000ba00f0000
+106   32.333s SET type=0xae len= 1 payload=01
+107   32.347s GET type=0xae len=20 payload=0146584139393632343033373837000000000000 tag=0x01 text='FXA9962403787'
+108   32.347s SET type=0x83 len= 0 payload=
+109   32.361s GET type=0x83 len=30 payload=010213000002000000000a2ef9d26804e3854d6a094a0000000ba00f0000
+110   33.013s SET type=0xae len= 1 payload=01
+111   33.027s GET type=0xae len=20 payload=0146584139393632343033373837000000000000 tag=0x01 text='FXA9962403787'
+112   33.027s SET type=0x83 len= 0 payload=
+113   33.041s GET type=0x83 len=30 payload=010213000002000000000a2ef9d26804e3854d6a094a0000000ba00f0000
+114   33.467s SET type=0x87 len= 3 payload=090000
+115   35.447s SET type=0xae len= 1 payload=01
+116   35.461s GET type=0xae len=20 payload=0146584139393632343033373837000000000000 tag=0x01 text='FXA9962403787'
+117   35.461s SET type=0x83 len= 0 payload=
+118   35.475s GET type=0x83 len=30 payload=010213000002000000000a2ef9d26804e3854d6a094a0000000ba00f0000
+119   36.097s SET type=0xae len= 1 payload=01
+120   36.111s GET type=0xae len=20 payload=0146584139393632343033373837000000000000 tag=0x01 text='FXA9962403787'
+121   36.111s SET type=0x83 len= 0 payload=
+122   36.125s GET type=0x83 len=30 payload=010213000002000000000a2ef9d26804e3854d6a094a0000000ba00f0000
+123   36.467s SET type=0x87 len= 3 payload=090000
+124   39.469s SET type=0x87 len= 3 payload=090000
+125   40.909s SET type=0xed len=24 payload=757365722f776972656c6573735f7472616e73706f727400
+126   40.920s GET type=0xed len= 1 payload=00
+127   40.958s SET type=0xed len= 9 payload=6573622f626f6e6400
+128   40.969s GET type=0xed len=24 payload=97cb7bf07fe6151346584239393632343033383437000000
+129   41.007s SET type=0xed len=11 payload=6573622f626f6e645f3200
+130   41.019s GET type=0xed len= 0 payload=
+131   42.471s SET type=0x87 len= 3 payload=090000
+132   45.473s SET type=0x87 len= 3 payload=090000
+133   48.475s SET type=0x87 len= 3 payload=090000
+134   51.475s SET type=0x87 len= 3 payload=090000
+135   53.638s SET type=0x81 len= 0 payload=
+136   53.643s SET type=0x87 len=15 payload=301800070700080700310200520300
+137   53.653s SET type=0x87 len=15 payload=1800002e000034ffff35ffff2e0000
+138   53.659s SET type=0x87 len= 6 payload=34ffff35ffff
+139   53.709s SET type=0x87 len= 3 payload=2d6400
+140   54.477s SET type=0x87 len= 3 payload=090000
+141   57.479s SET type=0x87 len= 3 payload=090000
+142   60.481s SET type=0x87 len= 3 payload=090000
+143   63.483s SET type=0x87 len= 3 payload=090000
+144   66.483s SET type=0x87 len= 3 payload=090000
+145   69.484s SET type=0x87 len= 3 payload=090000
+146   72.485s SET type=0x87 len= 3 payload=090000
+147   75.487s SET type=0x87 len= 3 payload=090000
+148   78.488s SET type=0x87 len= 3 payload=090000
+149   81.489s SET type=0x87 len= 3 payload=090000
+150   84.491s SET type=0x87 len= 3 payload=090000
+151   87.493s SET type=0x87 len= 3 payload=090000
+152   90.495s SET type=0x87 len= 3 payload=090000
+153   90.882s SET type=0x81 len= 0 payload=
+154   90.887s SET type=0x87 len=15 payload=300000070700080700310200520300
+155   90.897s SET type=0x87 len=15 payload=18000034ffff35ffff2e0000340a00
+156   90.903s SET type=0x87 len= 3 payload=2e0000
+157   90.923s SET type=0x87 len= 3 payload=2d6400
+158   90.995s SET type=0x81 len= 0 payload=
+159   91.000s SET type=0x87 len=15 payload=301800070700080700310200520300
+160   91.010s SET type=0x87 len=15 payload=1800002e000034ffff35ffff2e0000
+161   91.016s SET type=0x87 len= 6 payload=34ffff35ffff
+162   91.071s SET type=0x87 len= 3 payload=2d6400
+163   92.264s SET type=0x81 len= 0 payload=
+164   92.269s SET type=0x87 len=15 payload=300000070700080700310200520300
+165   92.279s SET type=0x87 len=15 payload=18000034ffff35ffff2e0000340a00
+166   92.285s SET type=0x87 len= 3 payload=2e0000
+167   92.299s SET type=0x87 len= 3 payload=2d6400
+168   92.509s SET type=0x81 len= 0 payload=
+169   92.514s SET type=0x87 len=15 payload=301800070700080700310200520300
+170   92.524s SET type=0x87 len=15 payload=1800002e000034ffff35ffff2e0000
+171   92.530s SET type=0x87 len= 6 payload=34ffff35ffff
+172   92.544s SET type=0x87 len= 3 payload=2d6400
+173   93.497s SET type=0x87 len= 3 payload=090000
+174   96.499s SET type=0x87 len= 3 payload=090000
+175   99.501s SET type=0x87 len= 3 payload=090000
+176  102.502s SET type=0x87 len= 3 payload=090000
+177  105.503s SET type=0x87 len= 3 payload=090000
+178  108.503s SET type=0x87 len= 3 payload=090000
+179  111.505s SET type=0x87 len= 3 payload=090000
+180  114.507s SET type=0x87 len= 3 payload=090000
+181  115.865s SET type=0x81 len= 0 payload=
+182  115.871s SET type=0x87 len=15 payload=300000070700080700310200520300
+183  115.881s SET type=0x87 len=15 payload=18000034ffff35ffff34ffff35ffff
+184  115.887s SET type=0x87 len= 6 payload=2e00002e0000
+185  115.915s SET type=0x87 len= 3 payload=2d6400
+186  117.509s SET type=0x87 len= 3 payload=090000
+187  119.676s SET type=0x85 len= 0 payload=
+188  119.682s SET type=0x8e len= 0 payload=
+189  120.511s SET type=0x87 len= 3 payload=090000
+
+SET commands by type (count, distinct payloads):
+  0x81: 19 sets, 1 distinct
+  0x83: 7 sets, 1 distinct
+  0x85: 1 sets, 1 distinct
+  0x87: 116 sets, 15 distinct
+  0x8e: 1 sets, 1 distinct
+  0xae: 9 sets, 4 distinct
+  0xc1: 1 sets, 1 distinct
+  0xdc: 1 sets, 1 distinct
+  0xe2: 1 sets, 1 distinct
+  0xed: 3 sets, 3 distinct
+  0xf2: 6 sets, 3 distinct
+
+Distinct payloads of the non-0x87 commands ([type][len][payload]):
+  8100
+  8300
+  8500
+  8e00
+  ae0101
+  ae150000000000009fbeeea6fa7f0000f001bd04e70100
+  ae15007be70100009fbeeea6fa7f00008049244ee70100
+  ae15010213000002000000000a2ef9d26804e3854d6a09
+  c110ffffffff030905ffffffffffffffffff
+  dc020102
+  e2020120
+  ed096573622f626f6e6400
+  ed0b6573622f626f6e645f3200
+  ed18757365722f776972656c6573735f7472616e73706f727400
+  f20100
+  f20101
+  f20102
+
+0x87 SET_SETTINGS_VALUES triples (setting id = value) seen, with counts:
+  setting   7 = 0x0007 (7)  x19
+  setting   8 = 0x0007 (7)  x19
+  setting   9 = 0x0000 (0)  x32
+  setting  24 = 0x0000 (0)  x19
+  setting  34 = 0x0064 (100)  x1
+  setting  35 = 0x0050 (80)  x1
+  setting  45 = 0x0064 (100)  x21
+  setting  46 = 0x0000 (0)  x38
+  setting  48 = 0x0000 (0)  x14
+  setting  48 = 0x0018 (24)  x5
+  setting  49 = 0x0002 (2)  x19
+  setting  50 = 0x0384 (900)  x2
+  setting  52 = 0x000a (10)  x2
+  setting  52 = 0xffff (65535)  x36
+  setting  53 = 0xffff (65535)  x36
+  setting  82 = 0x0003 (3)  x19
+  setting  84 = 0x0000 (0)  x1
+  setting  85 = 0x0000 (0)  x1
+
+Replies:
+    28.054s type=0x83 len=30 payload=010213000002000000000a2ef9d26804e3854d6a094a0000000ba00f0000
+    28.066s type=0xae len=20 payload=0146584139393632343033373837000000000000 tag=0x01 text='FXA9962403787'
+    28.501s type=0xae len=20 payload=004d584132473632333036354434000000000000 tag=0x00 text='MXA2G623065D4'
+    28.660s type=0xf2 len=41 payload=00e3854d6a4a0000003236653166376566313935350000000046584139393632343033373837000000
+    28.672s type=0xf2 len=34 payload=01000000000000000000000000000000000000000000000000000000000000000000
+    28.684s type=0xf2 len= 9 payload=023b0d010000000000
+    30.097s type=0x83 len=30 payload=010213000002000000000a2ef9d26804e3854d6a094a0000000ba00f0000
+    30.109s type=0xae len=20 payload=0146584139393632343033373837000000000000 tag=0x01 text='FXA9962403787'
+    30.155s type=0xae len=20 payload=004d584132473632333036354434000000000000 tag=0x00 text='MXA2G623065D4'
+    30.235s type=0xf2 len=41 payload=00e3854d6a4a0000003236653166376566313935350000000046584139393632343033373837000000
+    30.247s type=0xf2 len=34 payload=01000000000000000000000000000000000000000000000000000000000000000000
+    30.259s type=0xf2 len= 9 payload=026213010000000000
+    30.762s type=0xae len=20 payload=0146584139393632343033373837000000000000 tag=0x01 text='FXA9962403787'
+    30.776s type=0x83 len=30 payload=010213000002000000000a2ef9d26804e3854d6a094a0000000ba00f0000
+    32.347s type=0xae len=20 payload=0146584139393632343033373837000000000000 tag=0x01 text='FXA9962403787'
+    32.361s type=0x83 len=30 payload=010213000002000000000a2ef9d26804e3854d6a094a0000000ba00f0000
+    33.027s type=0xae len=20 payload=0146584139393632343033373837000000000000 tag=0x01 text='FXA9962403787'
+    33.041s type=0x83 len=30 payload=010213000002000000000a2ef9d26804e3854d6a094a0000000ba00f0000
+    35.461s type=0xae len=20 payload=0146584139393632343033373837000000000000 tag=0x01 text='FXA9962403787'
+    35.475s type=0x83 len=30 payload=010213000002000000000a2ef9d26804e3854d6a094a0000000ba00f0000
+    36.111s type=0xae len=20 payload=0146584139393632343033373837000000000000 tag=0x01 text='FXA9962403787'
+    36.125s type=0x83 len=30 payload=010213000002000000000a2ef9d26804e3854d6a094a0000000ba00f0000
+    40.920s type=0xed len= 1 payload=00
+    40.969s type=0xed len=24 payload=97cb7bf07fe6151346584239393632343033383437000000
+    41.019s type=0xed len= 0 payload=

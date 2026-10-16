@@ -1,0 +1,41 @@
+running the probe
+  driver profile mask 0x17c, max controllers 16
+  PASS: driver advertises profile::steam_controller (mask bit 0x100)
+  PASS: create Steam Controller slot 7
+  new HID collections for VID 28DE PID 1302: 3
+    usage 0001/0002 version 0307 input=6 output=0 feature=0  \\?\hid#vid_28de&pid_1302&col01#2&3812f5c0&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}
+    usage 0001/0006 version 0307 input=9 output=0 feature=0  \\?\hid#vid_28de&pid_1302&col02#2&3812f5c0&0&0001#{4d1e55b2-f16f-11cf-88cb-001111000030}\kbd
+    usage ff00/0001 version 0307 input=54 output=64 feature=64  \\?\hid#vid_28de&pid_1302&col03#2&3812f5c0&0&0002#{4d1e55b2-f16f-11cf-88cb-001111000030}
+  PASS: lizard-mode mouse collection enumerates (Generic Desktop / Mouse)
+  PASS: lizard-mode keyboard collection enumerates (Generic Desktop / Keyboard)
+  PASS: vendor collection FF00/0001 enumerates (what Steam opens)
+  PASS: VID 28DE PID 1302
+  PASS: bcdDevice 0x0307
+  PASS: vendor collection input report length 54 (largest input: 0x42)
+  PASS: vendor collection output report length 64 (0x87..0x89)
+  PASS: vendor collection feature report length 64
+  PASS: vendor collection opens read/write like HIDAPI does
+  HID serial string: 1.0
+  PASS: SetFeature GET_ATTRIBUTES_VALUES
+  PASS: GetFeature reads the reply
+  PASS: attributes reply: type 0x83, 30 bytes
+    attributes: 1=0x00001302 2=0x00000000 10=0x68d2f92e 4=0x6a4d85e3 9=0x0000004a 11=0x00000fa0
+  PASS: first attribute is product id 0x1302
+  PASS: firmware build time is the captured unit's
+  PASS: GET_STRING_ATTRIBUTE unit serial
+  PASS: serial reply: 20 bytes, tag 1
+    unit serial: LVGSC260007
+  PASS: GET_DEVICE_INFO 0 answers 41 bytes
+  PASS: SET_SETTINGS_VALUES accepted
+  PASS: submit A + Steam + full left trigger
+  PASS: state report 0x42 (54 bytes) carries A, Steam, trigger click, stick, trigger
+    last report: id 0x42 54 bytes, seq 0, buttons 0x08010001
+  PASS: output report 0x81 (pulse) accepted
+    feedback: generic_rumble low=65535 high=0
+  PASS: pulse became a generic_rumble feedback event (left = full)
+  PASS: output report 0x82 (haptic command) accepted
+  PASS: submit battery 80 % charging
+  PASS: release test controller
+  PROBE PASSED
+  probe exit code 0
+done

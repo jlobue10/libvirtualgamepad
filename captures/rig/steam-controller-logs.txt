@@ -1,0 +1,53 @@
+===== controller.txt
+
+
+[2026-10-05 11:59:32] Client version: 1788652215
+[2026-10-05 11:59:32] Local Device Found
+  type: 28de 1302
+  path: \\?\HID#VID_28DE&PID_1302&Col03#2&3812f5c0&0&0002#{4d1e55b2-f16f-11cf-88cb-001111000030}
+  serial_number: 1.0 - 0
+[2026-10-05 11:59:32]   Manufacturer: Microsoft
+[2026-10-05 11:59:32]   Product:      HID VHF Driver
+[2026-10-05 11:59:32]   Release:      307
+[2026-10-05 11:59:32]   Interface:    -1
+
+[2026-10-05 11:59:32] Controller uses V1 HID protocol via USB
+[2026-10-05 11:59:32] !! Steam controller device opened for index 0.
+[2026-10-05 11:59:32] Steam Controller reserving XInput slot 0
+[2026-10-05 11:59:32] Controller Info: HWID: 74, FWTimestamp: 0x6A4D85E3
+[2026-10-05 11:59:33] Controller PollState Changed from 0 to 1
+[2026-10-05 11:59:33] Controller 0 mapping uses xinput : false
+[2026-10-05 11:59:33] Add to Config Cache Request 0 769
+[2026-10-05 11:59:33] Controller 0 mapping uses xinput : false
+[2026-10-05 11:59:33] Add to Config Cache Request 4294967295 769
+[2026-10-05 11:59:33] Controller 0 mapping uses xinput : false
+[2026-10-05 11:59:33] Add to Config Cache Request 0 769
+[2026-10-05 11:59:33] Controller 0 mapping uses xinput : false
+[2026-10-05 11:59:33] Controller 0 mapping uses xinput : false
+[2026-10-05 11:59:33] Add to Config Cache Request 0 769
+[2026-10-05 11:59:33] Controller 0 mapping uses xinput : false
+[2026-10-05 11:59:33] Controller 0 mapping uses xinput : false
+[2026-10-05 11:59:33] Queueing activation for controller: 0 app: 769
+[2026-10-05 11:59:33] HID: Add to Config Cache - modify disconnected mapping in-place 4294967295 769
+[2026-10-05 11:59:33] HID: Add to Config Cache - full cache hit 0 769
+[2026-10-05 11:59:33] HID: Add to Config Cache - full cache hit 0 769
+[2026-10-05 11:59:33] Controller PollState Changed from 1 to 2
+[2026-10-05 11:59:33] BYieldingQueryAccountsRegisteredToController
+[2026-10-05 11:59:33] WIRELESS SYSTEM DEBUG: CURRENT FW TS: 6A4D85E3, HWID: 4A, SHA: 000000000000, SERIAL: LVGSC260007
+[2026-10-05 11:59:33] WIRELESS SYSTEM DEBUG: UPTIME(ms) 65536, DISCONNECT TYPE: 0
+===== controller_ui.txt
+
+
+[2026-10-05 11:59:32] Client version: 1788652215
+[2026-10-05 11:59:32] Controller 0 connected, configuring it now...
+[2026-10-05 11:59:33] !! Controller 0 attributes:
+  Type: 10
+  ProductID: 4866
+  Serial: Awaiting_Logon
+  Capabilities: 00000000416dbfff
+  Firmware Version: 1783465443
+[2026-10-05 11:59:33] Warming Config Cache 769
+[2026-10-05 11:59:33] Loaded Config for Local Selection Path for App ID 769, Controller 0: controller_base/basicui_neptune.vdf
+[2026-10-05 11:59:33] Loaded Config for Local Selection Path for App ID 769, Controller 4294967295: controller_base/basicui_neptune.vdf
+[2026-10-05 11:59:33] Loaded Config for Last Resort Path for App ID 769, Controller 0: C:\Program Files (x86)\Steam/controller_base/basicui_neptune.vdf
+[2026-10-05 11:59:33] Loaded Config for Last Resort Path for App ID 769, Controller 0: C:\Program Files (x86)\Steam/controller_base/basicui_neptune.vdf
