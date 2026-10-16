@@ -6,7 +6,20 @@ target_compile_features(test_ds4_usb PRIVATE cxx_std_20)
 target_include_directories(test_ds4_usb PRIVATE ../../include)
 add_test(NAME ds4_usb_contract COMMAND test_ds4_usb)
 
+# Compile the firmware initializer from the shipping kernel source into the
+# portable contract test, so either transport drifting independently fails.
+set(_ds5_gadget_source "${CMAKE_CURRENT_LIST_DIR}/../../linux/vibeshine-ds5/vibeshine_ds5_gadget.c")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_ds5_gadget_source}")
+file(READ "${_ds5_gadget_source}" _ds5_gadget_text)
+string(REGEX MATCH "static const u8 ds5_firmware\\[\\] = \\{[^}]*\\};" _ds5_gadget_firmware "${_ds5_gadget_text}")
+if(NOT _ds5_gadget_firmware)
+    message(FATAL_ERROR "The Linux DualSense firmware initializer is missing")
+endif()
+string(REPLACE "static const u8" "inline constexpr std::uint8_t" _ds5_gadget_firmware "${_ds5_gadget_firmware}")
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/ds5_gadget_firmware.h"
+    "#pragma once\n#include <cstdint>\nnamespace kernel_fixture {\n${_ds5_gadget_firmware}\n}\n")
 add_executable(test_ds5_usb test_ds5_usb.cpp)
+target_include_directories(test_ds5_usb PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 target_compile_features(test_ds5_usb PRIVATE cxx_std_20)
 target_include_directories(test_ds5_usb PRIVATE ../../include)
 add_test(NAME ds5_usb_contract COMMAND test_ds5_usb)

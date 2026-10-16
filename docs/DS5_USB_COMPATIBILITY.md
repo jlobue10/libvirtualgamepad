@@ -38,6 +38,31 @@ not require a fabricated response to that factory operation. Pairing report 0x09
 includes the hardware `08 25 00` bytes after the client MAC; libScePad reads
 those as part of `ReportFeatureInMacAll`.
 
+## Steam firmware notice
+
+Steam has a separate update check from the native libScePad gate above. SDL
+reads the LE16 UpdateVersion at report 0x20 offsets 44-45. In the Windows Steam
+build with manifest version 1791918634, SteamUI.dll SHA-256
+`1b9457943205dc3af0bd53463ba331cbd2a381388699705c02271aac7a2b1252`,
+the decision at RVA `006BCBF0` uses PlayStation Accessories app 2053530's
+`extended.version`, with fallback `0x0630` for the normal DualSense. A nonzero
+version below that threshold schedules the notice when the other gates allow
+it. This is independent of the printable date and offset-28 FirmwareVersion.
+
+The virtual controller therefore advertises UpdateVersion `0x0630`, also the
+2026-10-16 official Sony target 0004/000B version. This describes the reviewed
+compatibility revision; it does not make this virtual device a flashable Sony
+controller. Build date, HardwareInfo and FirmwareVersion remain unchanged.
+A future remotely supplied Steam threshold can require a new compatibility
+review. The portable test checks the actual feature reply and matches the
+kernel gadget's full firmware report against the VHF/USB-IP report.
+
+References: [SDL PS5 report parser](https://github.com/libsdl-org/SDL/blob/main/src/joystick/hidapi/SDL_hidapi_ps5.c),
+[Sony updater metadata](https://fwupdater.dl.playstation.net/fwupdater/info.json).
+The offline native decision probe verified the current `0x0390` rejection,
+`0x062f` rejection and `0x0630` boundary acceptance; live Windows Steam UI
+validation remains separate.
+
 The calibration report is 41 bytes with zero biases and interleaved gyro endpoints.
 Gyro speed calibration is +/-512 degrees/s for +/-8192 counts, matching the
 encoder's 16 counts per degree/s. The previous +/-8192 degrees/s magnitudes made
