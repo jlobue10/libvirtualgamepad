@@ -3,6 +3,8 @@
 
 #include "dualsense.h"
 
+#include <algorithm>
+#include <cstdint>
 #include <cstring>
 
 #include "dualshock4.h"  // Shared motion scaling and the feedback encoder.
@@ -103,7 +105,8 @@ const std::uint8_t *ds5_descriptor(std::size_t *const size) noexcept {
 
 ds5_input_report encode_ds5_input(
   const input_state_request &input,
-  ds5_state *const state) noexcept {
+  ds5_state *const state,
+  const std::uint64_t now_us) noexcept {
   ds5_input_report report {};
   report.report_id = k_ds5_input_report_id;
 
@@ -172,9 +175,14 @@ ds5_input_report encode_ds5_input(
     state->sequence = static_cast<std::uint8_t>(state->sequence + 1);
     report.sequence = state->sequence;
 
-    // The console's sensor clock runs at roughly 3 microsecond ticks; a
-    // consumer only needs it to advance monotonically between samples.
-    state->sensor_timestamp += 1333;
+    // The sensor clock runs at 0.33 us ticks and hosts integrate the gyro with
+    // its delta; reports are event driven here, so derive it from the driver
+    // clock when the caller has one (a fixed step per report warped the delta).
+    if (now_us != 0) {
+      state->sensor_timestamp = static_cast<std::uint32_t>(now_us * 3);
+    } else {
+      state->sensor_timestamp += 1333;
+    }
     report.sensor_timestamp = state->sensor_timestamp;
 
     for (int axis = 0; axis < 3; ++axis) {
@@ -269,8 +277,10 @@ bool apply_ds5_motion(const motion_state_request &motion, ds5_state *const state
 
   switch (static_cast<motion_kind>(motion.motion_type)) {
     case motion_kind::accelerometer: {
-      const auto convert = [](const std::int32_t milli) {
-        return clamp_i16((milli * k_ds4_accel_counts_per_g) / k_milli_g);
+      // 64-bit product: INT32-range input from a rogue client must saturate, not wrap.
+      const auto convert = [](const std::int64_t milli) {
+        return clamp_i16(static_cast<std::int32_t>(
+          std::clamp<std::int64_t>((milli * k_ds4_accel_counts_per_g) / k_milli_g, INT32_MIN, INT32_MAX)));
       };
       state->accel[0] = convert(motion.x_milli);
       state->accel[1] = convert(motion.y_milli);
@@ -278,8 +288,9 @@ bool apply_ds5_motion(const motion_state_request &motion, ds5_state *const state
       return true;
     }
     case motion_kind::gyroscope: {
-      const auto convert = [](const std::int32_t milli) {
-        return clamp_i16((milli * k_ds4_gyro_counts_per_dps) / 1000);
+      const auto convert = [](const std::int64_t milli) {
+        return clamp_i16(static_cast<std::int32_t>(
+          std::clamp<std::int64_t>((milli * k_ds4_gyro_counts_per_dps) / 1000, INT32_MIN, INT32_MAX)));
       };
       state->gyro[0] = convert(motion.x_milli);
       state->gyro[1] = convert(motion.y_milli);
@@ -303,9 +314,10 @@ bool apply_ds5_battery(const battery_state_request &battery, ds5_state *const st
   state->battery_full = reported == lvg::battery_state::full;
 
   if (battery.percent <= 100) {
-    // The DualSense reports battery in 0..10 steps.
-    state->battery_level =
-      static_cast<std::uint8_t>((static_cast<std::uint32_t>(battery.percent) * 10u + 50u) / 100u);
+    // The DualSense reports battery in 0..10 steps with floor semantics, like the
+    // DualShock 4: hosts decode the nibble as n*10+5 %, so rounding to nearest
+    // showed a 15 % battery as 25 %. 10 is reserved for a full pack.
+    state->battery_level = static_cast<std::uint8_t>(battery.percent >= 100 ? 10u : battery.percent / 10u);
   }
   return true;
 }

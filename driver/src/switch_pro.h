@@ -47,6 +47,26 @@ inline constexpr std::uint16_t k_switch_stick_max = 4095;
 // Rumble amplitude indices saturate around 0x64 in the console's encoding.
 inline constexpr std::uint8_t k_switch_amplitude_max = 0x64;
 
+// SDL and Steam encode a 0..65535 amplitude by picking the first row of a
+// 101-entry table whose threshold is >= the request; the row number is the
+// index carried in the report. The table is far from linear below row ~60
+// (row 68 = 32861 = 50 %), so decoding the index linearly reported a 50 %
+// request as 68 %. These are SDL's thresholds (SDL_hidapi_switch.c,
+// EncodeRumbleHighAmplitude / EncodeRumbleLowAmplitude share the column).
+inline constexpr std::uint16_t k_switch_amplitude_by_index[k_switch_amplitude_max + 1] = {
+  0, 514, 775, 921, 1096, 1303, 1550, 1843, 2192, 2606,
+  3100, 3686, 4383, 5213, 6199, 7372, 7698, 8039, 8395, 8767,
+  9155, 9560, 9984, 10426, 10887, 11369, 11873, 12398, 12947, 13520,
+  14119, 14744, 15067, 15397, 15734, 16079, 16431, 16790, 17158, 17534,
+  17918, 18310, 18711, 19121, 19540, 19967, 20405, 20851, 21308, 21775,
+  22251, 22739, 23236, 23745, 24265, 24797, 25340, 25894, 26462, 27041,
+  27633, 28238, 28856, 29488, 30134, 30794, 31468, 32157, 32861, 33581,
+  34316, 35068, 35836, 36620, 37422, 38242, 39079, 39935, 40809, 41703,
+  42616, 43549, 44503, 45477, 46473, 47491, 48531, 49593, 50679, 51789,
+  52923, 54082, 55266, 56476, 57713, 58977, 60268, 61588, 62936, 64315,
+  65535
+};
+
 // USB handshake subtypes.
 inline constexpr std::uint8_t k_switch_usb_request_status = 0x01;
 inline constexpr std::uint8_t k_switch_usb_handshake = 0x02;
@@ -139,12 +159,21 @@ struct switch_usb_reply {
 
 static_assert(sizeof(switch_input_report) == 64);
 static_assert(sizeof(switch_subcommand_reply) == 64);
+// Offsets as hid-nintendo reads the 0x30 report and the 0x21 subcommand reply.
+static_assert(offsetof(switch_input_report, buttons_right) == 3);
+static_assert(offsetof(switch_input_report, left_stick) == 6);
+static_assert(offsetof(switch_input_report, right_stick) == 9);
+static_assert(offsetof(switch_input_report, imu) == 13);
+static_assert(offsetof(switch_subcommand_reply, ack) == 13);
+static_assert(offsetof(switch_subcommand_reply, subcommand) == 14);
+static_assert(offsetof(switch_subcommand_reply, data) == 15);
 static_assert(sizeof(switch_usb_reply) == 64);
 
 struct switch_state {
   std::uint8_t timer;
   std::uint8_t battery_level;   // 0..8, even values, high nibble of the status byte.
   bool cable_connected;
+  bool charging;                // bit 4 of the status byte
   std::int16_t gyro[3];
   std::int16_t accel[3];
   std::uint8_t player_lights;

@@ -3,6 +3,8 @@
 
 #include "dualshock4.h"
 
+#include <algorithm>
+#include <cstdint>
 #include <cstring>
 
 namespace lvg::driver {
@@ -106,7 +108,8 @@ const std::uint8_t *ds4_descriptor(std::size_t *const size) noexcept {
 
 ds4_input_report encode_ds4_input(
   const input_state_request &input,
-  ds4_state *const state) noexcept {
+  ds4_state *const state,
+  const std::uint64_t now_us) noexcept {
   ds4_input_report report {};
   report.report_id = k_ds4_input_report_id;
 
@@ -175,9 +178,14 @@ ds4_input_report encode_ds4_input(
   report.right_trigger = input.right_trigger;
 
   if (state != nullptr) {
-    // Real hardware advances this every report; consumers use it to order
-    // motion samples and to detect a stalled device.
-    state->timestamp = static_cast<std::uint16_t>(state->timestamp + 188);
+    // Real hardware stamps every report with its sensor clock (5.33 us units);
+    // hosts integrate the gyro with the delta between reports. Reports here are
+    // event driven (input, motion and touch each produce one), so a fixed step
+    // per report warped that delta: use the driver clock when the caller has
+    // one, the old fixed step only without (unit tests).
+    state->timestamp = now_us != 0
+      ? static_cast<std::uint16_t>((now_us * 3) / 16)
+      : static_cast<std::uint16_t>(state->timestamp + 188);
     report.timestamp = state->timestamp;
 
     report.gyro_x = state->gyro[0];
@@ -290,8 +298,10 @@ bool apply_ds4_motion(const motion_state_request &motion, ds4_state *const state
   switch (static_cast<motion_kind>(motion.motion_type)) {
     case motion_kind::accelerometer: {
       // Milli-metres per second squared into counts, via gravity.
-      const auto convert = [](const std::int32_t milli) {
-        return clamp_i16((milli * k_ds4_accel_counts_per_g) / k_milli_g);
+      // 64-bit product: INT32-range input from a rogue client must saturate, not wrap.
+      const auto convert = [](const std::int64_t milli) {
+        return clamp_i16(static_cast<std::int32_t>(
+          std::clamp<std::int64_t>((milli * k_ds4_accel_counts_per_g) / k_milli_g, INT32_MIN, INT32_MAX)));
       };
       state->accel[0] = convert(motion.x_milli);
       state->accel[1] = convert(motion.y_milli);
@@ -300,8 +310,9 @@ bool apply_ds4_motion(const motion_state_request &motion, ds4_state *const state
     }
     case motion_kind::gyroscope: {
       // Milli-degrees per second into counts.
-      const auto convert = [](const std::int32_t milli) {
-        return clamp_i16((milli * k_ds4_gyro_counts_per_dps) / 1000);
+      const auto convert = [](const std::int64_t milli) {
+        return clamp_i16(static_cast<std::int32_t>(
+          std::clamp<std::int64_t>((milli * k_ds4_gyro_counts_per_dps) / 1000, INT32_MIN, INT32_MAX)));
       };
       state->gyro[0] = convert(motion.x_milli);
       state->gyro[1] = convert(motion.y_milli);
@@ -325,10 +336,11 @@ bool apply_ds4_battery(const battery_state_request &battery, ds4_state *const st
   state->battery_full = reported == lvg::battery_state::full;
 
   if (battery.percent <= 100) {
-    // The DS4 reports 0..10 on battery and 0..11 on cable power.
-    const std::uint32_t scale = state->cable_connected ? 11u : 10u;
-    state->battery_level =
-      static_cast<std::uint8_t>((static_cast<std::uint32_t>(battery.percent) * scale + 50u) / 100u);
+    // The level nibble is tens of percent with floor semantics ("0 = 0-9%") on
+    // battery and on cable alike; hosts read n*10+5 % while charging and treat 10
+    // as 100 %. 11 means "charge complete" and is produced by the battery_full
+    // branch of the encoder (status 0x1B), never by a percentage.
+    state->battery_level = static_cast<std::uint8_t>(battery.percent >= 100 ? 10u : battery.percent / 10u);
   }
   return true;
 }

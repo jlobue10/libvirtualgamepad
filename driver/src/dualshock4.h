@@ -107,6 +107,15 @@ struct ds4_output_report {
 static_assert(sizeof(ds4_touch_point) == 4);
 static_assert(sizeof(ds4_touch_packet) == 9);
 static_assert(sizeof(ds4_input_report) == 64);
+// Input offsets as hid-playstation's dualshock4_input_report_common reads them.
+static_assert(offsetof(ds4_input_report, buttons0) == 5);
+static_assert(offsetof(ds4_input_report, left_trigger) == 8);
+static_assert(offsetof(ds4_input_report, timestamp) == 10);
+static_assert(offsetof(ds4_input_report, gyro_x) == 13);
+static_assert(offsetof(ds4_input_report, accel_x) == 19);
+static_assert(offsetof(ds4_input_report, battery_status) == 30);
+static_assert(offsetof(ds4_input_report, touch_packet_count) == 33);
+static_assert(offsetof(ds4_input_report, touch) == 34);
 static_assert(sizeof(ds4_output_report) == 32);
 
 // As with the DualSense, these are the controller's byte offsets, not ours.
@@ -146,9 +155,12 @@ struct ds4_state {
 
 [[nodiscard]] const std::uint8_t *ds4_descriptor(std::size_t *size) noexcept;
 
+// now_us: the driver clock the report's sensor timestamp derives from
+// (5.33 us units); 0 keeps a fixed step per report.
 [[nodiscard]] ds4_input_report encode_ds4_input(
   const input_state_request &input,
-  ds4_state *state) noexcept;
+  ds4_state *state,
+  std::uint64_t now_us = 0) noexcept;
 
 // Folds a touch, motion, or battery event into the accumulated state. Returns
 // false when the event cannot be represented by this profile.

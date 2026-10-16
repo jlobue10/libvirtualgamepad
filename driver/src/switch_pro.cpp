@@ -4,10 +4,20 @@
 #include "switch_pro.h"
 #include "report_pump.h"
 
+#include <algorithm>
+#include <cstdint>
 #include <cstring>
 
 namespace lvg::driver {
 namespace {
+
+// The factory motion calibration this driver serves at SPI 0x6020 (zero
+// offsets, nominal sensitivity). Hosts decode the IMU with it: SDL and
+// hid-nintendo use 936 / (gyro_sensitivity - offset) deg/s per count and
+// 4 / (accel_sensitivity - offset) g per count, so the conversions below must
+// use the same numbers or the host reads a different rate than the client sent.
+constexpr std::int64_t k_switch_accel_sensitivity = 16384;  // 4096 counts/g
+constexpr std::int64_t k_switch_gyro_sensitivity = 13371;   // 936/13371 deg/s per count, ~14.28 counts per deg/s
 
 // The Pro Controller's USB report descriptor: a vendor collection carrying the
 // console's own protocol. Everything interesting is vendor-defined, because the
@@ -124,8 +134,8 @@ std::size_t read_spi(const std::uint32_t address, const std::uint8_t length, std
         return length;
       }
       std::memset(out, 0, length);
-      const std::uint16_t accel_scale = 16384;
-      const std::uint16_t gyro_scale = 13371;
+      const auto accel_scale = static_cast<std::uint16_t>(k_switch_accel_sensitivity);
+      const auto gyro_scale = static_cast<std::uint16_t>(k_switch_gyro_sensitivity);
       for (int axis = 0; axis < 3; ++axis) {
         out[6 + axis * 2] = static_cast<std::uint8_t>(accel_scale & 0xFFu);
         out[7 + axis * 2] = static_cast<std::uint8_t>(accel_scale >> 8);
@@ -157,6 +167,7 @@ void switch_state::reset() noexcept {
   timer = 0;
   battery_level = 8;  // Full; the console reports this in even steps 0..8.
   cable_connected = true;
+  charging = false;
   for (int axis = 0; axis < 3; ++axis) {
     gyro[axis] = 0;
     accel[axis] = 0;
@@ -186,8 +197,10 @@ switch_input_report encode_switch_input(
     report.timer = state->timer;
     // High nibble battery, low nibble connection: 0 means a wired Pro
     // Controller rather than a Joy-Con on a rail.
+    // Bit 4 of the status byte is "charging"; the console shows it next to the level.
     report.connection_battery =
-      static_cast<std::uint8_t>((state->battery_level & 0x0Eu) << 4 | (state->cable_connected ? 0x01u : 0x00u));
+      static_cast<std::uint8_t>((state->battery_level & 0x0Eu) << 4 | (state->charging ? 0x10u : 0x00u) |
+                                (state->cable_connected ? 0x01u : 0x00u));
     report.vibrator_report = 0x0C;
   } else {
     report.connection_battery = 0x81;
@@ -290,22 +303,35 @@ bool apply_switch_motion(const motion_state_request &motion, switch_state *const
   switch (static_cast<motion_kind>(motion.motion_type)) {
     case motion_kind::accelerometer: {
       // The console's accelerometer reads 4096 counts per gravity.
-      const auto convert = [](const std::int32_t milli) {
-        return clamp_i16((milli * 4096) / 9807);
+      // 64-bit product: INT32-range input from a rogue client must saturate, not wrap.
+      const auto convert = [](const std::int64_t milli) {
+        return clamp_i16(static_cast<std::int32_t>(
+          std::clamp<std::int64_t>((milli * 4096) / 9807, INT32_MIN, INT32_MAX)));
       };
-      state->accel[0] = convert(motion.x_milli);
-      state->accel[1] = convert(motion.y_milli);
-      state->accel[2] = convert(motion.z_milli);
+      // The protocol carries SDL's PlayStation-style frame. SDL's Switch driver
+      // (SDL_hidapi_switch.c, SendSensorUpdate) shuffles the device axes into
+      // that frame as a proper rotation: host x = -device Y, host y = device Z,
+      // host z = -device X. The device report holds the inverse: device X = -z,
+      // device Y = -x, device Z = y. (An identity copy showed a resting
+      // controller rolled 90 degrees; a +z device X mirrored roll and the z
+      // gravity component.)
+      state->accel[0] = convert(-static_cast<std::int64_t>(motion.z_milli));
+      state->accel[1] = convert(-static_cast<std::int64_t>(motion.x_milli));
+      state->accel[2] = convert(motion.y_milli);
       return true;
     }
     case motion_kind::gyroscope: {
-      // And roughly 79 counts per degree per second.
-      const auto convert = [](const std::int32_t milli) {
-        return clamp_i16((milli * 79) / 1000);
+      // Counts per degree per second as the served calibration implies:
+      // sensitivity / 936 (about 14.28). The previous 79 made every host read
+      // the gyro about 5.5x too fast.
+      const auto convert = [](const std::int64_t milli) {
+        return clamp_i16(static_cast<std::int32_t>(
+          std::clamp<std::int64_t>((milli * k_switch_gyro_sensitivity) / (936 * 1000), INT32_MIN, INT32_MAX)));
       };
-      state->gyro[0] = convert(motion.x_milli);
-      state->gyro[1] = convert(motion.y_milli);
-      state->gyro[2] = convert(motion.z_milli);
+      // Same axis shuffle as the accelerometer (see above).
+      state->gyro[0] = convert(-static_cast<std::int64_t>(motion.z_milli));
+      state->gyro[1] = convert(-static_cast<std::int64_t>(motion.x_milli));
+      state->gyro[2] = convert(motion.y_milli);
       return true;
     }
     default:
@@ -322,14 +348,16 @@ bool apply_switch_battery(const battery_state_request &battery, switch_state *co
   state->cable_connected =
     reported == lvg::battery_state::charging || reported == lvg::battery_state::full ||
     reported == lvg::battery_state::not_charging;
+  state->charging = reported == lvg::battery_state::charging;
 
   if (battery.percent <= 100) {
-    // Reported in even steps from 0 (empty) to 8 (full).
-    const std::uint32_t level = (static_cast<std::uint32_t>(battery.percent) * 8u + 50u) / 100u;
-    state->battery_level = static_cast<std::uint8_t>((level > 8u ? 8u : level) & 0x0Eu);
-    if (battery.percent >= 88) {
-      state->battery_level = 8;
-    }
+    // Reported in even steps: 0 empty, 2 critical, 4 low, 6 medium, 8 full.
+    // Quartiles of the percentage, so a battery with any charge left never
+    // reads as empty (rounding to the nearest level and then masking the low
+    // bit floored 1..18 % to 0).
+    state->battery_level = battery.percent == 0
+      ? 0u
+      : static_cast<std::uint8_t>(2u * ((static_cast<std::uint32_t>(battery.percent) + 24u) / 25u));
   }
   return true;
 }
@@ -500,27 +528,36 @@ bool decode_switch_rumble(
     return false;
   }
 
-  // Four bytes per side follow the packet counter. The console encodes
-  // frequency and amplitude together; only the amplitude has meaning for a
-  // client that just wants to know how hard to vibrate.
+  // Four bytes per side follow the packet counter: a high-frequency band
+  // (bytes 0-1) and a low-frequency band (bytes 2-3), each with its own
+  // amplitude. SDL and Steam encode the same pattern on both sides, with the
+  // host's "high frequency" motor in the high band and "low frequency" in the
+  // low band; mapping left side -> low motor and right side -> high motor
+  // (hid-nintendo's Linux convention) made a Windows host receive
+  // low = high = max(low, high). Decode per band, max over sides.
   const std::uint8_t *const left = report + 2;
   const std::uint8_t *const right = report + 6;
 
-  const auto amplitude = [](const std::uint8_t *const side) -> std::uint16_t {
-    const std::uint8_t high_index = static_cast<std::uint8_t>((side[1] & 0xFE) >> 1);
-    const std::int32_t low_index =
-      ((static_cast<std::int32_t>(side[3] & 0x7F) - 0x40) * 2) + ((side[2] & 0x80) >> 7);
-    const std::int32_t index = high_index > low_index ? high_index : low_index;
+  // The index is a row of SDL/Steam's amplitude table, not a linear scale.
+  const auto scale = [](const std::int32_t index) -> std::uint16_t {
     if (index <= 0) {
       return 0;
     }
     const std::int32_t clamped = index > k_switch_amplitude_max ? k_switch_amplitude_max : index;
-    return static_cast<std::uint16_t>((clamped * 65535) / k_switch_amplitude_max);
+    return k_switch_amplitude_by_index[clamped];
+  };
+  const auto high_band = [&](const std::uint8_t *const side) -> std::uint16_t {
+    return scale(static_cast<std::uint8_t>((side[1] & 0xFE) >> 1));
+  };
+  const auto low_band = [&](const std::uint8_t *const side) -> std::uint16_t {
+    return scale(((static_cast<std::int32_t>(side[3] & 0x7F) - 0x40) * 2) + ((side[2] & 0x80) >> 7));
   };
 
+  // (windows.h's max macro reaches this translation unit in the driver build; avoid std::max.)
+  const auto louder = [](const std::uint16_t a, const std::uint16_t b) -> std::uint16_t { return a > b ? a : b; };
   *feedback = {};
-  feedback->low_frequency = amplitude(left);
-  feedback->high_frequency = amplitude(right);
+  feedback->high_frequency = louder(high_band(left), high_band(right));
+  feedback->low_frequency = louder(low_band(left), low_band(right));
   return true;
 }
 
