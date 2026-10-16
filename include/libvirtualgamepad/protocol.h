@@ -47,6 +47,10 @@ enum class profile : std::uint16_t {
   // for development, but the public driver refuses it pending an accepted
   // VID/PID allocation.
   generic_pid = 8,
+  // Valve Steam Controller (2026, wired). HID-native like the PlayStation pads:
+  // Steam opens the vendor collection itself and drives its feature-report
+  // control channel, so the identity travels with the real report contract.
+  steam_controller = 9,
 };
 
 enum button_mask : std::uint32_t {
@@ -74,6 +78,22 @@ enum button_mask : std::uint32_t {
   paddle_4 = 0x080000u,
   touchpad = 0x100000u,
   misc = 0x200000u,
+  // Moonlight extension (LI_CCAP_GRIP_SENSE): capacitive grip touch of the Steam
+  // Controller (2026), not buttons. Ignored by every other profile.
+  left_grip_touch = 0x400000u,
+  right_grip_touch = 0x800000u,
+  // Moonlight extension (LI_CCAP_STICK_TOUCH): capacitive touch of the Steam
+  // Controller (2026) sticks, held rather than pressed. Without them the driver
+  // derives stick touch from deflection. Ignored by every other profile.
+  left_stick_touch = 0x1000000u,
+  right_stick_touch = 0x2000000u,
+  left_pad_click = 0x04000000u,
+  right_pad_click = 0x08000000u,
+  left_trigger_click = 0x10000000u,
+  right_trigger_click = 0x20000000u,
+  // Host-owned metadata, not a client button. Set on each input only when the
+  // SC2026 client advertised authoritative clicks and capacitive touch states.
+  sc26_buttons_explicit = 0x40000000u,
 };
 
 enum class feedback_type : std::uint16_t {
@@ -93,6 +113,20 @@ enum class feedback_type : std::uint16_t {
   // adaptive trigger programs, player LEDs, and microphone LED. One report
   // carries all of it, so one event does too.
   playstation_output = 5,
+  // A Steam Controller (2026) haptic output report exactly as the host wrote
+  // it (steam_haptic_feedback): 0x80 rumble, 0x81 pulse, 0x82 command, 0x83
+  // LFO, 0x84 sweep or 0x85 script. Steam's UI drives the pads with 0x81 and
+  // 0x82, games with 0x80. A client with the real pads replays the report; one
+  // without renders rumble from it.
+  steam_haptic = 6,
+  // Steam's control-channel settings for a Steam Controller (2026), exactly as
+  // the host wrote them (steam_settings_feedback): SET_SETTINGS_VALUES 0x87 as
+  // (id, u16) triples, at most nine per event (a longer write becomes several
+  // events, in order), or LOAD_DEFAULT_SETTINGS 0x8E with no triples. The
+  // virtual device keeps answering GET_SETTINGS from its own table; a client
+  // with the real controller forwards the write so the firmware runs with
+  // Steam's settings (haptic gain and intensity among them), not its defaults.
+  steam_settings = 7,
 };
 
 // DualSense adaptive trigger modes, as the console's output report encodes them.
@@ -144,6 +178,49 @@ struct query_info_request {
   request_header header;
 };
 
+// Feedback the driver had to discard for one controller, so a host can tell a
+// quiet controller from one whose output is being thrown away. Each counter is
+// monotonic for the life of the slot (destroy resets it) and saturates at 255
+// on the wire; the driver keeps the full count. Steam's haptic and settings
+// rings and the input pump drop the oldest entry when the host stops polling.
+struct feedback_counters {
+  // Ordinary (non-stop) Steam haptic events evicted from the per-slot ring to
+  // admit a newer one. A stop that replaced an older equivalent stop is a
+  // coalescing, not an eviction, and is not counted.
+  std::uint8_t haptic_evicted;
+  // Settings events (one chunk of a SET_SETTINGS_VALUES write, or a
+  // LOAD_DEFAULT_SETTINGS) evicted from the settings ring.
+  std::uint8_t settings_evicted;
+  // Input transitions (button, D-pad, trigger-threshold, touch lifecycle)
+  // evicted from the report pump's 16-deep ordered ring to admit a newer
+  // transition because VHF had no read pending for too long. Asides (the
+  // 0x43 battery level, the 0x44 haptic ack) share that ring but never
+  // count: a new aside that finds the ring full is dropped instead of
+  // evicting a transition, and an aside a transition evicts is regenerated
+  // by the next stop pulse or battery tick.
+  std::uint8_t transitions_dropped;
+  // Steam Controller feature commands the driver acknowledged without
+  // understanding (sc26_usb::feature_state::unknown_commands).
+  std::uint8_t unknown_commands;
+};
+
+[[nodiscard]] constexpr std::uint8_t saturate_counter(const std::uint32_t value) noexcept {
+  return value > 0xFFu ? std::uint8_t {0xFF} : static_cast<std::uint8_t>(value);
+}
+
+// ioctl_query_info answers two request shapes without a version bump; the
+// header's size field is what tells them apart:
+//   * query_info_request (8 bytes): the device-wide answer, `counters` all
+//     zero. This is the handshake every host sends, and hosts built before
+//     the counters existed reject a response whose word 24..27 is non-zero,
+//     so the device query must keep it zero.
+//   * controller_id_request (12 bytes): the same answer with `counters`
+//     filled for that slot (STATUS_NOT_FOUND if empty, STATUS_ACCESS_DENIED
+//     if another handle owns it). A driver that predates the counters answers
+//     this shape with STATUS_INVALID_BUFFER_SIZE, which the client reports as
+//     ERROR_REVISION_MISMATCH.
+// `counters` occupies the word that was `reserved` before; the layout and
+// size are unchanged.
 struct query_info_response {
   request_header header;
   std::uint16_t minimum_protocol_version;
@@ -151,7 +228,7 @@ struct query_info_response {
   profile_mask_t available_profiles;
   std::uint32_t available_features;
   std::uint32_t maximum_controllers;
-  std::uint32_t reserved;
+  feedback_counters counters;
 };
 
 struct controller_id_request {
@@ -279,6 +356,26 @@ inline constexpr std::uint8_t ps_output_triggers_valid = 0x02;
 inline constexpr std::uint8_t ps_output_player_leds_valid = 0x04;
 inline constexpr std::uint8_t ps_output_microphone_led_valid = 0x08;
 
+// The report id first, then the payload the descriptor declares for it; at most
+// 10 bytes on the wire (sc26_usb::report_size).
+struct steam_haptic_feedback {
+  std::uint8_t length;  // bytes valid in report, id included
+  std::uint8_t reserved[3];
+  std::uint8_t report[12];
+};
+
+// A control-channel settings write as Steam sent it: command 0x87
+// (SET_SETTINGS_VALUES) with `count` (id, lo, hi) triples, or 0x8E
+// (LOAD_DEFAULT_SETTINGS) with count 0. A 64-byte report holds twenty triples;
+// the driver splits a write into events of at most k_steam_settings_triples_max.
+inline constexpr std::uint8_t k_steam_settings_triples_max = 9;
+struct steam_settings_feedback {
+  std::uint8_t command;
+  std::uint8_t count;
+  std::uint8_t reserved[3];
+  std::uint8_t triples[k_steam_settings_triples_max * 3];
+};
+
 struct raw_hid_report_feedback {
   raw_hid_operation operation;
   std::uint8_t report_id;
@@ -295,12 +392,40 @@ struct feedback_event {
   std::uint8_t payload[32];
 };
 
+// The payload each feedback type carries. A client rejects an event whose
+// payload_size disagrees, and any type it does not know (the driver only ever
+// writes whole structs, so a consumer may memcpy by type after that check).
+inline constexpr std::uint16_t k_feedback_payload_unknown = 0xFFFF;
+
+[[nodiscard]] constexpr std::uint16_t feedback_payload_size(const feedback_type type) noexcept {
+  switch (type) {
+    case feedback_type::none:
+      return 0;
+    case feedback_type::generic_rumble_rgb:
+    case feedback_type::generic_rumble:
+      return sizeof(generic_rumble_rgb_feedback);
+    case feedback_type::raw_output_report:
+      return sizeof(raw_hid_report_feedback);
+    case feedback_type::xbox_rumble:
+      return sizeof(xbox_rumble_feedback);
+    case feedback_type::playstation_output:
+      return sizeof(playstation_output_feedback);
+    case feedback_type::steam_haptic:
+      return sizeof(steam_haptic_feedback);
+    case feedback_type::steam_settings:
+      return sizeof(steam_settings_feedback);
+  }
+  return k_feedback_payload_unknown;
+}
+
 #pragma pack(pop)
 
 static_assert(sizeof(request_header) == 8);
 static_assert(sizeof(create_controller_request) == 16);
 static_assert(sizeof(query_info_request) == 8);
+static_assert(sizeof(feedback_counters) == 4);
 static_assert(sizeof(query_info_response) == 28);
+static_assert(offsetof(query_info_response, counters) == 24);
 static_assert(sizeof(controller_id_request) == 12);
 static_assert(sizeof(input_state_request) == 28);
 static_assert(sizeof(touch_state_request) == 22);
@@ -311,6 +436,9 @@ static_assert(sizeof(xbox_rumble_feedback) == 8);
 static_assert(sizeof(raw_hid_report_feedback) == 16);
 static_assert(sizeof(trigger_effect_feedback) == 11);
 static_assert(sizeof(playstation_output_feedback) == 32);
+static_assert(sizeof(steam_haptic_feedback) == 16);
+static_assert(sizeof(steam_settings_feedback) == 32);
+static_assert(sizeof(steam_settings_feedback) <= sizeof(feedback_event::payload));
 // Exactly fills the payload; anything larger needs another version bump.
 static_assert(sizeof(playstation_output_feedback) <= sizeof(feedback_event::payload));
 static_assert(sizeof(feedback_event) == 48);
