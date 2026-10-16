@@ -688,10 +688,12 @@ inline void apply_gyro_milli(state &st, const std::int32_t x, const std::int32_t
 // ---- Feature-report control channel ---------------------------------------
 
 // Values the author's unit returned to GET_ATTRIBUTES_VALUES on 2026-10-05
-// (captures/sc26-steam-handshake.txt): firmware built 2026-07-05, bootloader
-// 2025-09-23, board revision 74. Steam saw these on a unit it did not ask to
-// update. The reply carries exactly these six tags in this order; the unit sent
-// no UNIQUE_ID.
+// (captures/sc26-steam-handshake.txt): firmware built 2026-07-07 23:04 UTC,
+// bootloader 2025-09-23, board revision 74. Steam saw these on a unit it did
+// not ask to update. The reply carries exactly these six tags in this order;
+// the unit sent no UNIQUE_ID. These are defaults: a host that has read the
+// real controller's values replaces them per slot (apply_attributes), so Steam
+// offers a firmware update only when the real controller needs one.
 inline constexpr std::uint32_t captured_firmware_build_time = 0x6A4D85E3;
 inline constexpr std::uint32_t captured_bootloader_build_time = 0x68D2F92E;
 inline constexpr std::uint32_t captured_board_revision = 0x4A;
@@ -700,6 +702,11 @@ inline constexpr std::uint32_t captured_connection_interval_us = 4000;
 // 12-character build id the unit returned in GET_DEVICE_INFO 0 next to the
 // firmware build time; a hash-shaped placeholder here, not the unit's.
 inline constexpr char device_info_build_id[] = "000000000000";
+[[nodiscard]] constexpr std::array<char, 16> default_build_id() noexcept {
+  std::array<char, 16> id {};
+  for (std::size_t i = 0; i < id.size() && device_info_build_id[i] != '\0'; ++i) id[i] = device_info_build_id[i];
+  return id;
+}
 
 struct attributes {
   std::uint32_t unique_id {};  // Not reported by the firmware; kept for callers.
@@ -718,6 +725,9 @@ struct feature_state {
   // Synthetic here; never a real unit's.
   std::array<char, 16> unit_serial {"LVGSC260000"};
   std::array<char, 16> board_serial {"LVGSC26BOARD0"};
+  // The 12-character build id GET_DEVICE_INFO 0 returns; the placeholder until
+  // the host forwards the real controller's.
+  std::array<char, 16> build_id {default_build_id()};
   // The settings table is the source of truth; lizard_mode/imu_mode mirror entries 9 and
   // 48 so a GET_SETTINGS_VALUES answer and the flags never disagree (a fresh unit and a
   // LOAD_DEFAULT_SETTINGS both report lizard mode on).
@@ -738,6 +748,94 @@ struct feature_state {
   // customise the serial do so after reset().
   void reset() noexcept { *this = feature_state {}; }
 };
+
+// ---- Attributes forwarded from a real controller --------------------------
+
+// Which fields of an attribute_update carry a value read from the real
+// controller. Same values as protocol.h steam_controller_attribute_flags (the
+// driver pins that); the portable contract has its own so the responder stays
+// Windows-free.
+inline constexpr std::uint32_t attr_update_firmware_build_time = 0x01;
+inline constexpr std::uint32_t attr_update_bootloader_build_time = 0x02;
+inline constexpr std::uint32_t attr_update_board_revision = 0x04;
+inline constexpr std::uint32_t attr_update_capabilities = 0x08;
+inline constexpr std::uint32_t attr_update_build_id = 0x40;
+inline constexpr std::uint32_t attr_update_serials = 0x80;
+
+struct attribute_update {
+  std::uint32_t flags {};
+  std::uint32_t firmware_build_time {};
+  std::uint32_t bootloader_build_time {};
+  std::uint32_t board_revision {};
+  std::uint32_t capabilities {};
+  char build_id[16] {};
+  char unit_serial[16] {};
+  char board_serial[16] {};
+};
+
+// True when `text` holds at least one character before its first NUL (or the
+// end of the 16 bytes) and every character up to there is printable ASCII
+// (0x20..0x7E): what the control channel may echo to Steam as a serial or
+// build id. Anything else is refused whole; nothing is rewritten.
+[[nodiscard]] inline bool printable_attribute_string(const char (&text)[16]) noexcept {
+  std::size_t n = 0;
+  while (n < 16 && text[n] != '\0') {
+    const unsigned char c = static_cast<unsigned char>(text[n]);
+    if (c < 0x20 || c > 0x7E) return false;
+    ++n;
+  }
+  return n != 0;
+}
+
+// Copies a validated string into a reply field: at most 15 characters, NUL
+// padded, always terminated at [15] so a reader that scans finds an end.
+inline void store_attribute_string(std::array<char, 16> &out, const char (&text)[16]) noexcept {
+  out.fill('\0');
+  for (std::size_t n = 0; n < 15 && text[n] != '\0'; ++n) out[n] = text[n];
+}
+
+// Replaces the flagged fields of `fs` with the real controller's. The product
+// id (0x1302: the virtual device is wired, whatever the real one is on) and the
+// connection interval are never touched, and a serial or build id that is not
+// printable_attribute_string keeps its current value, so a host that read
+// nothing useful leaves the synthetic per-slot serial in place. Returns the
+// flags actually applied.
+inline std::uint32_t apply_attributes(const attribute_update &update, feature_state &fs) noexcept {
+  std::uint32_t applied = 0;
+  if (update.flags & attr_update_firmware_build_time) {
+    fs.attrs.firmware_build_time = update.firmware_build_time;
+    applied |= attr_update_firmware_build_time;
+  }
+  if (update.flags & attr_update_bootloader_build_time) {
+    fs.attrs.bootloader_build_time = update.bootloader_build_time;
+    applied |= attr_update_bootloader_build_time;
+  }
+  if (update.flags & attr_update_board_revision) {
+    fs.attrs.board_revision = update.board_revision;
+    applied |= attr_update_board_revision;
+  }
+  if (update.flags & attr_update_capabilities) {
+    fs.attrs.capabilities = update.capabilities;
+    applied |= attr_update_capabilities;
+  }
+  if ((update.flags & attr_update_build_id) && printable_attribute_string(update.build_id)) {
+    store_attribute_string(fs.build_id, update.build_id);
+    applied |= attr_update_build_id;
+  }
+  if (update.flags & attr_update_serials) {
+    // Each serial stands on its own: a unit serial with an empty board serial
+    // still replaces the unit serial.
+    if (printable_attribute_string(update.unit_serial)) {
+      store_attribute_string(fs.unit_serial, update.unit_serial);
+      applied |= attr_update_serials;
+    }
+    if (printable_attribute_string(update.board_serial)) {
+      store_attribute_string(fs.board_serial, update.board_serial);
+      applied |= attr_update_serials;
+    }
+  }
+  return applied;
+}
 
 inline void put_le16(std::uint8_t *p, const std::uint16_t v) noexcept {
   p[0] = static_cast<std::uint8_t>(v);
@@ -882,8 +980,8 @@ inline void put_le32(std::uint8_t *p, const std::uint32_t v) noexcept {
       if (sub == 0) {
         put_le32(out + 1, fs.attrs.firmware_build_time);
         put_le32(out + 5, fs.attrs.board_revision);
-        for (std::size_t i = 0; i < 16 && device_info_build_id[i] != '\0'; ++i) {
-          out[9 + i] = static_cast<std::uint8_t>(device_info_build_id[i]);
+        for (std::size_t i = 0; i < 16 && i < fs.build_id.size() && fs.build_id[i] != '\0'; ++i) {
+          out[9 + i] = static_cast<std::uint8_t>(fs.build_id[i]);
         }
         for (std::size_t i = 0; i < 16 && i < fs.unit_serial.size() && fs.unit_serial[i] != '\0'; ++i) {
           out[25 + i] = static_cast<std::uint8_t>(fs.unit_serial[i]);

@@ -313,6 +313,40 @@ struct battery_state_request {
   std::uint16_t reserved;
 };
 
+// Which fields of a steam_controller_attributes_request the host read from the
+// real controller. A field whose bit is clear keeps the slot's default
+// (sc26_usb.h: the captured unit's build times and board revision, the
+// placeholder build id, the synthetic per-slot serials). The bit values are
+// the client's (Moonlight LI_SCATTR_*); 0x10 and 0x20 are its radio and dongle
+// build times, which the wired reply has no tag for, so the driver ignores them.
+enum steam_controller_attribute_flags : std::uint32_t {
+  sc_attr_firmware_build_time = 0x01,
+  sc_attr_bootloader_build_time = 0x02,
+  sc_attr_board_revision = 0x04,
+  sc_attr_capabilities = 0x08,
+  sc_attr_build_id = 0x40,
+  sc_attr_serials = 0x80,
+};
+
+// The real controller's firmware attributes for a Steam Controller slot, so the
+// virtual device answers GET_ATTRIBUTES_VALUES / GET_DEVICE_INFO with them and
+// Steam judges the real firmware, not the captured constants. Strings are
+// ASCII, NUL padded; the driver keeps a string only when it is non-empty and
+// printable (0x20..0x7E) up to its first NUL, and terminates it at [15].
+// Applied in place: nothing goes on the wire until Steam asks again.
+struct steam_controller_attributes_request {
+  request_header header;
+  std::uint32_t controller_id;
+  std::uint32_t flags;  // steam_controller_attribute_flags
+  std::uint32_t firmware_build_time;
+  std::uint32_t bootloader_build_time;
+  std::uint32_t board_revision;
+  std::uint32_t capabilities;
+  char build_id[16];
+  char unit_serial[16];
+  char board_serial[16];
+};
+
 struct generic_rumble_rgb_feedback {
   std::uint16_t low_frequency;
   std::uint16_t high_frequency;
@@ -431,6 +465,8 @@ static_assert(sizeof(input_state_request) == 28);
 static_assert(sizeof(touch_state_request) == 22);
 static_assert(sizeof(motion_state_request) == 28);
 static_assert(sizeof(battery_state_request) == 16);
+static_assert(sizeof(steam_controller_attributes_request) == 80);
+static_assert(offsetof(steam_controller_attributes_request, build_id) == 32);
 static_assert(sizeof(generic_rumble_rgb_feedback) == 8);
 static_assert(sizeof(xbox_rumble_feedback) == 8);
 static_assert(sizeof(raw_hid_report_feedback) == 16);
@@ -459,6 +495,12 @@ inline constexpr DWORD ioctl_submit_motion_state =
   CTL_CODE(FILE_DEVICE_UNKNOWN, 0x806, METHOD_BUFFERED, FILE_READ_DATA | FILE_WRITE_DATA);
 inline constexpr DWORD ioctl_submit_battery_state =
   CTL_CODE(FILE_DEVICE_UNKNOWN, 0x807, METHOD_BUFFERED, FILE_READ_DATA | FILE_WRITE_DATA);
+// Additive, no protocol version bump (like the controller shape of
+// ioctl_query_info): a driver built before it fails the request with
+// STATUS_INVALID_DEVICE_REQUEST, which the client reports as
+// ERROR_REVISION_MISMATCH, and the virtual device keeps its defaults.
+inline constexpr DWORD ioctl_set_steam_controller_attributes =
+  CTL_CODE(FILE_DEVICE_UNKNOWN, 0x808, METHOD_BUFFERED, FILE_READ_DATA | FILE_WRITE_DATA);
 
 template<class request_t>
 [[nodiscard]] inline bool valid_request(const request_t *request, const std::size_t bytes) {
