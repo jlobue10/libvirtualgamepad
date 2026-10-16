@@ -39,11 +39,12 @@ The target profile set is deliberately explicit:
 | Generic HID | Protocol value reserved, but unavailable pending an accepted public VID/PID allocation. |
 | Generic HID + PID | Protocol value reserved, but unavailable pending an accepted public VID/PID allocation. Its report encoder remains for private-test research. |
 | Xbox 360 | Not reachable from VHF. A real Xbox 360 pad is an XUSB device on a USB bus, which needs a bus child that VHF cannot create. |
-| Xbox One | Reachable in principle by the same route as Xbox Series; not implemented until its report shape and feature behavior are tested. |
+| Xbox One | Implemented. Native report shape by the same route as Xbox Series. |
 | Xbox Series | Implemented. Native report shape plus the hardware ID that makes Windows attach its inbox XInput filter. |
 | DualShock 4 | Implemented. Native report shape, touchpad, motion, battery, lightbar, and the calibration/pairing/firmware features. |
 | DualSense | Implemented. As DualShock 4, plus adaptive triggers, player LEDs, and the microphone LED. |
 | Switch Pro | Implemented. Native report set plus the USB handshake, subcommand replies, and emulated calibration flash a host reads before it will use the device. |
+| Steam Controller (2026) | Implemented. Wired report set at hid-steam's offsets, the feature-report control channel Steam drives (settings, device info, keyed values, lizard mode), the 0x43 battery report, and Steam's haptic output reports forwarded to the host as `steam_haptic` events. See `docs/STEAM_CONTROLLER_PROFILE.md` and `docs/SC26_USB_COMPATIBILITY.md`. |
 
 A profile becomes available only after its descriptor, input mapping, output
 mapping, application behavior, and provenance have all been tested. The bar is
