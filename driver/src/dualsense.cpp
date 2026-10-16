@@ -237,11 +237,17 @@ bool apply_ds5_touch(const touch_state_request &touch, ds5_state *const state) n
   switch (event) {
     case touch_event::down:
       if (!state->contact_active[index]) {
-        state->contact_tracking_id[index] = state->next_tracking_id;
-        state->next_tracking_id = static_cast<std::uint8_t>((state->next_tracking_id + 1) & 0x7F);
-        if (state->next_tracking_id == 0) {
-          state->next_tracking_id = 1;
-        }
+        // The other finger can remain held while this one wraps the 7-bit
+        // counter. Never give two active contacts the same tracking identity.
+        const auto other = 1 - index;
+        do {
+          state->contact_tracking_id[index] = state->next_tracking_id;
+          state->next_tracking_id = static_cast<std::uint8_t>((state->next_tracking_id + 1) & 0x7F);
+          if (state->next_tracking_id == 0) {
+            state->next_tracking_id = 1;
+          }
+        } while (state->contact_active[other] &&
+                 state->contact_tracking_id[index] == state->contact_tracking_id[other]);
       }
       state->contact_active[index] = true;
       state->contact_x[index] = touch.x;
