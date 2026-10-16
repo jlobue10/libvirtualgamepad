@@ -24,6 +24,12 @@ target_compile_features(test_ds5_usb PRIVATE cxx_std_20)
 target_include_directories(test_ds5_usb PRIVATE ../../include)
 add_test(NAME ds5_usb_contract COMMAND test_ds5_usb)
 
+add_executable(test_playstation_touch test_playstation_touch.cpp
+    ../src/dualshock4.cpp ../src/dualsense.cpp)
+target_compile_features(test_playstation_touch PRIVATE cxx_std_20)
+target_include_directories(test_playstation_touch PRIVATE ../src ../../include)
+add_test(NAME playstation_touch_lifetime COMMAND test_playstation_touch)
+
 add_executable(test_pid_descriptor test_pid_descriptor.cpp
     ../src/pid_ff.cpp ../src/profile.cpp ../src/report_pump.cpp
     ../src/dualshock4.cpp ../src/dualsense.cpp ../src/switch_pro.cpp
