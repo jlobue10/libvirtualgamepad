@@ -12,6 +12,10 @@ namespace lvg {
 // Opens the driver's private WDF device interface, never a HID child path.
 // A connection owns the controller slots it creates. Closing it releases those
 // slots in the driver even if the caller did not explicitly destroy them.
+// Thread safety: a connection may be used from one thread at a time; calls on
+// the same connection from several threads must be serialised by the caller
+// (the driver serialises per handle, the library does not). Distinct
+// connections are independent.
 class client final {
  public:
   client() noexcept = default;
@@ -34,6 +38,33 @@ class client final {
   [[nodiscard]] std::uint32_t available_features() const noexcept;
   [[nodiscard]] std::uint32_t maximum_controllers() const noexcept;
 
+  // Error contract shared by every call below (Win32 codes):
+  //   ERROR_INVALID_HANDLE     not connected
+  //   ERROR_INVALID_PARAMETER  controller_id >= maximum_controllers(), a null
+  //                            output pointer, or a submit whose header was
+  //                            not initialised for this protocol version
+  //   ERROR_NOT_SUPPORTED      create: the requested profile is not in
+  //                            available_profiles(); submit_touch/motion/
+  //                            battery: the slot's profile has no such fold
+  //                            (Xbox profiles)
+  //   ERROR_INVALID_PARAMETER  (also) a submit the profile cannot represent:
+  //                            a touch contact index the pad does not have, a
+  //                            move/hover on a contact that is not down, an
+  //                            unknown motion kind
+  //   ERROR_REVISION_MISMATCH  the driver rejected a request we built
+  //                            (STATUS_INVALID_BUFFER_SIZE): a different
+  //                            protocol generation
+  //   ERROR_BUSY               create: the slot is occupied (by this or another
+  //                            handle, or still stopping)
+  //   ERROR_NOT_FOUND          the slot has no controller (destroy, submit,
+  //                            poll_feedback)
+  //   ERROR_ACCESS_DENIED      the slot belongs to another handle
+  //   ERROR_NOT_READY          the device is stopping or stopped
+  //   ERROR_INVALID_DATA       poll_feedback: the driver's event failed
+  //                            validation (size, protocol version, slot, an
+  //                            unknown feedback type, or a payload_size that
+  //                            is not feedback_payload_size(type))
+  //   ERROR_NO_MORE_ITEMS      poll_feedback: nothing fresh
   [[nodiscard]] DWORD create_controller(
     std::uint32_t controller_id,
     profile requested_profile) noexcept;
@@ -48,6 +79,15 @@ class client final {
   [[nodiscard]] DWORD poll_feedback(
     std::uint32_t controller_id,
     feedback_event *event) noexcept;
+
+  // What the driver has discarded for this slot since it was created (see
+  // feedback_counters): a diagnostic read, cheap enough to log on a timer.
+  // ERROR_REVISION_MISMATCH here means the driver predates the counters; the
+  // rest of the error contract above applies (ERROR_NOT_FOUND for an empty
+  // slot, ERROR_ACCESS_DENIED for another handle's).
+  [[nodiscard]] DWORD query_feedback_counters(
+    std::uint32_t controller_id,
+    feedback_counters *counters) noexcept;
 
  private:
   [[nodiscard]] DWORD query_info() noexcept;

@@ -151,8 +151,13 @@ std::uint32_t client::maximum_controllers() const noexcept {
 DWORD client::create_controller(
   const std::uint32_t controller_id,
   const profile requested_profile) noexcept {
-  if (!connected() || controller_id >= maximum_controllers() ||
-      (available_profiles() & profile_bit(requested_profile)) == 0) {
+  if (!connected()) {
+    return ERROR_INVALID_HANDLE;
+  }
+  if (controller_id >= maximum_controllers()) {
+    return ERROR_INVALID_PARAMETER;
+  }
+  if ((available_profiles() & profile_bit(requested_profile)) == 0) {
     return ERROR_NOT_SUPPORTED;
   }
   create_controller_request request {};
@@ -163,7 +168,10 @@ DWORD client::create_controller(
 }
 
 DWORD client::destroy_controller(const std::uint32_t controller_id) noexcept {
-  if (!connected() || controller_id >= maximum_controllers()) {
+  if (!connected()) {
+    return ERROR_INVALID_HANDLE;
+  }
+  if (controller_id >= maximum_controllers()) {
     return ERROR_INVALID_PARAMETER;
   }
   controller_id_request request {};
@@ -233,7 +241,9 @@ DWORD client::poll_feedback(
   }
   if (bytes != sizeof(*event) || !valid_request(event, bytes) ||
       event->controller_id != controller_id ||
-      event->payload_size > sizeof(event->payload)) {
+      event->payload_size > sizeof(event->payload) ||
+      event->payload_size != feedback_payload_size(event->type)) {
+    // An unknown type, or a payload that is not the whole struct of its type.
     return ERROR_INVALID_DATA;
   }
   return ERROR_SUCCESS;
@@ -259,10 +269,46 @@ DWORD client::query_info() noexcept {
       response.minimum_protocol_version > k_protocol_version ||
       response.maximum_protocol_version < k_protocol_version ||
       response.maximum_controllers == 0 || response.maximum_controllers > k_max_controllers ||
-      response.reserved != 0) {
+      response.counters.haptic_evicted != 0 || response.counters.settings_evicted != 0 ||
+      response.counters.transitions_dropped != 0 || response.counters.unknown_commands != 0) {
+    // The device query carries no counters: a non-zero word there is the
+    // other protocol generation, as it was before the word had a meaning.
     return ERROR_REVISION_MISMATCH;
   }
   info_ = response;
+  return ERROR_SUCCESS;
+}
+
+DWORD client::query_feedback_counters(
+  const std::uint32_t controller_id,
+  feedback_counters *const counters) noexcept {
+  if (!connected()) {
+    return ERROR_INVALID_HANDLE;
+  }
+  if (counters == nullptr || controller_id >= maximum_controllers()) {
+    return ERROR_INVALID_PARAMETER;
+  }
+
+  controller_id_request request {};
+  initialize_header(&request.header, sizeof(request));
+  request.controller_id = controller_id;
+
+  query_info_response response {};
+  DWORD bytes = 0;
+  const DWORD status = issue(
+    ioctl_query_info,
+    &request,
+    sizeof(request),
+    &response,
+    sizeof(response),
+    &bytes);
+  if (status != ERROR_SUCCESS) {
+    return status;
+  }
+  if (bytes != sizeof(response) || !valid_request(&response, bytes)) {
+    return ERROR_INVALID_DATA;
+  }
+  *counters = response.counters;
   return ERROR_SUCCESS;
 }
 
@@ -287,7 +333,12 @@ DWORD client::issue(
         output_size,
         &bytes,
         nullptr)) {
-    return GetLastError();
+    const DWORD error = GetLastError();
+    // The driver pins every request to its own protocol version and size. We
+    // built every buffer ourselves, so the only way one is "invalid" is a driver
+    // from a different protocol generation: report that rather than a buffer
+    // fault, on every IOCTL and not only the handshake.
+    return error == ERROR_INVALID_USER_BUFFER ? ERROR_REVISION_MISMATCH : error;
   }
   if (bytes_returned != nullptr) {
     *bytes_returned = bytes;
