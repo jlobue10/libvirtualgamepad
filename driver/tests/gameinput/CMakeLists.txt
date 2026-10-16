@@ -5,6 +5,7 @@ enable_testing()
 add_executable(test_profile_identity test_profile_identity.cpp
     ../../src/profile.cpp ../../src/pid_ff.cpp ../../src/report_pump.cpp
     ../../src/dualshock4.cpp ../../src/dualsense.cpp ../../src/switch_pro.cpp
+    ../../src/steam_controller.cpp
     ../../src/xbox_one.cpp ../../src/xbox_series.cpp)
 target_compile_features(test_profile_identity PRIVATE cxx_std_20)
 target_include_directories(test_profile_identity PRIVATE ../../src ../../../include)

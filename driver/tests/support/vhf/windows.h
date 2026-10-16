@@ -40,3 +40,45 @@ inline constexpr NTSTATUS STATUS_INVALID_BUFFER_SIZE = -11;
 inline constexpr NTSTATUS STATUS_INVALID_HANDLE = -12;
 inline constexpr bool NT_SUCCESS(NTSTATUS status) { return status >= 0; }
 #define RTL_NUMBER_OF(x) (sizeof(x) / sizeof((x)[0]))
+
+// User-mode timing and threading behind the Steam Controller keep-alive worker
+// (start_sc26_keepalive and friends in driver.cpp). The lifecycle fixture never
+// creates the worker's timer or stop event, so no worker runs here: handle
+// creation and the waits fail closed, while the performance counter (the report
+// clock) and SwitchToThread (the submit drain) do their real job.
+#include <chrono>
+#include <thread>
+using BOOL = int;
+using LONGLONG = std::int64_t;
+using LPVOID = void *;
+using LPCWSTR = const wchar_t *;
+using LPSECURITY_ATTRIBUTES = void *;
+using LPTHREAD_START_ROUTINE = DWORD (*)(LPVOID);
+#define WINAPI
+struct LARGE_INTEGER { LONGLONG QuadPart; };
+inline constexpr DWORD INFINITE = 0xFFFFFFFFu;
+inline constexpr DWORD WAIT_OBJECT_0 = 0;
+inline constexpr DWORD WAIT_FAILED = 0xFFFFFFFFu;
+inline constexpr DWORD TIMER_ALL_ACCESS = 0x1F0003u;
+inline constexpr int THREAD_PRIORITY_HIGHEST = 2;
+inline BOOL QueryPerformanceFrequency(LARGE_INTEGER *frequency) {
+  using period = std::chrono::steady_clock::period;
+  frequency->QuadPart = static_cast<LONGLONG>(period::den / period::num);
+  return 1;
+}
+inline BOOL QueryPerformanceCounter(LARGE_INTEGER *counter) {
+  counter->QuadPart = static_cast<LONGLONG>(std::chrono::steady_clock::now().time_since_epoch().count());
+  return 1;
+}
+inline BOOL SwitchToThread() { std::this_thread::yield(); return 1; }
+inline HANDLE CreateEventW(LPSECURITY_ATTRIBUTES, BOOL, BOOL, LPCWSTR) { return nullptr; }
+inline HANDLE CreateWaitableTimerExW(LPSECURITY_ATTRIBUTES, LPCWSTR, DWORD, DWORD) { return nullptr; }
+inline BOOL SetWaitableTimer(HANDLE, const LARGE_INTEGER *, LONG, void *, LPVOID, BOOL) { return 0; }
+inline BOOL CancelWaitableTimer(HANDLE) { return 0; }
+inline BOOL SetEvent(HANDLE) { return 0; }
+inline BOOL ResetEvent(HANDLE) { return 0; }
+inline HANDLE CreateThread(LPSECURITY_ATTRIBUTES, std::size_t, LPTHREAD_START_ROUTINE, LPVOID, DWORD, DWORD *) { return nullptr; }
+inline BOOL SetThreadPriority(HANDLE, int) { return 0; }
+inline DWORD WaitForSingleObject(HANDLE, DWORD) { return WAIT_FAILED; }
+inline DWORD WaitForMultipleObjects(DWORD, const HANDLE *, BOOL, DWORD) { return WAIT_FAILED; }
+inline BOOL CloseHandle(HANDLE) { return 1; }

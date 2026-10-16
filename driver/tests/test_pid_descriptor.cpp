@@ -15,6 +15,7 @@
 #include "dualsense.h"
 #include "dualshock4.h"
 #include "pid_ff.h"
+#include "steam_controller.h"
 #include "profile.h"
 #include "report_pump.h"
 #include "switch_pro.h"
@@ -515,6 +516,13 @@ int main() {
     state.right_y = 0;
     xbox_series_input_report report = encode_xbox_series_input(state);
     check(report.report_id == k_xbox_series_input_report_id, "xbox report id");
+    {
+      // The SC2026 click bits and the host-owned explicit bit (26..30) mean nothing here.
+      input_state_request tainted = state;
+      tainted.buttons |= 0x7C000000u;
+      const xbox_series_input_report same = encode_xbox_series_input(tainted);
+      check(std::memcmp(&same, &report, sizeof(report)) == 0, "SC2026 click/metadata bits are ignored by the Xbox Series encoder");
+    }
     check(report.left_x == 32768, "centred X maps to mid scale");
     check(report.left_y == 32767, "centred Y maps to mid scale");
     check(report.hat == 0, "a centred d-pad reports the hat null value");
@@ -663,6 +671,15 @@ int main() {
 
     ds4_input_report report = encode_ds4_input(input, &state);
     check(report.report_id == k_ds4_input_report_id, "ds4 report id");
+    {
+      // The SC2026 click bits and the host-owned explicit bit (26..30) mean nothing here.
+      input_state_request tainted = input;
+      tainted.buttons |= 0x7C000000u;
+      ds4_state clean_state = state, tainted_state = state;
+      const ds4_input_report clean = encode_ds4_input(input, &clean_state);
+      const ds4_input_report same = encode_ds4_input(tainted, &tainted_state);
+      check(std::memcmp(&same, &clean, sizeof(clean)) == 0, "SC2026 click/metadata bits are ignored by the DualShock 4 encoder");
+    }
     check(report.left_x == 128, "ds4 centred X");
     check(report.left_y == 128, "ds4 centred Y");
     check((report.buttons0 & 0x0F) == 8, "ds4 released d-pad is hat 8");
@@ -721,6 +738,15 @@ int main() {
     check(apply_ds4_touch(touch, &state), "ds4 touch down accepted");
 
     ds4_input_report report = encode_ds4_input(input, &state);
+    {
+      // Wire layout pinned at literal byte indices, independent of the struct.
+      const auto *b = reinterpret_cast<const std::uint8_t *>(&report);
+      check(b[0] == report.report_id && b[8] == report.left_trigger && b[9] == report.right_trigger,
+            "ds4 triggers sit at bytes 8 and 9");
+      check(b[33] == report.touch_packet_count && b[30] == report.battery_status, "ds4 battery byte 30, touch count byte 33");
+      check((b[34 + 1] & 0x80) == 0 && b[34] == report.touch[0].timestamp,
+            "ds4 first touch packet starts at byte 34");
+    }
     check((report.touch[0].points[0].tracking_id & 0x80) == 0, "ds4 contact reads as active");
     const std::uint16_t x = static_cast<std::uint16_t>(
       report.touch[0].points[0].coordinates[0] |
@@ -824,6 +850,15 @@ int main() {
     input.buttons = button_mask::misc;
     const ds5_input_report report = encode_ds5_input(input, &state);
     check(report.report_id == k_ds5_input_report_id, "ds5 report id");
+    {
+      // The SC2026 click bits and the host-owned explicit bit (26..30) mean nothing here.
+      input_state_request tainted = input;
+      tainted.buttons |= 0x7C000000u;
+      ds5_state clean_state = state, tainted_state = state;
+      const ds5_input_report clean = encode_ds5_input(input, &clean_state);
+      const ds5_input_report same = encode_ds5_input(tainted, &tainted_state);
+      check(std::memcmp(&same, &clean, sizeof(clean)) == 0, "SC2026 click/metadata bits are ignored by the DualSense encoder");
+    }
     check((report.buttons[2] & 0x04) != 0, "ds5 misc is the microphone mute button");
 
     input.buttons = button_mask::touchpad;
@@ -871,6 +906,30 @@ int main() {
     motion.motion_type = static_cast<std::uint8_t>(motion_kind::gyroscope);
     motion.x_milli = 1000;
     check(apply_ds5_motion(motion, &calibrated_state), "ds5 calibration accepts a one-degree/s sample");
+    {
+      // Battery level floors into tens like the DualShock 4 (hosts read n*10+5 %).
+      ds5_state bstate {};
+      battery_state_request battery {};
+      battery.header.size = sizeof(battery);
+      battery.header.version = k_protocol_version;
+      battery.flags = static_cast<std::uint8_t>(lvg::battery_state::discharging);
+      const std::uint8_t percents[] = {0, 5, 9, 10, 15, 19, 55, 99, 100};
+      const std::uint8_t levels[] = {0, 0, 0, 1, 1, 1, 5, 9, 10};
+      bool floors = true;
+      for (std::size_t i = 0; i < sizeof(percents); ++i) {
+        battery.percent = percents[i];
+        floors = floors && apply_ds5_battery(battery, &bstate) && bstate.battery_level == levels[i];
+      }
+      check(floors, "ds5 battery level floors into tens (15 % -> 1, 99 % -> 9, 100 % -> 10)");
+      check(!bstate.cable_connected && !bstate.battery_full, "ds5 discharging is neither cabled nor full");
+      battery.flags = static_cast<std::uint8_t>(lvg::battery_state::full);
+      check(apply_ds5_battery(battery, &bstate) && bstate.cable_connected && bstate.battery_full,
+            "ds5 full reports cable and full");
+      battery.percent = 101;
+      battery.flags = static_cast<std::uint8_t>(lvg::battery_state::discharging);
+      check(apply_ds5_battery(battery, &bstate) && bstate.battery_level == 10,
+            "ds5 out-of-range percent keeps the previous level");
+    }
     const auto sample = encode_ds5_input(input, &calibrated_state);
     check(fill_ds5_feature(k_ds5_feature_calibration_id, buffer, sizeof(buffer)) == 41,
           "ds5 motion calibration reply is available");
@@ -896,6 +955,265 @@ int main() {
   }
 
   {
+    // Steam Controller (2026) button bits. The start/back pair follows SDL's
+    // Triton driver (VIEW 0x40 is START, MENU 0x4000 is BACK), which is also
+    // what a client reading the real controller sends; mapping by Valve's
+    // constant names put the two buttons on each other's bit.
+    sc26_state state {};
+    state.reset();
+    {
+      // A hover never creates a pad contact (the pads are capacitive and hover
+      // is also the value of a zero-initialised request); it only moves one
+      // that is already down, as on the PlayStation pads.
+      input_state_request input {};
+      input.header.size = sizeof(input);
+      input.header.version = k_protocol_version;
+      touch_state_request touch {};
+      touch.header.size = sizeof(touch);
+      touch.header.version = k_protocol_version;
+      touch.contact_index = 0;
+      touch.event_type = static_cast<std::uint8_t>(touch_event::hover);
+      touch.x = 1000;
+      touch.y = 2000;
+      check(!apply_sc26_touch(touch, &state), "sc26 hover without a contact is refused");
+      check((encode_sc26_input(input, &state).buttons & lvg::sc26_usb::btn_left_pad_touch) == 0,
+            "sc26 hover without a contact leaves the pad untouched");
+      // A move is sent as a continuous report, which the next transition may
+      // discard: it must not be the report that creates the contact either.
+      touch.event_type = static_cast<std::uint8_t>(touch_event::move);
+      check(!apply_sc26_touch(touch, &state), "sc26 move without a contact is refused");
+      check((encode_sc26_input(input, &state).buttons & lvg::sc26_usb::btn_left_pad_touch) == 0,
+            "sc26 move without a contact leaves the pad untouched");
+      touch.event_type = static_cast<std::uint8_t>(touch_event::down);
+      check(apply_sc26_touch(touch, &state), "sc26 touch down accepted");
+      const auto down_x = encode_sc26_input(input, &state).left_pad_x;
+      touch.event_type = static_cast<std::uint8_t>(touch_event::hover);
+      touch.x = 60000;
+      check(apply_sc26_touch(touch, &state), "sc26 hover moves an active contact");
+      const auto hovered = encode_sc26_input(input, &state);
+      check((hovered.buttons & lvg::sc26_usb::btn_left_pad_touch) != 0,
+            "sc26 hover keeps the contact down");
+      check(hovered.left_pad_x != down_x && hovered.left_pad_x > 0,
+            "sc26 hover updates the contact position");
+      touch.event_type = static_cast<std::uint8_t>(touch_event::move);
+      touch.x = 30000;
+      check(apply_sc26_touch(touch, &state), "sc26 move updates an active contact");
+      const auto moved = encode_sc26_input(input, &state);
+      check((moved.buttons & lvg::sc26_usb::btn_left_pad_touch) != 0 &&
+              moved.left_pad_x != hovered.left_pad_x,
+            "sc26 move keeps the contact down and updates its position");
+      touch.event_type = static_cast<std::uint8_t>(touch_event::up);
+      check(apply_sc26_touch(touch, &state), "sc26 touch up accepted");
+      state.reset();
+    }
+    check(sc26_buttons(button_mask::start, state) == lvg::sc26_usb::btn_view,
+          "sc26 start is the 0x40 bit SDL calls START");
+    check(sc26_buttons(button_mask::back, state) == lvg::sc26_usb::btn_menu,
+          "sc26 back is the 0x4000 bit SDL calls BACK");
+    check(sc26_buttons(button_mask::home, state) == lvg::sc26_usb::btn_steam, "sc26 home is Steam");
+    check(sc26_buttons(button_mask::misc, state) == lvg::sc26_usb::btn_qam, "sc26 misc is QAM");
+    check(sc26_buttons(button_mask::paddle_1 | button_mask::paddle_2 |
+                       button_mask::paddle_3 | button_mask::paddle_4, state) ==
+            (lvg::sc26_usb::btn_r4 | lvg::sc26_usb::btn_l4 | lvg::sc26_usb::btn_r5 | lvg::sc26_usb::btn_l5),
+          "sc26 paddles 1..4 are R4, L4, R5, L5");
+
+    // Every output report is fixed-size in the captured HID descriptor. A
+    // truncated report must not enter the feedback queue or mutate rumble state.
+    for (std::uint8_t id = lvg::sc26_usb::haptic_rumble_id;
+         id <= lvg::sc26_usb::haptic_script_id; ++id) {
+      const auto declared = lvg::sc26_usb::report_size(id);
+      std::uint8_t report[32] {};
+      report[0] = id;
+      for (std::size_t length = 0; length < declared; ++length) {
+        feedback_event event {};
+        event.controller_id = 99;
+        check(!apply_sc26_output(report, length, 0, &state, &event),
+              "sc26 truncated haptic report rejected: " + std::to_string(id) + "/" + std::to_string(length));
+        check(event.controller_id == 99, "sc26 rejected haptics leave feedback untouched");
+      }
+      for (const auto length : {declared, sizeof(report)}) {
+        feedback_event event {};
+        check(apply_sc26_output(report, length, 0, &state, &event),
+              "sc26 complete or padded haptic report accepted");
+        steam_haptic_feedback payload {};
+        std::memcpy(&payload, event.payload, sizeof(payload));
+        check(payload.length == declared && payload.report[0] == id,
+              "sc26 forwards the declared report without trailing padding");
+      }
+    }
+
+    // Steam's settings writes on the control channel become steam_settings
+    // events, nine triples each, in order; LOAD_DEFAULT_SETTINGS is one empty
+    // event; other commands and malformed transfers yield none.
+    {
+      feedback_event events[3] {};
+      std::uint8_t cmd[64] {};
+      cmd[0] = lvg::sc26_usb::features_report_id;
+      cmd[1] = lvg::sc26_usb::cmd_set_settings_values;
+      cmd[2] = 12;  // four triples
+      const std::uint8_t ids[] = {48, 7, 8, 49};
+      for (std::size_t i = 0; i < 4; ++i) {
+        cmd[3 + i * 3] = ids[i];
+        cmd[4 + i * 3] = static_cast<std::uint8_t>(i + 1);
+      }
+      check(apply_sc26_settings(cmd, sizeof(cmd), 5, events, 3) == 1,
+            "sc26 four-triple settings write is one event");
+      steam_settings_feedback s {};
+      std::memcpy(&s, events[0].payload, sizeof(s));
+      check(events[0].type == feedback_type::steam_settings && events[0].payload_size == sizeof(s) &&
+              events[0].controller_id == 5 && events[0].header.version == k_protocol_version &&
+              s.command == 0x87 && s.count == 4 && s.triples[0] == 48 && s.triples[1] == 1 &&
+              s.triples[9] == 49 && s.triples[10] == 4 && s.triples[11] == 0,
+            "sc26 settings event carries the triples verbatim");
+      cmd[2] = 60;  // twenty triples: events of 9, 9 and 2
+      for (std::size_t i = 0; i < 20; ++i) {
+        cmd[3 + i * 3] = static_cast<std::uint8_t>(i);
+        cmd[4 + i * 3] = 0xAA;
+        cmd[5 + i * 3] = 0x55;
+      }
+      check(apply_sc26_settings(cmd, sizeof(cmd), 0, events, 3) == 3,
+            "sc26 twenty-triple write splits into three events");
+      std::memcpy(&s, events[1].payload, sizeof(s));
+      check(s.count == 9 && s.triples[0] == 9 && s.triples[24] == 17,
+            "sc26 middle settings chunk continues where the first ended");
+      std::memcpy(&s, events[2].payload, sizeof(s));
+      check(s.count == 2 && s.triples[0] == 18 && s.triples[3] == 19 && s.triples[4] == 0xAA &&
+              s.triples[5] == 0x55 && s.triples[6] == 0,
+            "sc26 last settings chunk carries the tail in order");
+      check(apply_sc26_settings(cmd, sizeof(cmd), 0, events, 2) == 0,
+            "sc26 settings write that does not fit is not forwarded in part");
+      cmd[2] = 61;  // a trailing partial triple is ignored, as the responder ignores it
+      check(apply_sc26_settings(cmd, sizeof(cmd), 0, events, 3) == 3,
+            "sc26 trailing partial triple is ignored");
+      cmd[2] = 0;
+      check(apply_sc26_settings(cmd, sizeof(cmd), 0, events, 3) == 0,
+            "sc26 empty settings write forwards nothing");
+      cmd[1] = lvg::sc26_usb::cmd_load_default_settings;
+      check(apply_sc26_settings(cmd, sizeof(cmd), 0, events, 3) == 1, "sc26 load-defaults is one event");
+      std::memcpy(&s, events[0].payload, sizeof(s));
+      check(s.command == 0x8E && s.count == 0, "sc26 load-defaults event has no triples");
+      cmd[1] = lvg::sc26_usb::cmd_get_settings_values;
+      cmd[2] = 3;
+      check(apply_sc26_settings(cmd, sizeof(cmd), 0, events, 3) == 0, "sc26 settings reads are not forwarded");
+      cmd[1] = lvg::sc26_usb::cmd_set_settings_values;
+      cmd[2] = 12;
+      check(apply_sc26_settings(cmd, 10, 0, events, 3) == 0,
+            "sc26 settings write longer than its transfer is refused");
+      cmd[0] = lvg::sc26_usb::features_report_id_2;
+      check(apply_sc26_settings(cmd, sizeof(cmd), 0, events, 3) == 0,
+            "sc26 settings on feature report 2 are not forwarded");
+      check(apply_sc26_settings(nullptr, sizeof(cmd), 0, events, 3) == 0 &&
+              apply_sc26_settings(cmd, 2, 0, events, 3) == 0,
+            "sc26 settings forwarding refuses a null or headerless transfer");
+    }
+
+    // Grip sense: released until the client sends a grip bit, then explicit. Motion
+    // samples never imply a held grip (a streaming client sends them continuously).
+    {
+      input_state_request in {};
+      in.controller_id = 0;
+      auto held = encode_sc26_input(in, &state);
+      check((held.buttons & (lvg::sc26_usb::btn_left_grip_touch | lvg::sc26_usb::btn_right_grip_touch)) == 0,
+            "sc26 grips are released before any motion");
+      motion_state_request motion {};
+      motion.motion_type = static_cast<std::uint8_t>(motion_kind::gyroscope);
+      check(apply_sc26_motion(motion, &state, 5'000'000), "motion accepted");
+      sc26_tick(&state, 5'500'000);
+      held = encode_sc26_input(in, &state);
+      check((held.buttons & (lvg::sc26_usb::btn_left_grip_touch | lvg::sc26_usb::btn_right_grip_touch)) == 0,
+            "sc26 grips stay released while motion flows");
+      in.buttons = button_mask::right_grip_touch;
+      held = encode_sc26_input(in, &state);
+      check((held.buttons & (lvg::sc26_usb::btn_left_grip_touch | lvg::sc26_usb::btn_right_grip_touch)) ==
+              lvg::sc26_usb::btn_right_grip_touch,
+            "sc26 explicit right grip from the client");
+      in.buttons = 0;
+      sc26_tick(&state, 5'600'000);
+      held = encode_sc26_input(in, &state);
+      check((held.buttons & (lvg::sc26_usb::btn_left_grip_touch | lvg::sc26_usb::btn_right_grip_touch)) == 0,
+            "sc26 grips follow the client once it has sent a grip bit");
+      state.reset();
+    }
+
+    // Stick touch: derived from deflection until the client sends a stick-touch bit,
+    // then explicit for good (a thumb resting on a centred stick reads touched).
+    {
+      input_state_request in {};
+      in.left_x = 20000;
+      auto rep = encode_sc26_input(in, &state);
+      check((rep.buttons & lvg::sc26_usb::btn_left_stick_touch) != 0,
+            "sc26 deflected stick counts as touched before any client touch bit");
+      in.left_x = 0;
+      in.buttons = button_mask::right_stick_touch;
+      rep = encode_sc26_input(in, &state);
+      check((rep.buttons & (lvg::sc26_usb::btn_left_stick_touch | lvg::sc26_usb::btn_right_stick_touch)) ==
+              lvg::sc26_usb::btn_right_stick_touch,
+            "sc26 explicit right stick touch from the client");
+      in.buttons = 0;
+      in.left_x = 20000;
+      rep = encode_sc26_input(in, &state);
+      check((rep.buttons & (lvg::sc26_usb::btn_left_stick_touch | lvg::sc26_usb::btn_right_stick_touch)) == 0,
+            "sc26 deflection no longer implies touch once the client reports it");
+      state.reset();
+      rep = encode_sc26_input(in, &state);
+      check((rep.buttons & lvg::sc26_usb::btn_left_stick_touch) != 0,
+            "sc26 reset restores the deflection heuristic");
+      state.reset();
+    }
+
+    // An explicit SC2026 client must not invent a click or stick touch, even on
+    // its first all-released state with deflected sticks and fully pulled axes.
+    {
+      input_state_request in {};
+      in.buttons = button_mask::sc26_buttons_explicit | button_mask::touchpad |
+                   button_mask::left_pad_click | button_mask::right_trigger_click;
+      in.left_trigger = 255;
+      in.left_x = 20000;
+      state.device.pad_touched[0] = state.device.pad_touched[1] = true;
+      auto rep = encode_sc26_input(in, &state);
+      constexpr auto clicks = lvg::sc26_usb::btn_left_pad_click | lvg::sc26_usb::btn_right_pad_click |
+                              lvg::sc26_usb::btn_left_trigger_click | lvg::sc26_usb::btn_right_trigger_click;
+      check((rep.buttons & clicks) == (lvg::sc26_usb::btn_left_pad_click | lvg::sc26_usb::btn_right_trigger_click),
+            "sc26 explicit clicks ignore other pad touches and analog trigger thresholds");
+      check((rep.buttons & (lvg::sc26_usb::btn_left_stick_touch | lvg::sc26_usb::btn_right_stick_touch)) == 0,
+            "sc26 first all-released touch state disables the deflection heuristic");
+      in.buttons = button_mask::sc26_buttons_explicit;
+      rep = encode_sc26_input(in, &state);
+      check((rep.buttons & clicks) == 0, "sc26 explicit click release is preserved at full trigger pull");
+      rep = encode_sc26_input(in, nullptr);
+      check((rep.buttons & (clicks | lvg::sc26_usb::btn_left_stick_touch)) == 0,
+            "sc26 stateless encoding obeys authoritative releases");
+      // The latch outlives the metadata bit: a later input without it (a host
+      // that stopped sending explicit clicks mid-session) keeps analog synthesis off.
+      in.buttons = 0;
+      in.left_trigger = 255;
+      rep = encode_sc26_input(in, &state);
+      check((rep.buttons & clicks) == 0, "sc26 trigger-click latch survives an input without the metadata bit");
+      state.reset();
+      in.buttons = 0;
+      rep = encode_sc26_input(in, &state);
+      check((rep.buttons & lvg::sc26_usb::btn_left_trigger_click) != 0,
+            "sc26 legacy client retains analog trigger click synthesis");
+      state.reset();
+    }
+
+    // The single protocol click flag lands on the touched pad(s).
+    check(sc26_buttons(button_mask::touchpad, state) == lvg::sc26_usb::btn_right_pad_click,
+          "sc26 pad click with no touch goes to the right pad");
+    state.device.pad_touched[0] = true;
+    check(sc26_buttons(button_mask::touchpad, state) == lvg::sc26_usb::btn_left_pad_click,
+          "sc26 pad click while touching the left pad clicks the left pad");
+    state.device.pad_touched[0] = false;
+    state.device.pad_touched[1] = true;
+    check(sc26_buttons(button_mask::touchpad, state) == lvg::sc26_usb::btn_right_pad_click,
+          "sc26 pad click while touching the right pad clicks the right pad");
+    state.device.pad_touched[0] = true;
+    check(sc26_buttons(button_mask::touchpad, state) ==
+            (lvg::sc26_usb::btn_left_pad_click | lvg::sc26_usb::btn_right_pad_click),
+          "sc26 pad click while touching both pads clicks both");
+  }
+
+  {
     // A profile the driver does not implement has to be refused, not answered
     // with a neighbouring one. This is the guard against a switch fallthrough
     // handing a caller a different vendor's controller under the wrong name.
@@ -909,6 +1227,9 @@ int main() {
       {profile::xbox_360, false, "xbox_360"},
       {profile::xbox_one, true, "xbox_one"},
       {profile::switch_pro, true, "switch_pro"},
+      // Enabled by replacing the provisional descriptor in sc26_usb.h with the
+      // real controller's; until then the profile must be refused.
+      {profile::steam_controller, !lvg::sc26_usb::report_descriptor_is_provisional, "steam_controller"},
     };
 
     profile_mask_t expected_mask = 0;
@@ -924,11 +1245,12 @@ int main() {
         expected_mask |= profile_bit(e.id);
       }
     }
-    constexpr profile_mask_t k_public_profile_mask = 0x7Cu;
+    constexpr profile_mask_t k_public_profile_mask =
+      lvg::sc26_usb::report_descriptor_is_provisional ? 0x7Cu : 0x17Cu;
     check(expected_mask == k_public_profile_mask,
-          "the implemented profiles produce the exact public mask 0x7C");
+          "the implemented profiles produce the exact public mask");
     check(available_profiles() == k_public_profile_mask,
-          "the advertised profile mask is exactly 0x7C");
+          "the advertised profile mask matches the implemented profiles");
     check((available_profiles() & profile_bit(profile::generic_hid)) == 0,
           "generic_hid is absent from the advertised profile mask");
     check((available_profiles() & profile_bit(profile::generic_pid)) == 0,
@@ -946,6 +1268,14 @@ int main() {
     input.right_y = 32767;
     const generic_input_report up = encode_generic_input(input);
     check(up.left_y < 0, "generic profile sends stick-up as negative HID Y");
+    {
+      // The SC2026 click bits and the host-owned explicit bit (26..30) mean nothing here.
+      input_state_request tainted = input;
+      tainted.buttons |= 0x7C000000u;
+      const generic_input_report clean = up;
+      const generic_input_report same = encode_generic_input(tainted);
+      check(std::memcmp(&same, &clean, sizeof(clean)) == 0, "SC2026 click/metadata bits are ignored by the generic encoder");
+    }
     check(up.right_y < 0, "generic profile sends stick-up as negative HID Ry");
 
     input.left_y = -32768;  // Fully down, and the value that cannot be negated.
@@ -995,6 +1325,67 @@ int main() {
 
   {
     switch_state state {};
+    {
+      // The gyro conversion must agree with the calibration the driver serves at
+      // SPI 0x6020 (sensitivity 13371, offset 0): hosts decode 936/13371 deg/s per
+      // count, so 100 deg/s is about 1428 counts, not the 7900 of the old scale.
+      switch_state gyro_state {};
+      motion_state_request gyro {};
+      gyro.motion_type = static_cast<std::uint8_t>(motion_kind::gyroscope);
+      gyro.x_milli = 100000;  // 100 deg/s about SDL x (pitch)
+      std::ignore = apply_switch_motion(gyro, &gyro_state);
+      // SDL reads host x = -device Y, so a positive SDL pitch rate lands on
+      // device gyro[1] negated; the other device axes stay at rest.
+      check(gyro_state.gyro[1] <= -1420 && gyro_state.gyro[1] >= -1436 && gyro_state.gyro[0] == 0 && gyro_state.gyro[2] == 0,
+            "switch gyro: 100 deg/s about SDL x encodes to ~-1428 counts on device Y (936/13371 deg/s per count)");
+      gyro.x_milli = 0;
+      gyro.y_milli = 100000;  // SDL y (yaw) -> device Z
+      std::ignore = apply_switch_motion(gyro, &gyro_state);
+      check(gyro_state.gyro[2] >= 1420 && gyro_state.gyro[2] <= 1436 && gyro_state.gyro[1] == 0,
+            "switch gyro: SDL y maps to device Z");
+      gyro.y_milli = 0;
+      gyro.z_milli = 100000;  // SDL z (roll) -> negated device X
+      std::ignore = apply_switch_motion(gyro, &gyro_state);
+      check(gyro_state.gyro[0] <= -1420 && gyro_state.gyro[0] >= -1436 && gyro_state.gyro[2] == 0,
+            "switch gyro: SDL z maps to negated device X");
+
+      // Distinct values on all three axes, pushed back through SDL's own formula
+      // (host x = -devY, host y = devZ, host z = -devX): any permutation or sign
+      // error in the fold shows up here.
+      gyro.x_milli = 100000;
+      gyro.y_milli = 200000;
+      gyro.z_milli = 300000;
+      std::ignore = apply_switch_motion(gyro, &gyro_state);
+      const int host_x = -gyro_state.gyro[1], host_y = gyro_state.gyro[2], host_z = -gyro_state.gyro[0];
+      check(host_x >= 1420 && host_x <= 1436 && host_y >= 2840 && host_y <= 2872 && host_z >= 4260 && host_z <= 4308,
+            "switch gyro: SDL (100, 200, 300) deg/s round-trips through SDL's axis shuffle");
+
+      // A controller at rest reports gravity on SDL +y (up); the device frame
+      // keeps it on Z, where reset() puts it.
+      switch_state accel_state {};
+      accel_state.reset();
+      motion_state_request accel {};
+      accel.motion_type = static_cast<std::uint8_t>(motion_kind::accelerometer);
+      accel.y_milli = 9807;
+      check(apply_switch_motion(accel, &accel_state) && accel_state.accel[2] == 4096 && accel_state.accel[0] == 0 && accel_state.accel[1] == 0,
+            "switch accel: one gravity on SDL y is 4096 counts on device Z, as at reset");
+      accel.y_milli = 0;
+      accel.x_milli = 9807;
+      check(apply_switch_motion(accel, &accel_state) && accel_state.accel[1] == -4096 && accel_state.accel[2] == 0,
+            "switch accel: SDL x maps to negated device Y");
+      accel.x_milli = 0;
+      accel.z_milli = 9807;
+      check(apply_switch_motion(accel, &accel_state) && accel_state.accel[0] == -4096 && accel_state.accel[1] == 0,
+            "switch accel: SDL z maps to negated device X");
+      accel.z_milli = 0;
+      accel.x_milli = INT32_MIN;  // the negation must not overflow
+      check(apply_switch_motion(accel, &accel_state) && accel_state.accel[1] == 32767,
+            "switch accel: INT32_MIN on SDL x saturates on device Y without wrapping");
+      accel.x_milli = 0;
+      accel.z_milli = INT32_MIN;
+      check(apply_switch_motion(accel, &accel_state) && accel_state.accel[0] == 32767,
+            "switch accel: INT32_MIN on SDL z saturates on device X without wrapping");
+    }
     state.reset();
 
     input_state_request input {};
@@ -1003,6 +1394,43 @@ int main() {
 
     switch_input_report report = encode_switch_input(input, &state);
     check(report.report_id == k_switch_input_report_id, "switch report id");
+    {
+      // The SC2026 click bits and the host-owned explicit bit (26..30) mean nothing here.
+      input_state_request tainted = input;
+      tainted.buttons |= 0x7C000000u;
+      switch_state clean_state = state, tainted_state = state;
+      const switch_input_report clean = encode_switch_input(input, &clean_state);
+      const switch_input_report same = encode_switch_input(tainted, &tainted_state);
+      check(std::memcmp(&same, &clean, sizeof(clean)) == 0, "SC2026 click/metadata bits are ignored by the Switch Pro encoder");
+    }
+
+    {
+      // Battery level is a quartile step 0/2/4/6/8; any charge at all is at
+      // least "critical" (2), never "empty".
+      battery_state_request battery {};
+      battery.header.size = sizeof(battery);
+      battery.header.version = k_protocol_version;
+      battery.flags = static_cast<std::uint8_t>(lvg::battery_state::discharging);
+      const auto level = [&](std::uint8_t percent) {
+        battery.percent = percent;
+        check(apply_switch_battery(battery, &state), "switch battery accepted");
+        return static_cast<int>(encode_switch_input(input, &state).connection_battery >> 4);
+      };
+      check(level(0) == 0, "switch 0 % is empty");
+      check(level(1) == 2, "switch 1 % is critical, not empty");
+      check(level(10) == 2, "switch 10 % is critical, not empty");
+      check(level(25) == 2, "switch 25 % is critical");
+      check(level(26) == 4, "switch 26 % is low");
+      check(level(50) == 4, "switch 50 % is low");
+      check(level(51) == 6, "switch 51 % is medium");
+      check(level(75) == 6, "switch 75 % is medium");
+      check(level(76) == 8, "switch 76 % is full");
+      check(level(100) == 8, "switch 100 % is full");
+      battery.percent = 101;
+      check(apply_switch_battery(battery, &state), "switch unknown percentage accepted");
+      check((encode_switch_input(input, &state).connection_battery >> 4) == 8,
+            "switch unknown percentage keeps the last level");
+    }
 
     const auto axis = [](const std::uint8_t *st) {
       return static_cast<std::uint16_t>(st[0] | ((st[1] & 0x0F) << 8));
@@ -1175,8 +1603,62 @@ int main() {
     strong[5] = 0x40;
     std::memcpy(strong + 6, idle, 4);
     check(decode_switch_rumble(strong, sizeof(strong), &feedback), "strong rumble decodes");
-    check(feedback.low_frequency == 65535, "full amplitude is full scale");
-    check(feedback.high_frequency == 0, "the idle side stays silent");
+    // bytes 0-1 of a side are the high-frequency band: full amplitude there is the
+    // high-frequency motor at full scale, whichever side carries it
+    check(feedback.high_frequency == 65535, "a full high-band amplitude is the high-frequency motor at full scale");
+    check(feedback.low_frequency == 0, "an idle low band stays silent");
+
+    // SDL/Steam shape: both sides identical, the low-frequency motor in the low
+    // band (bytes 2-3) and the high band idle.
+    std::uint8_t sdl_low[10] {};
+    sdl_low[0] = k_switch_rumble_only_id;
+    const int low_index = k_switch_amplitude_max;
+    const std::uint8_t low_side[4] = {
+      0x00, 0x01,
+      static_cast<std::uint8_t>(0x40 | ((low_index & 1) << 7)),
+      static_cast<std::uint8_t>(0x40 + (low_index >> 1)),
+    };
+    std::memcpy(sdl_low + 2, low_side, 4);
+    std::memcpy(sdl_low + 6, low_side, 4);
+    check(decode_switch_rumble(sdl_low, sizeof(sdl_low), &feedback) && feedback.low_frequency == 65535 && feedback.high_frequency == 0,
+          "an SDL-shaped low-band pattern on both sides is the low-frequency motor only");
+    // Half amplitude in the high band on the right side only still reaches the high motor.
+    std::uint8_t half_high[10] {};
+    half_high[0] = k_switch_rumble_only_id;
+    std::memcpy(half_high + 2, idle, 4);
+    std::memcpy(half_high + 6, idle, 4);
+    half_high[7] = static_cast<std::uint8_t>((k_switch_amplitude_max / 2) << 1);
+    // Row 50 of SDL's amplitude table is 22251 (34 %), not half scale: the index is a table row.
+    check(decode_switch_rumble(half_high, sizeof(half_high), &feedback) && feedback.high_frequency == 22251 && feedback.low_frequency == 0,
+          "high-band index 50 on one side decodes to SDL's row-50 amplitude on the high-frequency motor");
+
+    // Encode as SDL does for a few requests and expect the request back within one table step.
+    const auto sdl_pattern = [&](const int high_index, const int low_index, std::uint8_t *const out) {
+      out[0] = 0x00;
+      out[1] = static_cast<std::uint8_t>(high_index << 1);
+      out[2] = static_cast<std::uint8_t>(0x40 | ((low_index & 1) << 7));
+      out[3] = static_cast<std::uint8_t>(0x40 + (low_index >> 1));
+    };
+    struct table_case {
+      int index;
+      std::uint16_t amplitude;
+      const char *name;
+    };
+    const table_case table_cases[] = {
+      {68, 32861, "a 50 % request (row 68) decodes to 32861"},
+      {36, 16431, "a 25 % request (row 36) decodes to 16431"},
+      {15, 7372, "a 10 % request (row 15) decodes to 7372"},
+      {100, 65535, "row 100 is full scale"},
+      {1, 514, "row 1 is the first non-zero step"},
+    };
+    for (const auto &table_entry : table_cases) {
+      std::uint8_t both[10] {};
+      both[0] = k_switch_rumble_only_id;
+      sdl_pattern(table_entry.index, table_entry.index, both + 2);
+      sdl_pattern(table_entry.index, table_entry.index, both + 6);
+      check(decode_switch_rumble(both, sizeof(both), &feedback) && feedback.high_frequency == table_entry.amplitude && feedback.low_frequency == table_entry.amplitude,
+            table_entry.name);
+    }
 
     std::uint8_t foreign_rumble[10] {};
     foreign_rumble[0] = 0x42;
@@ -1300,6 +1782,38 @@ int main() {
   }
 
   {
+    // An aside (a Steam Controller haptic ack) keeps its place among the
+    // ordered reports but does not discard the pending state snapshot the
+    // way a transition does.
+    report_pump pump;
+    pump.reset();
+    const std::uint8_t state[4] = {7, 0, 0, 0};
+    const std::uint8_t press[4] = {8, 0, 0, 0};
+    const std::uint8_t ack[6] = {0x44, 4, 2, 0, 0, 0};
+    const report_buffer *out = nullptr;
+    pump.set_ready();  // VHF grants the first submission too
+    check(pump.enqueue(state, sizeof(state), 0x42, report_kind::continuous) && pump.take() != nullptr,
+          "a state report goes out and consumes readiness");
+    check(pump.enqueue(state, sizeof(state), 0x42, report_kind::continuous), "a snapshot waits");
+    check(pump.enqueue(ack, sizeof(ack), 0x44, report_kind::aside), "an ack is queued");
+    pump.set_ready();
+    out = pump.take();
+    check(out != nullptr && out->report_id == 0x44 && out->length == 6, "the ack goes out first");
+    pump.set_ready();
+    out = pump.take();
+    check(out != nullptr && out->report_id == 0x42 && out->data[0] == 7, "the snapshot survived the aside");
+    pump.set_ready();
+    check(pump.take() == nullptr, "nothing else waits");
+    check(pump.enqueue(state, sizeof(state), 0x42, report_kind::continuous), "another snapshot waits");
+    check(pump.enqueue(press, sizeof(press), 0x42, report_kind::transition), "a press is queued");
+    pump.set_ready();
+    out = pump.take();
+    check(out != nullptr && out->data[0] == 8, "the press goes out");
+    pump.set_ready();
+    check(pump.take() == nullptr, "whereas a transition discards the snapshot");
+  }
+
+  {
     // Transitions must survive: dropping one loses a press or a release.
     report_pump pump;
     pump.reset();
@@ -1397,6 +1911,83 @@ int main() {
   }
 
   {
+    // Asides share the ordered ring with transitions but are regenerated (the
+    // next stop pulse acks again, the next tick reports the battery), so a
+    // full ring drops a new aside rather than a queued button edge, and an
+    // aside is never a dropped transition however it leaves the ring.
+    const std::uint8_t ack[6] = {0x44, 4, 2, 0, 0, 0};
+    std::uint8_t edge[2] = {0xA1, 0};
+    report_buffer out {};
+
+    // 16 transitions, then an aside: the aside is dropped, nothing is counted.
+    report_pump pump;
+    pump.reset();
+    for (int i = 0; i < k_transition_capacity; ++i) {
+      edge[1] = static_cast<std::uint8_t>(i);
+      check(pump.enqueue(edge, sizeof(edge), 0x42, report_kind::transition), "edge queued");
+    }
+    check(!pump.enqueue(ack, sizeof(ack), 0x44, report_kind::aside),
+          "an aside finding the ring full is refused");
+    check(pump.transitions_waiting() == k_transition_capacity && pump.dropped_transitions() == 0,
+          "the refused aside evicted nothing and counted nothing, got " +
+            std::to_string(pump.dropped_transitions()));
+    bool only_edges = true;
+    for (int i = 0; i < k_transition_capacity; ++i) {
+      pump.set_ready();
+      only_edges = only_edges && take_report(pump, out) && out.report_id == 0x42 && out.data[1] == i;
+    }
+    pump.set_ready();
+    check(only_edges && !take_report(pump, out), "every edge goes out in order and the aside is gone");
+
+    // 16 asides, then a transition: the oldest aside is evicted, nothing is counted.
+    pump.reset();
+    for (int i = 0; i < k_transition_capacity; ++i) {
+      check(pump.enqueue(ack, sizeof(ack), 0x44, report_kind::aside), "ack queued");
+    }
+    check(!pump.enqueue(edge, sizeof(edge), 0x42, report_kind::transition),
+          "a transition finding the ring full of asides reports an eviction");
+    check(pump.transitions_waiting() == k_transition_capacity && pump.dropped_transitions() == 0,
+          "an evicted aside is not a dropped transition, got " +
+            std::to_string(pump.dropped_transitions()));
+    std::uint8_t last_id = 0;
+    int acks = 0;
+    for (int i = 0; i < k_transition_capacity; ++i) {
+      pump.set_ready();
+      if (take_report(pump, out)) {
+        last_id = out.report_id;
+        acks += out.report_id == 0x44;
+      }
+    }
+    check(acks == k_transition_capacity - 1 && last_id == 0x42,
+          "15 asides go out and the transition follows them");
+
+    // An aside at the head, 15 transitions behind it, then a transition: the
+    // aside is the victim and the counter stays at zero.
+    pump.reset();
+    check(pump.enqueue(ack, sizeof(ack), 0x44, report_kind::aside), "oldest ack queued");
+    for (int i = 0; i < k_transition_capacity - 1; ++i) {
+      check(pump.enqueue(edge, sizeof(edge), 0x42, report_kind::transition), "edge queued behind it");
+    }
+    check(!pump.enqueue(edge, sizeof(edge), 0x42, report_kind::transition) &&
+            pump.dropped_transitions() == 0,
+          "the head aside is evicted and not counted");
+    pump.set_ready();
+    check(take_report(pump, out) && out.report_id == 0x42, "a transition is now at the head");
+
+    // 16 transitions, then a transition: that is the one dropped transition.
+    pump.reset();
+    for (int i = 0; i < k_transition_capacity; ++i) {
+      check(pump.enqueue(edge, sizeof(edge), 0x42, report_kind::transition), "edge queued");
+    }
+    check(!pump.enqueue(edge, sizeof(edge), 0x42, report_kind::transition) &&
+            pump.dropped_transitions() == 1,
+          "a transition evicting a transition counts once, got " +
+            std::to_string(pump.dropped_transitions()));
+    pump.reset();
+    check(pump.dropped_transitions() == 0 && pump.transitions_waiting() == 0, "reset clears the ring and the count");
+  }
+
+  {
     // Classification drives all of the above, so it has to agree with what a
     // player would call a discrete change.
     report_pump pump;
@@ -1412,6 +2003,38 @@ int main() {
     check(pump.classify(0, 40, 0) == report_kind::transition, "a trigger leaving rest is discrete");
     check(pump.classify(0, 200, 0) == report_kind::continuous, "further travel is continuous");
     check(pump.classify(0, 0, 0) == report_kind::transition, "a trigger returning to rest is discrete");
+    // The driver classifies SC26 reports on the encoded button word with the
+    // deflection-derived stick touch masked out (classify_buttons, L42-01), so the
+    // synthesised full-pull click (>= 0xF0, the value the host ends a batch at)
+    // is a transition while travel below it stays continuous, and a stick resting
+    // on the touch threshold cannot turn every snapshot into a transition.
+    sc26_state clicks {};
+    clicks.reset();
+    input_state_request pull {};
+    pull.header.size = sizeof(pull);
+    pull.header.version = k_protocol_version;
+    const auto sc26_classify = [&](const std::uint8_t lt) {
+      pull.left_trigger = lt;
+      const auto word = encode_sc26_input(pull, &clicks).buttons;
+      // As driver.cpp does: deflection-derived stick touch is not a classification edge.
+      return pump.classify(sc26_usb::classify_buttons(clicks.device, word), lt, pull.right_trigger);
+    };
+    check(sc26_classify(0x10) == report_kind::transition, "sc26 trigger leaving rest is discrete");
+    check(sc26_classify(0xEF) == report_kind::continuous, "sc26 travel to 0xEF is continuous");
+    check(sc26_classify(0xF0) == report_kind::transition, "sc26 full pull at 0xF0 is a transition");
+    check(sc26_classify(0xFF) == report_kind::continuous, "sc26 travel past the click is continuous");
+    check(sc26_classify(0xEF) == report_kind::transition, "sc26 click release at 0xEF is a transition");
+    pull.left_x = static_cast<std::int16_t>(sc26_usb::stick_touch_deflection + 1);
+    check(sc26_classify(0xEF) == report_kind::continuous, "sc26 deflection crossing the touch threshold is continuous");
+    pull.left_x = 0;
+    check(sc26_classify(0xEF) == report_kind::continuous, "sc26 deflection leaving the threshold is continuous");
+    pull.buttons = button_mask::left_stick_touch;
+    check(sc26_classify(0xEF) == report_kind::transition, "sc26 client stick touch is a transition");
+    pull.buttons = 0;
+    check(sc26_classify(0xEF) == report_kind::transition, "sc26 client stick-touch release is a transition");
+    pull.left_x = static_cast<std::int16_t>(sc26_usb::stick_touch_deflection + 1);
+    check(sc26_classify(0xEF) == report_kind::continuous, "sc26 deflection stays silent once the client reported touch");
+    pull.left_x = 0;
   }
 
   {
@@ -1607,6 +2230,13 @@ int main() {
     const xbox_one_input_report short_report = encode_xbox_one_input(sample);
     check(std::memcmp(&full, &short_report, sizeof(short_report)) == 0,
           "the Xbox One report is the Series report without its last byte");
+    {
+      // The SC2026 click bits and the host-owned explicit bit (26..30) mean nothing here.
+      input_state_request tainted = sample;
+      tainted.buttons |= 0x7C000000u;
+      const xbox_one_input_report same = encode_xbox_one_input(tainted);
+      check(std::memcmp(&same, &short_report, sizeof(short_report)) == 0, "SC2026 click/metadata bits are ignored by the Xbox One encoder");
+    }
 
     // Share is the one thing an Xbox One pad cannot report. Asking for it must
     // not change anything else.
