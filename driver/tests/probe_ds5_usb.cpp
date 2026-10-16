@@ -124,6 +124,7 @@ int main() {
     check(HidD_GetFeature(handle, firmware.data(), static_cast<ULONG>(firmware.size())) &&
           (firmware[28] | (firmware[29] << 8) | (firmware[30] << 16) | (firmware[31] << 24)) >= 0x1003e, "native USB DualSense firmware gate");
     check((firmware[44] | (firmware[45] << 8)) >= 0x0390, "libScePad DualSense update version gate");
+    check((firmware[44] | (firmware[45] << 8)) >= 0x0630, "Steam DualSense update version gate");
     std::array<unsigned char, 48> command {}; command[0] = 8; command[1] = 2;
     check(HidD_SetFeature(handle, command.data(), static_cast<ULONG>(command.size())), "native USB sensor initialization");
     std::array<unsigned char, 41> calibration {}; calibration[0] = 5;

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 // Standalone cross-platform regression test for native DualSense host initialization.
 #include "libvirtualgamepad/ds5_usb.h"
+#include "ds5_gadget_firmware.h"
 #include <algorithm>
 #include <array>
 #include <cstdio>
@@ -76,6 +77,11 @@ int main() {
   get_feature(0x20, buffer.data(), buffer.size(), state);
   check((buffer[28] | (buffer[29] << 8) | (buffer[30] << 16) | (buffer[31] << 24)) >= 0x1003e, "native USB firmware revision accepted");
   check((buffer[44] | (buffer[45] << 8)) >= 0x0390, "libScePad DualSense update version accepted");
+  check((buffer[44] | (buffer[45] << 8)) >= 0x0630,
+        "Steam's reviewed DualSense update-version threshold is satisfied");
+  check(sizeof(kernel_fixture::ds5_firmware) == firmware.size() &&
+        std::equal(firmware.begin(), firmware.end(), kernel_fixture::ds5_firmware),
+        "Linux composite and Windows VHF/USB-IP firmware reports match");
   check(buffer[1] == 'J' && buffer[12] == '1' && buffer[20] != 0,
         "libScePad DualSense firmware has build date and nonzero FwType");
   check((buffer[30] | (buffer[31] << 8)) >= 0x0100,
