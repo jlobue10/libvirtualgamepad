@@ -133,6 +133,7 @@ static lvg::feedback_event haptic_event(bool stop) {
 int main(){ int failures=0;
  auto check=[&](bool ok,const char* text){ printf("%s %s\n",ok?"PASS":"FAIL",text); failures+=!ok; };
  static device_context c {}; auto& s=c.controllers[0]; s.parent=&c; s.owner=(void*)1; s.state=slot_state::active;
+ s.vhf=(void*)1; // a published handle: the production admission gate serves callbacks only with one
  s.selected_profile=lvg::profile::steam_controller; s.controller_id=0; c.controllers[1].controller_id=1;
  lvg::controller_id_request q {}; q.controller_id=0; lvg::query_info_response info {};
  auto query=[&](std::uint32_t id, WDFFILEOBJECT owner){ q.controller_id=id; info={}; return query_controller_info(&c,owner,q,&info); };
@@ -185,6 +186,7 @@ int main(){ int failures=0;
 '''
 
 signatures = [
+ '[[nodiscard]] bool accepts_vhf_callbacks(const controller_slot &slot) noexcept',
  '[[nodiscard]] bool is_owned_by(\n  const controller_slot &slot,\n  const WDFFILEOBJECT owner) noexcept',
  'void reset_slot(controller_slot *slot) noexcept',
  'void fill_query_info(lvg::query_info_response *const output) noexcept',

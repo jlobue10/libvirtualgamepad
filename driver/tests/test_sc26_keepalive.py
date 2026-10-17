@@ -79,14 +79,16 @@ namespace driver {
    if(aside_count){in_flight_=asides[0];for(int i=1;i<aside_count;++i)asides[i-1]=asides[i];--aside_count;ready_=false;return &in_flight_;}
    if(have_latest){in_flight_=latest;have_latest=false;ready_=false;return &in_flight_;}return nullptr;}};
 }}
-enum class slot_state{active,free};
+enum class slot_state{empty,starting,active,stopping};
 struct device_context;
 struct controller_slot {device_context* parent=nullptr; slot_state state=slot_state::active; int selected_profile=1;
  bool have_last_input=true; VHFHANDLE vhf=(void*)1; int last_input=42; std::uint8_t sc26_wire_sequence=0;
  lvg::driver::fake_pump pump; lvg::driver::sc26_state sc26; int submits_in_flight=0; HID_XFER_PACKET read_transfer{};
  lvg::driver::ds4_state ds4; lvg::driver::ds5_state ds5; lvg::driver::switch_state switch_pro;};
 struct device_context {controller_slot controllers[2]; bool stopping=false,sc26_timer_running=true,sc26_timer_parked=false;
- HANDLE sc26_keepalive_timer=(void*)1,sc26_keepalive_thread=nullptr,sc26_keepalive_stop=(void*)1;};
+ HANDLE sc26_keepalive_timer=(void*)1,sc26_keepalive_thread=nullptr,sc26_keepalive_stop=(void*)1;
+ // The production admission gate (accepts_vhf_callbacks) reads the device through the slot.
+ device_context(){for(auto& s:controllers)s.parent=this;}};
 // PRODUCTION_TIMING_CONSTANTS
 uint64_t clock_us=0; long long timer_due=0; bool locked=false,inspect_release=false,protected_release=false;
 int arms=0; device_context *joining=nullptr;
@@ -198,7 +200,18 @@ int main(){int failures=0;
   submitted=0;evt_vhf_ready_for_next_report(&s);
   check(submitted==0 && s.pump.ready(),"readiness with nothing queued stays granted for the next enqueue");
   evt_vhf_ready_for_next_report(nullptr);s.parent=nullptr;evt_vhf_ready_for_next_report(&s);
-  check(submitted==0,"a null client context or an orphaned slot is ignored");s.pump.ready_=true;}
+  check(submitted==0,"a null client context or an orphaned slot is ignored");s.parent=&c;s.pump.ready_=true;
+  // Admission is the production gate: a Starting slot with a published handle is served
+  // (VHF asks for reports from inside VhfStart), a draining or detached one is not.
+  int report2=44;lvg::driver::report_buffer next{};bool have=false;VHFHANDLE vhf=nullptr;
+  s.state=slot_state::starting;lock_context(&c);auto st=pump_report_locked(&c,s,&report2,sizeof(report2),lvg::driver::k_sc26_input_report_id,lvg::driver::report_kind::continuous,&next,&have,&vhf);unlock_context(&c);
+  check(NT_SUCCESS(st) && have && s.submits_in_flight==1,"a starting slot with a published handle already serves the pump");
+  std::ignore=submit_taken(&c,s,next,vhf);s.pump.set_ready();
+  s.state=slot_state::stopping;lock_context(&c);st=pump_report_locked(&c,s,&report2,sizeof(report2),lvg::driver::k_sc26_input_report_id,lvg::driver::report_kind::continuous,&next,&have,&vhf);unlock_context(&c);
+  check(st==STATUS_DEVICE_NOT_READY && !have && s.submits_in_flight==0,"a draining slot refuses the pump");
+  s.state=slot_state::active;auto handle=s.vhf;s.vhf=nullptr;submitted=0;evt_vhf_ready_for_next_report(&s);
+  check(submitted==0 && s.pump.ready(),"readiness on a detached slot neither takes nor touches readiness");
+  s.vhf=handle;s.pump.ready_=true;}
  c.sc26_keepalive_thread=(void*)1;joining=&c;start_sc26_keepalive(&c);
  check(c.sc26_timer_running,"exiting worker cannot clear replacement worker's running flag");
  {// D14-01: with a running worker a motion sample is folded and carried by the next tick;
@@ -233,6 +246,7 @@ int main(){int failures=0;
  return failures!=0;}
 '''
 signatures = [
+ '[[nodiscard]] bool accepts_vhf_callbacks(const controller_slot &slot) noexcept',
  'void stamp_sc26_sequence(controller_slot &slot, lvg::driver::report_buffer &report) noexcept',
  'void mark_sc26_report_taken(\n  device_context *const context,\n  controller_slot &slot,\n'
  '  lvg::driver::report_buffer &report,\n  const bool rearm_keepalive) noexcept',

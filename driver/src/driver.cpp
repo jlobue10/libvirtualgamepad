@@ -316,6 +316,14 @@ void unlock_lifetime(device_context *const context) noexcept {
   return slot.owner == owner;
 }
 
+// Caller holds state_lock. VHF can enter any registered report callback from
+// VhfStart itself. A published handle identifies initialized callback storage;
+// Starting remains private to the creator and is not client-visible Active.
+[[nodiscard]] bool accepts_vhf_callbacks(const controller_slot &slot) noexcept {
+  return !slot.parent->stopping && slot.vhf != nullptr &&
+         (slot.state == slot_state::starting || slot.state == slot_state::active);
+}
+
 void reset_slot(controller_slot *slot) noexcept {
   auto *const parent = slot->parent;
   const auto controller_id = slot->controller_id;
@@ -325,6 +333,8 @@ void reset_slot(controller_slot *slot) noexcept {
   slot->state = slot_state::empty;
 }
 
+// Use only before a VHF handle exists or after synchronous deletion returns.
+// The slot owns report buffers that callbacks/retained reads may still use.
 void release_starting_slot(
   device_context *const context,
   controller_slot *const slot,
@@ -527,20 +537,27 @@ void destroy_owned_controller(
     return status;
   }
 
+  // Publish the handle before starting, with all callback state initialized.
+  // The lifetime gate pins the target and prevents another creator/teardown;
+  // callbacks take only state_lock, which must not span a VHF call.
+  lock_context(context);
+  slot.vhf = vhf;
+  unlock_context(context);
+
   status = VhfStart(vhf);
-  if (!NT_SUCCESS(status)) {
-    release_starting_slot(context, &slot, owner);
-    VhfDelete(vhf, TRUE);
-    unlock_lifetime(context);
-    return status;
-  }
 
   bool adopted = false;
   lock_context(context);
-  if (!context->stopping && slot.owner == owner && slot.state == slot_state::starting) {
-    slot.vhf = vhf;
+  if (NT_SUCCESS(status) && !context->stopping &&
+      slot.owner == owner && slot.state == slot_state::starting) {
     slot.state = slot_state::active;
     adopted = true;
+  } else {
+    // Stop admitting reports before deletion. Keep profile, packet and pump
+    // storage intact until VhfDelete has drained callbacks and retained reads.
+    slot.state = slot_state::stopping;
+    slot.feedback_pending = false;
+    slot.vhf = nullptr;
   }
   unlock_context(context);
 
@@ -548,7 +565,7 @@ void destroy_owned_controller(
     VhfDelete(vhf, TRUE);
     release_starting_slot(context, &slot, owner);
     unlock_lifetime(context);
-    return STATUS_CANCELLED;
+    return NT_SUCCESS(status) ? STATUS_CANCELLED : status;
   }
 
   unlock_lifetime(context);
@@ -635,6 +652,9 @@ void wait_for_submits(device_context *const context, controller_slot &slot) noex
 // behind a newer input that was encoded in between. A Steam Controller state
 // report that leaves also marks the clock the keep-alive goes by and re-arms
 // it, unless the caller is the keep-alive tick, which arms once at its end.
+// Admission is accepts_vhf_callbacks: VHF may ask for reports from inside
+// VhfStart, so a Starting slot with a published handle is served like an
+// Active one; the IOCTL and keep-alive callers gate on Active themselves.
 [[nodiscard]] NTSTATUS pump_report_locked(
   device_context *const context,
   controller_slot &slot,
@@ -648,7 +668,7 @@ void wait_for_submits(device_context *const context, controller_slot &slot) noex
   const bool rearm_keepalive = true) noexcept {
   *have_next = false;
   *vhf = nullptr;
-  if (context->stopping || slot.state != slot_state::active || slot.vhf == nullptr) {
+  if (!accepts_vhf_callbacks(slot)) {
     return STATUS_DEVICE_NOT_READY;
   }
   if (data != nullptr) {
@@ -712,6 +732,9 @@ NTSTATUS pump_report(
   VHFHANDLE vhf = nullptr;
 
   lock_context(context);
+  // pump_report_locked refuses with STATUS_DEVICE_NOT_READY unless the slot
+  // accepts VHF callbacks (accepts_vhf_callbacks): a Starting slot whose handle
+  // is published already services reports, a draining one no longer does.
   const NTSTATUS queued = pump_report_locked(context, slot, data, length, report_id, kind, &next, &have_next, &vhf);
   unlock_context(context);
 
@@ -735,8 +758,8 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
 
   auto *const context = slot->parent;
   lock_context(context);
-  slot->pump.set_ready();
-  if (!context->stopping && slot->state == slot_state::active && slot->vhf != nullptr) {
+  if (accepts_vhf_callbacks(*slot)) {
+    slot->pump.set_ready();
     lvg::driver::report_buffer *const taken = slot->pump.take();
     have_next = taken != nullptr;
     if (have_next) {
@@ -1517,7 +1540,7 @@ void evt_vhf_write_report(
     std::uint8_t ack[6] {};
     std::size_t ack_size = 0;
     lock_context(context);
-    if (context->stopping || slot->state != slot_state::active) {
+    if (!accepts_vhf_callbacks(*slot)) {
       status = STATUS_DEVICE_NOT_READY;
     } else {
       lvg::feedback_event event {};
@@ -1571,7 +1594,7 @@ void evt_vhf_write_report(
     bool queued_reply = false;
 
     lock_context(context);
-    if (context->stopping || slot->state != slot_state::active) {
+    if (!accepts_vhf_callbacks(*slot)) {
       status = STATUS_DEVICE_NOT_READY;
     } else {
       // Rumble rides along with the subcommand reports as well as arriving on
@@ -1653,7 +1676,7 @@ void evt_vhf_write_report(
       }
     }
 
-    if (context->stopping || slot->state != slot_state::active) {
+    if (!accepts_vhf_callbacks(*slot)) {
       status = STATUS_DEVICE_NOT_READY;
     } else if (!decoded) {
       status = STATUS_INVALID_PARAMETER;
@@ -1675,7 +1698,7 @@ void evt_vhf_write_report(
       is_xbox(slot->selected_profile)) {
     auto *const context = slot->parent;
     lock_context(context);
-    if (!context->stopping && slot->state == slot_state::active) {
+    if (accepts_vhf_callbacks(*slot)) {
       status = apply_xbox_output(slot, transfer);
     } else {
       status = STATUS_DEVICE_NOT_READY;
@@ -1692,7 +1715,7 @@ void evt_vhf_write_report(
       slot->force_feedback && transfer->reportId != k_generic_output_report_id) {
     auto *const context = slot->parent;
     lock_context(context);
-    if (!context->stopping && slot->state == slot_state::active) {
+    if (accepts_vhf_callbacks(*slot)) {
       status = apply_pid_output(slot, transfer);
       if (NT_SUCCESS(status)) {
         publish_pid_rumble(slot);
@@ -1726,7 +1749,7 @@ void evt_vhf_write_report(
     } else {
       auto *const context = slot->parent;
       lock_context(context);
-      if (!context->stopping && slot->state == slot_state::active &&
+      if (accepts_vhf_callbacks(*slot) &&
           (slot->selected_profile == lvg::profile::generic_hid ||
            slot->selected_profile == lvg::profile::generic_pid)) {
         slot->feedback = encode_generic_feedback(slot->controller_id, output);
@@ -1760,7 +1783,7 @@ void evt_vhf_get_feature(
       is_steam_controller(slot->selected_profile) && transfer->reportBuffer != nullptr) {
     auto *const context = slot->parent;
     lock_context(context);
-    if (context->stopping || slot->state != slot_state::active) {
+    if (!accepts_vhf_callbacks(*slot)) {
       status = STATUS_DEVICE_NOT_READY;
     } else {
       const std::size_t written = fill_sc26_feature(
@@ -1781,7 +1804,7 @@ void evt_vhf_get_feature(
       is_playstation(slot->selected_profile) && transfer->reportBuffer != nullptr) {
     auto *const context = slot->parent;
     lock_context(context);
-    if (context->stopping || slot->state != slot_state::active) {
+    if (!accepts_vhf_callbacks(*slot)) {
       status = STATUS_DEVICE_NOT_READY;
     } else {
       const std::size_t written =
@@ -1802,7 +1825,7 @@ void evt_vhf_get_feature(
       slot->force_feedback && transfer->reportBuffer != nullptr) {
     auto *const context = slot->parent;
     lock_context(context);
-    if (context->stopping || slot->state != slot_state::active) {
+    if (!accepts_vhf_callbacks(*slot)) {
       status = STATUS_DEVICE_NOT_READY;
     } else {
       switch (transfer->reportId) {
@@ -1863,7 +1886,7 @@ void evt_vhf_set_feature(
       is_steam_controller(slot->selected_profile)) {
     auto *const context = slot->parent;
     lock_context(context);
-    if (context->stopping || slot->state != slot_state::active) {
+    if (!accepts_vhf_callbacks(*slot)) {
       status = STATUS_DEVICE_NOT_READY;
     } else {
       const bool accepted = set_sc26_feature(transfer->reportId, transfer->reportBuffer,
@@ -1890,7 +1913,7 @@ void evt_vhf_set_feature(
       is_playstation(slot->selected_profile)) {
     auto *const context = slot->parent;
     lock_context(context);
-    if (context->stopping || slot->state != slot_state::active) {
+    if (!accepts_vhf_callbacks(*slot)) {
       status = STATUS_DEVICE_NOT_READY;
     } else {
       const bool accepted = slot->selected_profile == lvg::profile::dualshock_4
@@ -1913,7 +1936,7 @@ void evt_vhf_set_feature(
     } else {
       auto *const context = slot->parent;
       lock_context(context);
-      if (context->stopping || slot->state != slot_state::active) {
+      if (!accepts_vhf_callbacks(*slot)) {
         status = STATUS_DEVICE_NOT_READY;
       } else {
         // A full pool is a normal answer, not a transport failure: the host
@@ -2174,7 +2197,7 @@ void evt_vhf_get_input_report(
       transfer->reportBuffer != nullptr) {
     auto *const context = slot->parent;
     lock_context(context);
-    if (context->stopping || slot->state != slot_state::active) {
+    if (!accepts_vhf_callbacks(*slot)) {
       status = STATUS_DEVICE_NOT_READY;
     } else {
       // Buffer big enough for the largest report any profile produces.
@@ -2509,6 +2532,10 @@ void stop_owned_controllers(device_context *const context, const bool forget_tar
     if (handles[index] != nullptr) {
       wait_for_submits(context, context->controllers[index]);
       VhfDelete(handles[index], TRUE);
+      // The slot has drained: release it so a restarted device can reuse it.
+      lock_context(context);
+      reset_slot(&context->controllers[index]);
+      unlock_context(context);
     }
   }
 
