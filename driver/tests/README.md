@@ -11,7 +11,8 @@ ctest --test-dir build/contract-tests --output-on-failure --parallel 2
 `vhf_lifecycle_contract` includes the complete production `driver.cpp` and links
 the actual profile, report pump, and PID implementations. Only this target uses
 the WDF/VHF boundary models in `support/vhf` on Windows. On other platforms, the
-descriptor and identity tests also use its minimal Windows ABI declarations.
+descriptor, PlayStation touch, Steam haptic queue, and identity tests also use its
+minimal Windows ABI declarations.
 The real driver and installed-device probes never use those headers.
 
 The lifecycle contract checks:
