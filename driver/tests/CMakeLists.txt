@@ -79,3 +79,24 @@ add_executable(test_steam_haptic_queue test_steam_haptic_queue.cpp)
 target_compile_features(test_steam_haptic_queue PRIVATE cxx_std_20)
 target_include_directories(test_steam_haptic_queue PRIVATE ../../include)
 add_test(NAME steam_haptic_queue COMMAND test_steam_haptic_queue)
+
+# Compile the shipping lifecycle and callback bodies against deterministic,
+# reentrant WDF/VHF boundaries. No driver is loaded by this contract test.
+find_package(Threads REQUIRED)
+add_executable(test_vhf_lifecycle test_vhf_lifecycle.cpp
+    ../src/pid_ff.cpp ../src/profile.cpp ../src/report_pump.cpp
+    ../src/dualshock4.cpp ../src/dualsense.cpp ../src/switch_pro.cpp
+    ../src/steam_controller.cpp
+    ../src/xbox_one.cpp ../src/xbox_series.cpp)
+target_compile_features(test_vhf_lifecycle PRIVATE cxx_std_20)
+target_include_directories(test_vhf_lifecycle BEFORE PRIVATE support/vhf ../src ../../include)
+target_link_libraries(test_vhf_lifecycle PRIVATE Threads::Threads)
+add_test(NAME vhf_lifecycle_contract COMMAND test_vhf_lifecycle)
+set_tests_properties(vhf_lifecycle_contract PROPERTIES TIMEOUT 30)
+
+if(NOT WIN32)
+    # These protocol-only tests need the fixed Windows ABI declarations, never
+    # an installed Windows SDK. Keep the stubs out of native driver/probe builds.
+    target_include_directories(test_pid_descriptor PRIVATE support/vhf)
+    target_include_directories(test_profile_identity PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/support/vhf")
+endif()
