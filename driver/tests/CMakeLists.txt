@@ -97,6 +97,8 @@ set_tests_properties(vhf_lifecycle_contract PROPERTIES TIMEOUT 30)
 if(NOT WIN32)
     # These protocol-only tests need the fixed Windows ABI declarations, never
     # an installed Windows SDK. Keep the stubs out of native driver/probe builds.
+    target_include_directories(test_playstation_touch PRIVATE support/vhf)
+    target_include_directories(test_steam_haptic_queue PRIVATE support/vhf)
     target_include_directories(test_pid_descriptor PRIVATE support/vhf)
     target_include_directories(test_profile_identity PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/support/vhf")
 endif()
